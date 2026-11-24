@@ -6,18 +6,29 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 if (process.env.PI_DELEGATED_PARENT_RUNTIME_TEST !== "1") {
-  console.log("SKIP delegated parent runtime test (set PI_DELEGATED_PARENT_RUNTIME_TEST=1 and PI_TUI_TEST_PI to an immutable raw Pi executable)");
+  console.log(
+    "SKIP delegated parent runtime test (set PI_DELEGATED_PARENT_RUNTIME_TEST=1 and PI_TUI_TEST_PI to an immutable raw Pi executable)",
+  );
   process.exit(0);
 }
 const raw = process.env.PI_TUI_TEST_PI;
-assert.ok(raw && /^\/nix\/store\/[^/]+\/.+/.test(raw), "PI_TUI_TEST_PI must explicitly name an immutable raw Pi executable under /nix/store");
+assert.ok(
+  raw && /^\/nix\/store\/[^/]+\/.+/.test(raw),
+  "PI_TUI_TEST_PI must explicitly name an immutable raw Pi executable under /nix/store",
+);
 const root = await mkdtemp(join(tmpdir(), "pi-busy-parent-"));
 const source = join(dirname(fileURLToPath(import.meta.url)), "index.ts");
-let child, output = "", errors = "", passed = false;
+let child,
+  output = "",
+  errors = "",
+  passed = false;
 try {
   for (const path of ["home", "agent", "sessions", "state", "repo"]) await mkdir(join(root, path));
-  const fixture = join(root, "fixture.ts"), result = join(root, "evidence.json");
-  await writeFile(fixture, `
+  const fixture = join(root, "fixture.ts"),
+    result = join(root, "evidence.json");
+  await writeFile(
+    fixture,
+    `
 import workflows from ${JSON.stringify(source)};
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -67,38 +78,117 @@ export default function(pi) {
     }
   });
 }
-`);
-  const env = {PATH:process.env.PATH, LANG:"C.UTF-8", HOME:join(root,"home"), TMPDIR:root,
-    PI_CODING_AGENT_DIR:join(root,"agent"), PI_CODING_AGENT_SESSION_DIR:join(root,"sessions"),
-    PI_DELEGATED_GOALS_STATE_ROOT:join(root,"state"), XDG_STATE_HOME:join(root,"state")};
-  child = spawn(raw, ["--mode","rpc","--no-extensions","--extension",fixture,"--provider","harness-test","--model","gpt-6.1-sol","--session",join(root,"sessions","parent.jsonl")], {cwd:join(root,"repo"),env,stdio:["pipe","pipe","pipe"]});
-  child.stderr.on("data", data => { errors += data; });
-  await new Promise((resolve,reject) => {
-    const timer = setTimeout(() => reject(new Error("Pi timed out\n"+output+errors)), 30000);
-    child.on("error", error => {clearTimeout(timer);reject(error);});
-    child.on("exit", code => {clearTimeout(timer);reject(new Error("Pi exited "+code+"\n"+output+errors));});
-    let buffer = "";
-    child.stdout.on("data", data => {
-      output += data; buffer += data;
-      while(buffer.includes("\n")) { const i=buffer.indexOf("\n"), line=buffer.slice(0,i);buffer=buffer.slice(i+1);
-        try { if(JSON.parse(line).type === "agent_settled") { clearTimeout(timer);resolve(); } } catch {} }
-    });
-    child.stdin.write(JSON.stringify({id:"offline-parent",type:"prompt",message:"Run the local deterministic busy-parent fixture."})+"\n");
+`,
+  );
+  const env = {
+    PATH: process.env.PATH,
+    LANG: "C.UTF-8",
+    HOME: join(root, "home"),
+    TMPDIR: root,
+    PI_CODING_AGENT_DIR: join(root, "agent"),
+    PI_CODING_AGENT_SESSION_DIR: join(root, "sessions"),
+    PI_DELEGATED_GOALS_STATE_ROOT: join(root, "state"),
+    XDG_STATE_HOME: join(root, "state"),
+  };
+  child = spawn(
+    raw,
+    [
+      "--mode",
+      "rpc",
+      "--no-extensions",
+      "--extension",
+      fixture,
+      "--provider",
+      "harness-test",
+      "--model",
+      "gpt-6.1-sol",
+      "--session",
+      join(root, "sessions", "parent.jsonl"),
+    ],
+    { cwd: join(root, "repo"), env, stdio: ["pipe", "pipe", "pipe"] },
+  );
+  child.stderr.on("data", (data) => {
+    errors += data;
   });
-  const evidence = JSON.parse(await readFile(result,"utf8"));
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Pi timed out\n" + output + errors)), 30000);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      reject(new Error("Pi exited " + code + "\n" + output + errors));
+    });
+    let buffer = "";
+    child.stdout.on("data", (data) => {
+      output += data;
+      buffer += data;
+      while (buffer.includes("\n")) {
+        const i = buffer.indexOf("\n"),
+          line = buffer.slice(0, i);
+        buffer = buffer.slice(i + 1);
+        try {
+          if (JSON.parse(line).type === "agent_settled") {
+            clearTimeout(timer);
+            resolve();
+          }
+        } catch {}
+      }
+    });
+    child.stdin.write(
+      JSON.stringify({
+        id: "offline-parent",
+        type: "prompt",
+        message: "Run the local deterministic busy-parent fixture.",
+      }) + "\n",
+    );
+  });
+  const evidence = JSON.parse(await readFile(result, "utf8"));
   assert.equal(evidence.error, undefined, JSON.stringify(evidence));
-  assert.equal(evidence.after.idle,false);
-  assert.equal(evidence.after.delegatedGoals.entries.length,2);
-  const events = output.trim().split("\n").map(line => JSON.parse(line));
-  assert.equal(events.filter(event => event.type === "agent_start").length,1);
-  const messages = events.filter(event => event.type === "message_end").map(event => event.message);
-  assert.equal(messages.filter(message => message.role === "user").length,1);
-  assert.equal(messages.filter(message => message.role === "assistant").length,1);
-  assert.equal(messages.find(message => message.role === "assistant").stopReason,"stop");
+  assert.equal(evidence.after.idle, false);
+  assert.equal(evidence.after.delegatedGoals.entries.length, 2);
+  const events = output
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(events.filter((event) => event.type === "agent_start").length, 1);
+  const messages = events
+    .filter((event) => event.type === "message_end")
+    .map((event) => event.message);
+  assert.equal(messages.filter((message) => message.role === "user").length, 1);
+  assert.equal(messages.filter((message) => message.role === "assistant").length, 1);
+  assert.equal(messages.find((message) => message.role === "assistant").stopReason, "stop");
   passed = true;
-  console.log(JSON.stringify({passed:true,runtime:raw,idle:evidence.after.idle,entries:evidence.after.delegatedGoals.entries.map(({id,status,child})=>({id,status,child})),parentGoal:evidence.after.goal,calls:evidence.calls,starts:evidence.starts,tools:evidence.tools,executorAbsent:true,staleIdentityRejected:true,idempotencyVerified:true,aborted:false},null,2));
+  console.log(
+    JSON.stringify(
+      {
+        passed: true,
+        runtime: raw,
+        idle: evidence.after.idle,
+        entries: evidence.after.delegatedGoals.entries.map(({ id, status, child }) => ({
+          id,
+          status,
+          child,
+        })),
+        parentGoal: evidence.after.goal,
+        calls: evidence.calls,
+        starts: evidence.starts,
+        tools: evidence.tools,
+        executorAbsent: true,
+        staleIdentityRejected: true,
+        idempotencyVerified: true,
+        aborted: false,
+      },
+      null,
+      2,
+    ),
+  );
 } finally {
-  if(child && child.exitCode === null) { child.kill("SIGTERM"); await new Promise(resolve => child.once("exit",resolve)); }
-  if(passed) await rm(root,{recursive:true,force:true});
-  else console.error("Isolated failure evidence retained at",root,"\n",output,errors);
+  if (child && child.exitCode === null) {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => child.once("exit", resolve));
+  }
+  if (passed) await rm(root, { recursive: true, force: true });
+  else console.error("Isolated failure evidence retained at", root, "\n", output, errors);
 }

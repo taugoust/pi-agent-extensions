@@ -54,13 +54,28 @@ export type SubagentPermissionAuthority = {
   /** Aborted only for terminal authority loss, never for a reload suspension. */
   revoked: AbortSignal;
   waitUntilActive(signal?: AbortSignal): Promise<void>;
-  prepare(request: SubagentPermissionRequest, signal?: AbortSignal): Promise<PreparedSubagentPermission>;
-  commit(ticket: SubagentPermissionTicket, request: SubagentPermissionRequest): SubagentPermissionResult;
+  prepare(
+    request: SubagentPermissionRequest,
+    signal?: AbortSignal,
+  ): Promise<PreparedSubagentPermission>;
+  commit(
+    ticket: SubagentPermissionTicket,
+    request: SubagentPermissionRequest,
+  ): SubagentPermissionResult;
   abandon(ticket: SubagentPermissionTicket): void;
-  authorize(request: SubagentPermissionRequest, signal?: AbortSignal): Promise<SubagentPermissionResult>;
+  authorize(
+    request: SubagentPermissionRequest,
+    signal?: AbortSignal,
+  ): Promise<SubagentPermissionResult>;
 };
 
-export type SubagentPermissionAuthorityPhase = "unbound" | "active" | "draining" | "reloading" | "inactive" | "failed";
+export type SubagentPermissionAuthorityPhase =
+  | "unbound"
+  | "active"
+  | "draining"
+  | "reloading"
+  | "inactive"
+  | "failed";
 
 export type SubagentPermissionAuthorityDelegate = (
   request: SubagentPermissionRequest,
@@ -122,21 +137,32 @@ function copyRequest(request: SubagentPermissionRequest): SubagentPermissionRequ
 }
 
 function sameRequest(left: SubagentPermissionRequest, right: SubagentPermissionRequest): boolean {
-  return left.subagentId === right.subagentId
-    && left.label === right.label
-    && left.task === right.task
-    && left.command === right.command
-    && left.cwd === right.cwd
-    && left.toolCallId === right.toolCallId;
+  return (
+    left.subagentId === right.subagentId &&
+    left.label === right.label &&
+    left.task === right.task &&
+    left.command === right.command &&
+    left.cwd === right.cwd &&
+    left.toolCallId === right.toolCallId
+  );
 }
 
 function copyResult(result: SubagentPermissionResult): SubagentPermissionResult {
-  if (!result || typeof result.allowed !== "boolean" || typeof result.reason !== "string" || result.reason.length === 0) {
+  if (
+    !result ||
+    typeof result.allowed !== "boolean" ||
+    typeof result.reason !== "string" ||
+    result.reason.length === 0
+  ) {
     throw new Error("Parent AgentSH Permission Gate returned a malformed child authorization");
   }
-  if (Buffer.from(result.reason, "utf8").toString("utf8") !== result.reason
-    || Buffer.byteLength(result.reason, "utf8") > SUBAGENT_PERMISSION_MAX_REASON_BYTES) {
-    throw new Error("Parent AgentSH Permission Gate returned an invalid child authorization reason");
+  if (
+    Buffer.from(result.reason, "utf8").toString("utf8") !== result.reason ||
+    Buffer.byteLength(result.reason, "utf8") > SUBAGENT_PERMISSION_MAX_REASON_BYTES
+  ) {
+    throw new Error(
+      "Parent AgentSH Permission Gate returned an invalid child authorization reason",
+    );
   }
   return Object.freeze({ allowed: result.allowed, reason: result.reason });
 }
@@ -151,19 +177,29 @@ export function createReloadableSubagentPermissionAuthority(
   rebindTimeoutMs = SUBAGENT_PERMISSION_RELOAD_REBIND_TIMEOUT_MS,
   drainTimeoutMs = Math.min(rebindTimeoutMs, SUBAGENT_PERMISSION_RELOAD_DRAIN_TIMEOUT_MS),
 ): ReloadableSubagentPermissionAuthority {
-  if (!Number.isSafeInteger(rebindTimeoutMs) || rebindTimeoutMs < 1 || rebindTimeoutMs > 120_000
-    || !Number.isSafeInteger(drainTimeoutMs) || drainTimeoutMs < 1 || drainTimeoutMs > 120_000) {
-    throw new Error("Subagent Permission Gate reload timeouts must be between 1 and 120000 milliseconds");
+  if (
+    !Number.isSafeInteger(rebindTimeoutMs) ||
+    rebindTimeoutMs < 1 ||
+    rebindTimeoutMs > 120_000 ||
+    !Number.isSafeInteger(drainTimeoutMs) ||
+    drainTimeoutMs < 1 ||
+    drainTimeoutMs > 120_000
+  ) {
+    throw new Error(
+      "Subagent Permission Gate reload timeouts must be between 1 and 120000 milliseconds",
+    );
   }
 
   let state: SubagentPermissionAuthorityPhase = "unbound";
-  let binding: {
-    owner: symbol;
-    sessionId: string;
-    delegate: SubagentPermissionAuthorityDelegate;
-    validateCommit: () => void;
-    controller: AbortController;
-  } | undefined;
+  let binding:
+    | {
+        owner: symbol;
+        sessionId: string;
+        delegate: SubagentPermissionAuthorityDelegate;
+        validateCommit: () => void;
+        controller: AbortController;
+      }
+    | undefined;
   let reloadOwner: symbol | undefined;
   let reloadSessionId = "";
   let reloadHandoff: Deferred | undefined;
@@ -173,12 +209,15 @@ export function createReloadableSubagentPermissionAuthority(
   let terminalError: Error | undefined;
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
   const revokedController = new AbortController();
-  const tickets = new Map<SubagentPermissionTicket, {
-    request: SubagentPermissionRequest;
-    result: SubagentPermissionResult;
-    binding: NonNullable<typeof binding>;
-    generation: number;
-  }>();
+  const tickets = new Map<
+    SubagentPermissionTicket,
+    {
+      request: SubagentPermissionRequest;
+      result: SubagentPermissionResult;
+      binding: NonNullable<typeof binding>;
+      generation: number;
+    }
+  >();
 
   const finishLease = () => {
     activeCalls -= 1;
@@ -212,8 +251,12 @@ export function createReloadableSubagentPermissionAuthority(
 
   const waitForReloadBinding = async (signal?: AbortSignal): Promise<void> => {
     const handoff = reloadHandoff;
-    if (!handoff) throw terminalError ?? new Error("Parent AgentSH Permission Gate reload handoff is unavailable");
-    if (signal?.aborted) throw errorValue(signal.reason ?? "Native subagent authorization was cancelled");
+    if (!handoff)
+      throw (
+        terminalError ?? new Error("Parent AgentSH Permission Gate reload handoff is unavailable")
+      );
+    if (signal?.aborted)
+      throw errorValue(signal.reason ?? "Native subagent authorization was cancelled");
     await new Promise<void>((resolve, reject) => {
       let settled = false;
       const finish = (error?: Error) => {
@@ -223,15 +266,20 @@ export function createReloadableSubagentPermissionAuthority(
         if (error) reject(error);
         else resolve();
       };
-      const onAbort = () => finish(errorValue(signal?.reason ?? "Native subagent authorization was cancelled"));
+      const onAbort = () =>
+        finish(errorValue(signal?.reason ?? "Native subagent authorization was cancelled"));
       signal?.addEventListener("abort", onAbort, { once: true });
-      handoff.promise.then(() => finish(), (error) => finish(errorValue(error)));
+      handoff.promise.then(
+        () => finish(),
+        (error) => finish(errorValue(error)),
+      );
     });
   };
 
   const waitUntilActive = async (signal?: AbortSignal): Promise<void> => {
     for (;;) {
-      if (signal?.aborted) throw errorValue(signal.reason ?? "Native subagent launch was cancelled");
+      if (signal?.aborted)
+        throw errorValue(signal.reason ?? "Native subagent launch was cancelled");
       if (state === "active" && binding) return;
       if (state !== "draining" && state !== "reloading") {
         throw terminalError ?? new Error("Parent AgentSH Permission Gate session is not active");
@@ -245,7 +293,8 @@ export function createReloadableSubagentPermissionAuthority(
     signal?: AbortSignal,
   ): Promise<PreparedSubagentPermission> => {
     for (;;) {
-      if (signal?.aborted) throw errorValue(signal.reason ?? "Native subagent authorization was cancelled");
+      if (signal?.aborted)
+        throw errorValue(signal.reason ?? "Native subagent authorization was cancelled");
       if (state === "draining" || state === "reloading") {
         await waitForReloadBinding(signal);
         continue;
@@ -262,14 +311,28 @@ export function createReloadableSubagentPermissionAuthority(
       let ticketCreated = false;
       try {
         const exactRequest = copyRequest(request);
-        const result = copyResult(await selected.delegate(exactRequest, signal, selected.controller.signal));
-        if ((state !== "active" && state !== "draining")
-          || binding !== selected || generation !== selectedGeneration) {
-          throw terminalError ?? new Error("Parent AgentSH Permission Gate authority changed during authorization");
+        const result = copyResult(
+          await selected.delegate(exactRequest, signal, selected.controller.signal),
+        );
+        if (
+          (state !== "active" && state !== "draining") ||
+          binding !== selected ||
+          generation !== selectedGeneration
+        ) {
+          throw (
+            terminalError ??
+            new Error("Parent AgentSH Permission Gate authority changed during authorization")
+          );
         }
-        if (signal?.aborted) throw errorValue(signal.reason ?? "Native subagent authorization was cancelled");
+        if (signal?.aborted)
+          throw errorValue(signal.reason ?? "Native subagent authorization was cancelled");
         const ticket = Object.freeze({});
-        tickets.set(ticket, { request: exactRequest, result, binding: selected, generation: selectedGeneration });
+        tickets.set(ticket, {
+          request: exactRequest,
+          result,
+          binding: selected,
+          generation: selectedGeneration,
+        });
         ticketCreated = true;
         return { ticket, result };
       } finally {
@@ -283,14 +346,23 @@ export function createReloadableSubagentPermissionAuthority(
     request: SubagentPermissionRequest,
   ): SubagentPermissionResult => {
     const prepared = tickets.get(ticket);
-    if (!prepared) throw terminalError ?? new Error("Subagent Permission Gate authorization ticket is invalid or already used");
+    if (!prepared)
+      throw (
+        terminalError ??
+        new Error("Subagent Permission Gate authorization ticket is invalid or already used")
+      );
     tickets.delete(ticket);
     try {
       if (!sameRequest(prepared.request, request)) {
-        throw new Error("Subagent Permission Gate authorization ticket does not match the exact request");
+        throw new Error(
+          "Subagent Permission Gate authorization ticket does not match the exact request",
+        );
       }
-      if ((state !== "active" && state !== "draining")
-        || binding !== prepared.binding || generation !== prepared.generation) {
+      if (
+        (state !== "active" && state !== "draining") ||
+        binding !== prepared.binding ||
+        generation !== prepared.generation
+      ) {
         throw terminalError ?? new Error("Subagent Permission Gate authorization ticket is stale");
       }
       try {
@@ -323,7 +395,10 @@ export function createReloadableSubagentPermissionAuthority(
     prepare,
     commit,
     abandon,
-    async authorize(request: SubagentPermissionRequest, signal?: AbortSignal): Promise<SubagentPermissionResult> {
+    async authorize(
+      request: SubagentPermissionRequest,
+      signal?: AbortSignal,
+    ): Promise<SubagentPermissionResult> {
       const prepared = await prepare(request, signal);
       return commit(prepared.ticket, request);
     },
@@ -335,17 +410,26 @@ export function createReloadableSubagentPermissionAuthority(
     authority,
     phase: () => state,
     bind(owner, sessionId, delegate, validateCommit = () => undefined) {
-      if (typeof owner !== "symbol" || !validSessionId(sessionId)
-        || typeof delegate !== "function" || typeof validateCommit !== "function") {
+      if (
+        typeof owner !== "symbol" ||
+        !validSessionId(sessionId) ||
+        typeof delegate !== "function" ||
+        typeof validateCommit !== "function"
+      ) {
         throw new Error("Invalid Subagent Permission Gate authority binding");
       }
       if (state !== "unbound" && state !== "reloading") {
         throw new Error(`Subagent Permission Gate authority cannot bind while ${state}`);
       }
-      if (state === "reloading" && (reloadOwner === undefined || reloadOwner === owner || reloadSessionId !== sessionId)) {
-        const error = new Error(reloadSessionId !== sessionId
-          ? "Subagent Permission Gate reload tried to bind a different Pi session"
-          : "Subagent Permission Gate reload tried to reuse the stale extension owner");
+      if (
+        state === "reloading" &&
+        (reloadOwner === undefined || reloadOwner === owner || reloadSessionId !== sessionId)
+      ) {
+        const error = new Error(
+          reloadSessionId !== sessionId
+            ? "Subagent Permission Gate reload tried to bind a different Pi session"
+            : "Subagent Permission Gate reload tried to reuse the stale extension owner",
+        );
         terminate("failed", error);
         throw error;
       }
@@ -362,7 +446,8 @@ export function createReloadableSubagentPermissionAuthority(
       previousHandoff?.resolve();
     },
     async beginReload(owner, sessionId) {
-      if (state !== "active" || binding?.owner !== owner || binding.sessionId !== sessionId) return false;
+      if (state !== "active" || binding?.owner !== owner || binding.sessionId !== sessionId)
+        return false;
       state = "draining";
       reloadOwner = owner;
       reloadSessionId = sessionId;
@@ -376,7 +461,9 @@ export function createReloadableSubagentPermissionAuthority(
         await drainWaiter.promise;
       }
       if (state !== "draining") return false;
-      binding.controller.abort(new Error("Parent AgentSH Permission Gate session context was replaced by reload"));
+      binding.controller.abort(
+        new Error("Parent AgentSH Permission Gate session context was replaced by reload"),
+      );
       binding = undefined;
       state = "reloading";
       armReloadTimer(
@@ -403,8 +490,11 @@ export function currentSubagentPermissionSelection(): SubagentPermissionSelectio
     throw new Error("Parent subagent Permission Gate selection is malformed");
   }
   const candidate = value as Partial<SubagentPermissionSelection>;
-  if (candidate.protocol !== SUBAGENT_PERMISSION_PROTOCOL_VERSION || candidate.selected !== true
-    || typeof candidate.conflict !== "boolean") {
+  if (
+    candidate.protocol !== SUBAGENT_PERMISSION_PROTOCOL_VERSION ||
+    candidate.selected !== true ||
+    typeof candidate.conflict !== "boolean"
+  ) {
     throw new Error("Parent subagent Permission Gate selection is malformed");
   }
   return candidate as SubagentPermissionSelection;
@@ -414,7 +504,9 @@ export function currentSubagentPermissionAuthority(): SubagentPermissionAuthorit
   const value = (globalThis as Record<string, unknown>)[SUBAGENT_PERMISSION_AUTHORITY_KEY];
   if (value === undefined) {
     if (currentSubagentPermissionSelection()?.selected) {
-      throw new Error("Parent subagent Permission Gate was selected but its authority is unavailable");
+      throw new Error(
+        "Parent subagent Permission Gate was selected but its authority is unavailable",
+      );
     }
     return undefined;
   }
@@ -422,14 +514,20 @@ export function currentSubagentPermissionAuthority(): SubagentPermissionAuthorit
     throw new Error("Parent subagent Permission Gate authority is malformed");
   }
   const candidate = value as Partial<SubagentPermissionAuthority>;
-  if (candidate.authorityAbi !== 2
-    || candidate.protocol !== SUBAGENT_PERMISSION_PROTOCOL_VERSION || candidate.selected !== true
-    || typeof candidate.active !== "boolean"
-    || !candidate.revoked || typeof candidate.revoked.aborted !== "boolean"
-    || typeof candidate.revoked.addEventListener !== "function"
-    || typeof candidate.waitUntilActive !== "function"
-    || typeof candidate.prepare !== "function" || typeof candidate.commit !== "function"
-    || typeof candidate.abandon !== "function" || typeof candidate.authorize !== "function") {
+  if (
+    candidate.authorityAbi !== 2 ||
+    candidate.protocol !== SUBAGENT_PERMISSION_PROTOCOL_VERSION ||
+    candidate.selected !== true ||
+    typeof candidate.active !== "boolean" ||
+    !candidate.revoked ||
+    typeof candidate.revoked.aborted !== "boolean" ||
+    typeof candidate.revoked.addEventListener !== "function" ||
+    typeof candidate.waitUntilActive !== "function" ||
+    typeof candidate.prepare !== "function" ||
+    typeof candidate.commit !== "function" ||
+    typeof candidate.abandon !== "function" ||
+    typeof candidate.authorize !== "function"
+  ) {
     throw new Error("Parent subagent Permission Gate authority is malformed");
   }
   return candidate as SubagentPermissionAuthority;

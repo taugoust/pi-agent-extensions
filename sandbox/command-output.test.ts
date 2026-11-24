@@ -98,26 +98,29 @@ assert.deepEqual(Object.keys(commandOutputModule).sort(), [
 
 // Promoted artifact fields retain precedence over nested compatibility fields.
 {
-  assert.deepEqual(remoteOutputArtifact({
-    full_output_path: "/remote/promoted.log",
-    artifact_bytes: 10,
-    artifact_total_bytes: 20,
-    artifact_complete: false,
-    artifact_error: "promoted error",
-    output_artifact: {
-      path: "/remote/nested.log",
-      bytes: 1,
-      total_bytes: 2,
-      complete: true,
-      error: "nested error",
+  assert.deepEqual(
+    remoteOutputArtifact({
+      full_output_path: "/remote/promoted.log",
+      artifact_bytes: 10,
+      artifact_total_bytes: 20,
+      artifact_complete: false,
+      artifact_error: "promoted error",
+      output_artifact: {
+        path: "/remote/nested.log",
+        bytes: 1,
+        total_bytes: 2,
+        complete: true,
+        error: "nested error",
+      },
+    }),
+    {
+      path: "/remote/promoted.log",
+      bytes: 10,
+      totalBytes: 20,
+      complete: false,
+      error: "promoted error",
     },
-  }), {
-    path: "/remote/promoted.log",
-    bytes: 10,
-    totalBytes: 20,
-    complete: false,
-    error: "promoted error",
-  });
+  );
   assert.equal(remoteOutputArtifact({ output_artifact: { complete: true } }), undefined);
 }
 
@@ -137,7 +140,11 @@ assert.deepEqual(Object.keys(commandOutputModule).sort(), [
     artifact_complete: true,
   });
   assert.match(complete, /Full output: \/remote\/full\.log/);
-  assert.ok(complete.includes(`AgentSH response truncated stdout at ${formatSize(DEFAULT_MAX_BYTES * 3)}. Complete output is available in the remote artifact.`));
+  assert.ok(
+    complete.includes(
+      `AgentSH response truncated stdout at ${formatSize(DEFAULT_MAX_BYTES * 3)}. Complete output is available in the remote artifact.`,
+    ),
+  );
 
   const bounded = formatAccumulatedOutput(snapshot, output, {
     stderr_truncated: true,

@@ -9,7 +9,10 @@ import { join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 const sdkRoot = process.argv[2] ?? process.env.PI_STOCK_SDK_ROOT;
-assert.ok(sdkRoot, "Supply the stock Pi 1.4.0 SDK directory (PI_MONOREPO_DIR or PI_STOCK_SDK_ROOT)");
+assert.ok(
+  sdkRoot,
+  "Supply the stock Pi 1.4.0 SDK directory (PI_MONOREPO_DIR or PI_STOCK_SDK_ROOT)",
+);
 const base = resolve(sdkRoot);
 const root = await mkdtemp(join(tmpdir(), "background-yield-runtime-"));
 const agentDir = join(root, "agent");
@@ -57,20 +60,12 @@ const jiti = createJiti(import.meta.url, {
   alias: {
     "@mariozechner/pi-coding-agent": join(base, "dist/index.js"),
     "@earendil-works/pi-coding-agent": join(base, "dist/index.js"),
-    "@mariozechner/pi-ai": join(
-      base,
-      "node_modules/@earendil-works/pi-ai/dist/index.js",
-    ),
-    "@mariozechner/pi-tui": join(
-      base,
-      "node_modules/@earendil-works/pi-tui/dist/index.js",
-    ),
+    "@mariozechner/pi-ai": join(base, "node_modules/@earendil-works/pi-ai/dist/index.js"),
+    "@mariozechner/pi-tui": join(base, "node_modules/@earendil-works/pi-tui/dist/index.js"),
     "@sinclair/typebox": join(base, "node_modules/typebox/build/index.mjs"),
   },
 });
-const { installQuietState, notifyParent } = await jiti.import(
-  "../shared/quiet-state.ts",
-);
+const { installQuietState, notifyParent } = await jiti.import("../shared/quiet-state.ts");
 const { default: installSubagent } = await jiti.import("../subagent/index.ts");
 const { default: installBackgroundJob } = await jiti.import("../background-job/index.ts");
 assert.equal(VERSION, "1.4.0");
@@ -129,7 +124,11 @@ const provider = (role) => ({
         ? ++parentCalls
         : role === "mixed"
           ? ++mixedCalls
-          : role === "job-yield" ? ++jobYieldCalls : role === "queued" ? ++queuedCalls : ++childCalls;
+          : role === "job-yield"
+            ? ++jobYieldCalls
+            : role === "queued"
+              ? ++queuedCalls
+              : ++childCalls;
     log.push(`${role}:dispatch:${n}`);
     let content,
       stopReason = "stop";
@@ -159,9 +158,7 @@ const provider = (role) => ({
       ];
       stopReason = "toolUse";
     } else if (role === "parent" && n === 6) {
-      content = [
-        { type: "toolCall", id: "busy", name: "busy_fixture", arguments: {} },
-      ];
+      content = [{ type: "toolCall", id: "busy", name: "busy_fixture", arguments: {} }];
       stopReason = "toolUse";
     } else if (role === "child" && n === 1) {
       content = [
@@ -211,8 +208,7 @@ const makeFactory = (role) => (pi) => {
           };
         if (key === "sendMessage")
           return (message, options) => {
-            if (message?.customType === "harness-state")
-              quietDeliveries.push(options?.deliverAs);
+            if (message?.customType === "harness-state") quietDeliveries.push(options?.deliverAs);
             return target.sendMessage(message, options);
           };
         return Reflect.get(target, key, receiver);
@@ -222,7 +218,9 @@ const makeFactory = (role) => (pi) => {
     else installSubagent(proxy);
     if (role === "parent") {
       quietState = installQuietState(proxy, 5);
-      pi.on("session_start", (_e, ctx) => { parentCtx = ctx; });
+      pi.on("session_start", (_e, ctx) => {
+        parentCtx = ctx;
+      });
     }
   }
   pi.registerTool({
@@ -241,16 +239,13 @@ const makeFactory = (role) => (pi) => {
         undefined,
         ctx,
       );
-      assert.equal(
-        result.terminate,
-        true,
-        "production yield must terminate the current run",
-      );
+      assert.equal(result.terminate, true, "production yield must terminate the current run");
       assert.equal(result.details.operation ?? result.details.action, "yield");
       assert.notEqual(result.accepted_delivery, true);
       assert.notEqual(result.details.accepted_delivery, true);
       successfulYields.add(role);
-      if (role === "queued") assert.equal(await sessions.queued.followUp("user queued during yield"), "queued");
+      if (role === "queued")
+        assert.equal(await sessions.queued.followUp("user queued during yield"), "queued");
       return result;
     },
   });
@@ -271,19 +266,9 @@ const makeFactory = (role) => (pi) => {
     parameters: { type: "object", properties: {} },
     async execute() {
       log.push("parent:answer");
-      assert.equal(
-        childDone,
-        false,
-        "parent must answer while child prompt is still running",
-      );
-      assert.equal(
-        childToolActive,
-        true,
-        "child guidance tool remains active until parent reply",
-      );
-      log.push(
-        "steer:" + String(await sessions.child.steer("reply from parent")),
-      );
+      assert.equal(childDone, false, "parent must answer while child prompt is still running");
+      assert.equal(childToolActive, true, "child guidance tool remains active until parent reply");
+      log.push("steer:" + String(await sessions.child.steer("reply from parent")));
       releaseChild();
       return { content: [{ type: "text", text: "replied" }], details: {} };
     },
@@ -386,12 +371,18 @@ try {
   j = await create("job-yield");
   await sessions["job-yield"].prompt("yield with the production background_job tool");
   assert.equal(jobYieldCalls, 1, "sole production background_job yield ends the run");
-  assert.ok(successfulYields.has("job-yield"), "background_job yield must succeed, not return a tool error");
+  assert.ok(
+    successfulYields.has("job-yield"),
+    "background_job yield must succeed, not return a tool error",
+  );
   m = await create("mixed");
   await sessions.mixed.prompt("mixed yield and sibling");
   assert.equal(mixedCalls, 2, "mixed yield is not sole and must continue");
   assert.ok(log.includes("mixed:sibling"));
-  assert.ok(successfulYields.has("mixed"), "mixed batch must contain a successful terminating yield");
+  assert.ok(
+    successfulYields.has("mixed"),
+    "mixed batch must contain a successful terminating yield",
+  );
   q = await create("queued");
   await sessions.queued.prompt("yield while user follow-up is queued");
   assert.ok(successfulYields.has("queued"));
@@ -408,11 +399,7 @@ try {
     "sole production-shaped terminate:true must end the current parent run",
   );
   await sessions.parent.prompt("queued user message after yield");
-  assert.equal(
-    parentCalls,
-    2,
-    "a separate queued user prompt starts its own run",
-  );
+  assert.equal(parentCalls, 2, "a separate queued user prompt starts its own run");
   const processResult = spawnSync(
     process.execPath,
     ["-e", 'process.stdout.write("offline-job-ok")'],
@@ -446,15 +433,10 @@ try {
   });
   // Parent must have been registered in notifyParent ownership namespace; discover exact SDK session id.
   const parentSid = sessions.parent.sessionManager.getSessionId();
-  assert.equal(
-    parentSid,
-    ownerId,
-    "offline fixture session id must match notifyParent owner",
-  );
+  assert.equal(parentSid, ownerId, "offline fixture session id must match notifyParent owner");
   await new Promise((resolvePromise, reject) => {
     const timer = setTimeout(
-      () =>
-        reject(Error(`guidance wake did not arrive: ${JSON.stringify(log)}`)),
+      () => reject(Error(`guidance wake did not arrive: ${JSON.stringify(log)}`)),
       5000,
     );
     const poll = () => {
@@ -484,10 +466,7 @@ try {
   assert.equal(quietState.enqueue(parentCtx, childCompletion), true);
   await waitForCalls(6, "child completion wake");
   await new Promise((resolvePromise, reject) => {
-    const timer = setTimeout(
-      () => reject(Error("parent busy tool did not start")),
-      5000,
-    );
+    const timer = setTimeout(() => reject(Error("parent busy tool did not start")), 5000);
     const poll = () => {
       if (busyActive) {
         clearTimeout(timer);
@@ -496,11 +475,7 @@ try {
     };
     poll();
   });
-  assert.equal(
-    busyCtx.isIdle(),
-    false,
-    "parent context must report the held tool as active",
-  );
+  assert.equal(busyCtx.isIdle(), false, "parent context must report the held tool as active");
   const queuedJob = {
     kind: "job",
     id: "job-arrived-while-parent-busy",
@@ -526,11 +501,7 @@ try {
   assert.ok(
     parentCtx.sessionManager
       .getBranch()
-      .some(
-        (entry) =>
-          entry.type === "custom_message" &&
-          entry.customType === "harness-state",
-      ),
+      .some((entry) => entry.type === "custom_message" && entry.customType === "harness-state"),
     "busy parent retains guidance as queued input",
   );
   assert.equal(
@@ -548,10 +519,7 @@ try {
   await sessions.parent.waitForIdle();
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 1100));
   assert.equal(parentCalls, 8, "duplicate busy completion must not schedule a ninth call");
-  assert.ok(
-    log.indexOf("parent:busy-release") <
-      log.findIndex((x) => x === "parent:dispatch:7"),
-  );
+  assert.ok(log.indexOf("parent:busy-release") < log.findIndex((x) => x === "parent:dispatch:7"));
   const evidence = {
     version: VERSION,
     node: process.version,
@@ -587,10 +555,7 @@ try {
   if (restoreDateNow) Date.now = restoreDateNow;
   releaseChild();
   releaseBusy();
-  await Promise.allSettled([
-    sessions.parent?.waitForIdle(),
-    sessions.child?.waitForIdle(),
-  ]);
+  await Promise.allSettled([sessions.parent?.waitForIdle(), sessions.child?.waitForIdle()]);
   await q?.owner.dispose();
   sessions.queued?.dispose();
   await j?.owner.dispose();

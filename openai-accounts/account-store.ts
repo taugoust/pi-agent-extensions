@@ -13,7 +13,11 @@ import { basename, dirname, join } from "node:path";
 import type { OAuthCredential } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type AccountProviderId, SUPPORTED_PROVIDER_IDS } from "./oauth.js";
-import { type AccountStorageBackend, FileAccountStorageBackend, InMemoryAccountStorageBackend } from "./storage.js";
+import {
+  type AccountStorageBackend,
+  FileAccountStorageBackend,
+  InMemoryAccountStorageBackend,
+} from "./storage.js";
 
 export const ACCOUNTS_FILE = "pi-accounts.json";
 export const LEGACY_CODEX_ACCOUNTS_FILE = "pi-codex-accounts.json";
@@ -44,7 +48,10 @@ export function normalizeApiKeyCredential(key: string): StoredApiKeyCredential {
 
 function normalizeAccountCredential(value: unknown, name: string): StoredCredential {
   if (isRecord(value) && value.type === "api_key") {
-    const cloned = cloneJsonValue(value, new Set(), `${name} credential`) as Record<string, unknown>;
+    const cloned = cloneJsonValue(value, new Set(), `${name} credential`) as Record<
+      string,
+      unknown
+    >;
     if (typeof cloned.key !== "string") throw new Error("API key credential is missing key.");
     normalizeApiKeyCredential(cloned.key);
     if (["access", "refresh", "expires"].some((field) => Object.hasOwn(cloned, field))) {
@@ -78,7 +85,10 @@ export class AccountStore {
   }
 
   async readAsync(signal?: AbortSignal): Promise<AccountsData> {
-    return this.serialized(() => this.backend.readAsync(async (current) => parseAccountsData(current), signal), signal);
+    return this.serialized(
+      () => this.backend.readAsync(async (current) => parseAccountsData(current), signal),
+      signal,
+    );
   }
 
   async write(data: AccountsData): Promise<void> {
@@ -103,7 +113,10 @@ export class AccountStore {
     );
   }
 
-  async readProviderAsync(providerId: AccountProviderId, signal?: AbortSignal): Promise<ProviderAccountsData> {
+  async readProviderAsync(
+    providerId: AccountProviderId,
+    signal?: AbortSignal,
+  ): Promise<ProviderAccountsData> {
     const data = await this.readAsync(signal);
     return cloneProviderState(data.providers[providerId]);
   }
@@ -122,7 +135,9 @@ export class AccountStore {
   ): Promise<ProviderAccountsData> {
     let updated = emptyProviderState();
     await this.updateAsync(async (data) => {
-      updated = normalizeProviderState(await mutator(cloneProviderState(data.providers[providerId])));
+      updated = normalizeProviderState(
+        await mutator(cloneProviderState(data.providers[providerId])),
+      );
       return {
         ...data,
         providers: defineOwn(data.providers, providerId, updated),
@@ -132,7 +147,9 @@ export class AccountStore {
   }
 
   async writeRawForTest(raw: string): Promise<void> {
-    await this.serialized(async () => this.backend.withLockAsync(async () => ({ result: undefined, next: raw })));
+    await this.serialized(async () =>
+      this.backend.withLockAsync(async () => ({ result: undefined, next: raw })),
+    );
   }
 
   private async serialized<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -169,7 +186,9 @@ function waitForTurn(previous: Promise<void>, signal?: AbortSignal): Promise<voi
     const abort = () =>
       settle(() =>
         reject(
-          signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError"),
+          signal.reason instanceof Error
+            ? signal.reason
+            : new DOMException("The operation was aborted", "AbortError"),
         ),
       );
     signal.addEventListener("abort", abort, { once: true });
@@ -180,13 +199,16 @@ function waitForTurn(previous: Promise<void>, signal?: AbortSignal): Promise<voi
   });
 }
 
-export function parseAccountName(input: string): { ok: true; name: string } | { ok: false; error: string } {
+export function parseAccountName(
+  input: string,
+): { ok: true; name: string } | { ok: false; error: string } {
   const name = input.trim();
   if (!name) return { ok: false, error: "Account name is required." };
   if (!ACCOUNT_NAME_RE.test(name)) {
     return {
       ok: false,
-      error: "Account names must be 1-64 characters using letters, numbers, dot, underscore, or hyphen.",
+      error:
+        "Account names must be 1-64 characters using letters, numbers, dot, underscore, or hyphen.",
     };
   }
   return { ok: true, name };
@@ -206,7 +228,8 @@ export function parseAccountsData(raw: string | undefined): AccountsData {
 function normalizeAccountsData(value: unknown): AccountsData {
   if (!isRecord(value)) throw new Error("Invalid accounts data: expected an object.");
   if (value.version !== 1) throw new Error("Invalid accounts data: version must be 1.");
-  if (!isRecord(value.providers)) throw new Error("Invalid accounts data: providers must be an object.");
+  if (!isRecord(value.providers))
+    throw new Error("Invalid accounts data: providers must be an object.");
   const providers = Object.create(null) as Record<string, ProviderAccountsData>;
   for (const [providerId, state] of Object.entries(value.providers)) {
     // Only the `openai-codex` section is interpreted. Every other section,
@@ -215,7 +238,8 @@ function normalizeAccountsData(value: unknown): AccountsData {
     const preserved = isAccountProviderId(providerId)
       ? normalizeProviderState(state)
       : cloneJsonValue(state, new Set(), `providers.${providerId}`);
-    if (!isRecord(preserved)) throw new Error("Invalid accounts data: provider section must be an object.");
+    if (!isRecord(preserved))
+      throw new Error("Invalid accounts data: provider section must be an object.");
     Object.defineProperty(providers, providerId, {
       configurable: true,
       enumerable: true,
@@ -229,7 +253,8 @@ function normalizeAccountsData(value: unknown): AccountsData {
 function normalizeProviderState(value: unknown): ProviderAccountsData {
   if (!isRecord(value)) throw new Error("Invalid accounts data: provider state must be an object.");
   const active = parseActiveAccount(value.active);
-  if (!isRecord(value.accounts)) throw new Error("Invalid accounts data: accounts must be an object.");
+  if (!isRecord(value.accounts))
+    throw new Error("Invalid accounts data: accounts must be an object.");
   const accounts = Object.create(null) as Record<string, StoredCredential>;
   for (const [name, credential] of Object.entries(value.accounts)) {
     const parsedName = parseAccountName(name);
@@ -247,7 +272,10 @@ function normalizeProviderState(value: unknown): ProviderAccountsData {
   return state;
 }
 
-export function normalizeStoredCredential(value: unknown, accountName: string): StoredOAuthCredential {
+export function normalizeStoredCredential(
+  value: unknown,
+  accountName: string,
+): StoredOAuthCredential {
   const cloned = cloneJsonValue(value, new Set(), `${accountName} credential`);
   if (!isRecord(cloned)) {
     throw new Error(`Invalid accounts data: ${accountName} credential must be an object.`);
@@ -358,7 +386,11 @@ function migrateReleasedCodexData(raw: string | undefined): AccountsData {
   const state = normalizeProviderState({ active: parsed.active, accounts: parsed.accounts });
   return {
     version: 1,
-    providers: defineOwn(Object.create(null) as Record<string, ProviderAccountsData>, "openai-codex", state),
+    providers: defineOwn(
+      Object.create(null) as Record<string, ProviderAccountsData>,
+      "openai-codex",
+      state,
+    ),
   };
 }
 
@@ -370,7 +402,10 @@ function createDefaultBackend(): AccountStorageBackend {
   return new FileAccountStorageBackend(join(getAgentDir(), ACCOUNTS_FILE));
 }
 
-function migrateLegacyCodexAccountsFileSync(legacyPath: string, canonicalPath: string): MigrationResult {
+function migrateLegacyCodexAccountsFileSync(
+  legacyPath: string,
+  canonicalPath: string,
+): MigrationResult {
   cleanupStaleMigrationTemps(canonicalPath);
   if (pathEntryExists(canonicalPath)) {
     validateCanonicalAccountsFile(canonicalPath);
@@ -414,7 +449,10 @@ function cleanupStaleMigrationTemps(canonicalPath: string): void {
   }
 }
 
-async function installMigratedAccountsFile(filePath: string, contents: string): Promise<"canonical" | "migrated"> {
+async function installMigratedAccountsFile(
+  filePath: string,
+  contents: string,
+): Promise<"canonical" | "migrated"> {
   return new FileAccountStorageBackend(filePath, {
     syncLockTimeoutMs: MIGRATION_LOCK_TIMEOUT_MS,
   }).withLockAsync(async (current) => {
@@ -426,7 +464,10 @@ async function installMigratedAccountsFile(filePath: string, contents: string): 
   });
 }
 
-function installMigratedAccountsFileSync(filePath: string, contents: string): "canonical" | "migrated" {
+function installMigratedAccountsFileSync(
+  filePath: string,
+  contents: string,
+): "canonical" | "migrated" {
   return new FileAccountStorageBackend(filePath, {
     syncLockTimeoutMs: MIGRATION_LOCK_TIMEOUT_MS,
   }).withLock((current) => {

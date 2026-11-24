@@ -115,10 +115,11 @@ assert
   ];
 assert idle.idleMinutes == 12 && idle.contextPercent == 20;
 assert !(idle ? guardedModels);
-assert subagent == {
-  defaultModel = "raw-model";
-  defaultThinkingLevel = "low";
-};
+assert
+  subagent == {
+    defaultModel = "raw-model";
+    defaultThinkingLevel = "low";
+  };
 assert idle.cheapCompactionModel == "cheap";
 assert !(precedence.home.file ? ".pi/agent/defaults/model-tiers.json");
 assert

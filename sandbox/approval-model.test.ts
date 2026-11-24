@@ -26,7 +26,12 @@ const titleCases: Array<{
 }> = [
   {
     name: "target",
-    approval: { id: "approval-1", kind: "network", target: "example.com:443", command_id: "command-1" },
+    approval: {
+      id: "approval-1",
+      kind: "network",
+      target: "example.com:443",
+      command_id: "command-1",
+    },
     expected: "network: example.com:443",
   },
   {
@@ -84,7 +89,7 @@ const presentationCases: Array<{
     },
     expected: {
       title: "Access or modify FPGA hardware state?",
-      details: ["deploy-hw \"/scratch/demo bitstream.pdi\"", "Requested by Pi supervised tool"],
+      details: ['deploy-hw "/scratch/demo bitstream.pdi"', "Requested by Pi supervised tool"],
     },
   },
   {
@@ -233,8 +238,22 @@ const choiceCases: Array<{
     expected: [
       ["Deny", "deny", "once", null, null, "denied in parent Pi"],
       ["Allow once", "approve", "once", null, null, "approved in parent Pi"],
-      ["Allow for session", "approve", "session", "network", "network:login.example:22", "approved for session network destination: login.example:22 in parent Pi"],
-      ["Allow all accesses for command", "approve", "once", "command-run", "command-run:all-approvals", "approved all network accesses for this command in parent Pi"],
+      [
+        "Allow for session",
+        "approve",
+        "session",
+        "network",
+        "network:login.example:22",
+        "approved for session network destination: login.example:22 in parent Pi",
+      ],
+      [
+        "Allow all accesses for command",
+        "approve",
+        "once",
+        "command-run",
+        "command-run:all-approvals",
+        "approved all network accesses for this command in parent Pi",
+      ],
     ],
   },
   {
@@ -270,10 +289,38 @@ const choiceCases: Array<{
     expected: [
       ["Deny once", "deny", "once", null, null, "denied in parent Pi"],
       ["Allow once", "approve", "once", null, null, "approved in parent Pi"],
-      ["Allow all requests for this command invocation", "approve", "once", "command-run", "command-run:all-approvals", "approved all requests for this command invocation in parent Pi"],
-      ["Allow this exact invocation for session", "approve", "session", "command", "command-invocation:deploy-hw-pdi", "approved for session command: deploy-hw image.pdi in parent Pi"],
-      ["Allow any deploy-hw invocation for session", "approve", "session", "command", "command-executable:deploy-hw", "approved for session command: /nix/store/aaaaaaaa-tools/bin/deploy-hw in parent Pi"],
-      ["Deny this exact invocation for session", "deny", "session", "command", "command-invocation:deploy-hw-pdi", "denied for session command: deploy-hw image.pdi in parent Pi"],
+      [
+        "Allow all requests for this command invocation",
+        "approve",
+        "once",
+        "command-run",
+        "command-run:all-approvals",
+        "approved all requests for this command invocation in parent Pi",
+      ],
+      [
+        "Allow this exact invocation for session",
+        "approve",
+        "session",
+        "command",
+        "command-invocation:deploy-hw-pdi",
+        "approved for session command: deploy-hw image.pdi in parent Pi",
+      ],
+      [
+        "Allow any deploy-hw invocation for session",
+        "approve",
+        "session",
+        "command",
+        "command-executable:deploy-hw",
+        "approved for session command: /nix/store/aaaaaaaa-tools/bin/deploy-hw in parent Pi",
+      ],
+      [
+        "Deny this exact invocation for session",
+        "deny",
+        "session",
+        "command",
+        "command-invocation:deploy-hw-pdi",
+        "denied for session command: deploy-hw image.pdi in parent Pi",
+      ],
     ],
   },
   {
@@ -283,8 +330,16 @@ const choiceCases: Array<{
       kind: "file",
       fields: {
         scope_options: [
-          { scope_kind: "file", scope_key: "file:/workspace/src/file.ts", scope_path: "/workspace/src/file.ts" },
-          { scope_kind: "file-dir", scope_key: "file-dir:/workspace/src", scope_path: "/workspace/src/" },
+          {
+            scope_kind: "file",
+            scope_key: "file:/workspace/src/file.ts",
+            scope_path: "/workspace/src/file.ts",
+          },
+          {
+            scope_kind: "file-dir",
+            scope_key: "file-dir:/workspace/src",
+            scope_path: "/workspace/src/",
+          },
           { scope_kind: "file-tree", scope_key: "file-tree:/", scope_path: "/" },
         ],
       },
@@ -292,15 +347,40 @@ const choiceCases: Array<{
     expected: [
       ["Deny once", "deny", "once", null, null, "denied in parent Pi"],
       ["Allow once", "approve", "once", null, null, "approved in parent Pi"],
-      ["Allow this file for session", "approve", "session", "file", "file:/workspace/src/file.ts", "approved for session file: file:/workspace/src/file.ts in parent Pi"],
-      ["Allow /workspace/src/* for session (one level)", "approve", "session", "file-dir", "file-dir:/workspace/src", "approved for session file-dir: file-dir:/workspace/src in parent Pi"],
-      ["Allow /** for session", "approve", "session", "file-tree", "file-tree:/", "approved for session file-tree: file-tree:/ in parent Pi"],
+      [
+        "Allow this file for session",
+        "approve",
+        "session",
+        "file",
+        "file:/workspace/src/file.ts",
+        "approved for session file: file:/workspace/src/file.ts in parent Pi",
+      ],
+      [
+        "Allow /workspace/src/* for session (one level)",
+        "approve",
+        "session",
+        "file-dir",
+        "file-dir:/workspace/src",
+        "approved for session file-dir: file-dir:/workspace/src in parent Pi",
+      ],
+      [
+        "Allow /** for session",
+        "approve",
+        "session",
+        "file-tree",
+        "file-tree:/",
+        "approved for session file-tree: file-tree:/ in parent Pi",
+      ],
     ],
   },
 ];
 
 for (const testCase of choiceCases) {
-  assert.deepEqual(choiceRows(approvalChoices(testCase.approval)), testCase.expected, testCase.name);
+  assert.deepEqual(
+    choiceRows(approvalChoices(testCase.approval)),
+    testCase.expected,
+    testCase.name,
+  );
 }
 
 const selectedChoices: ApprovalChoice[] = [
@@ -343,7 +423,11 @@ for (const testCase of resolutionCases) {
   const resolution = resolveChoice(selectedChoices, testCase.choice);
   assert.deepEqual(resolution, testCase.expected, testCase.name);
   if (testCase.selectedIndex !== undefined) {
-    assert.equal(resolution, selectedChoices[testCase.selectedIndex], `${testCase.name} should retain the selected resolution`);
+    assert.equal(
+      resolution,
+      selectedChoices[testCase.selectedIndex],
+      `${testCase.name} should retain the selected resolution`,
+    );
   }
 }
 

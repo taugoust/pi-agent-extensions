@@ -52,12 +52,26 @@ export interface ShowBtwCommandMenuOptions {
   resumeThreads?: readonly BtwResumeThreadSummary[];
   settingsPath?: string;
   readSettings?: typeof readBtwSettings;
-  updateSettings?: (patch: BtwSettingsPatch, options: UpdateBtwSettingsOptions) => Promise<BtwSettings>;
+  updateSettings?: (
+    patch: BtwSettingsPatch,
+    options: UpdateBtwSettingsOptions,
+  ) => Promise<BtwSettings>;
 }
 
-export type BtwCommandMenuResult = "start" | "tree" | "closed" | { kind: "resume"; threadId: string };
+export type BtwCommandMenuResult =
+  | "start"
+  | "tree"
+  | "closed"
+  | { kind: "resume"; threadId: string };
 
-type BtwMenuScreen = "main" | "resume" | "settings" | "model" | "invalid" | "shortcut" | "shortcut-input";
+type BtwMenuScreen =
+  | "main"
+  | "resume"
+  | "settings"
+  | "model"
+  | "invalid"
+  | "shortcut"
+  | "shortcut-input";
 type BtwMenuAction =
   | "start"
   | "start-tree"
@@ -100,13 +114,19 @@ export async function showBtwCommandMenu(
   const getAvailable = ctx.modelRegistry.getAvailable;
   const allAvailableModels = deduplicateModels(
     options.availableModels ??
-      (typeof getAvailable === "function" ? getAvailable.call(ctx.modelRegistry) : ctx.modelRegistry.getAll()),
+      (typeof getAvailable === "function"
+        ? getAvailable.call(ctx.modelRegistry)
+        : ctx.modelRegistry.getAll()),
   );
   const currentModel = options.currentModel ?? ctx.model;
   const scopedModels = options.scopedModels ?? ctx.scopedModels ?? [];
   const selectableModels = availableModelsInScope(allAvailableModels, scopedModels);
-  const modelItemIds = new Map(selectableModels.map((model, index) => [model, `btw-settings-model:${index}`]));
-  const modelsByItemId = new Map(selectableModels.map((model) => [modelItemIds.get(model) as string, model]));
+  const modelItemIds = new Map(
+    selectableModels.map((model, index) => [model, `btw-settings-model:${index}`]),
+  );
+  const modelsByItemId = new Map(
+    selectableModels.map((model) => [modelItemIds.get(model) as string, model]),
+  );
   const safeModelMetadata = (value: string, fallback: string): string => {
     const safe = sanitizeTerminalText(value).trim() || fallback;
     return [...safe].slice(0, 512).join("");
@@ -116,7 +136,9 @@ export async function showBtwCommandMenu(
   const rawModelReference = (model: Pick<Model<Api>, "provider" | "id">): string | undefined => {
     const reference = `${model.provider}/${model.id}`;
     const parsed = parseBtwModelReference(reference);
-    return parsed?.provider === model.provider && parsed.modelId === model.id ? reference : undefined;
+    return parsed?.provider === model.provider && parsed.modelId === model.id
+      ? reference
+      : undefined;
   };
   const displaySettingsPath = sanitizeSingleLine(settingsPath);
   const resumeThreads = options.resumeThreads ?? [];
@@ -132,16 +154,30 @@ export async function showBtwCommandMenu(
   };
   const shortcutValue = (settings: BtwSettings, action: BtwShortcutAction): string => {
     if (!keybindings) return "Default";
-    const effective = resolveBtwShortcuts(settings.keybindings, keybindings, effectiveFullscreenCopyOnSelect(settings));
+    const effective = resolveBtwShortcuts(
+      settings.keybindings,
+      keybindings,
+      effectiveFullscreenCopyOnSelect(settings),
+    );
     const configured = settings.keybindings?.[action];
     if (configured !== undefined && !effective.keys[action].includes(configured)) {
       return `Fallback (${effective.label(action)}; saved ${formatKeyLabel(configured)})`;
     }
-    const source = configured === undefined ? (action === "cycleThinkingLevel" ? "Inherit Pi" : "Default") : "Custom";
+    const source =
+      configured === undefined
+        ? action === "cycleThinkingLevel"
+          ? "Inherit Pi"
+          : "Default"
+        : "Custom";
     return `${source} (${effective.label(action)})`;
   };
-  const saveShortcut = async (state: BtwMenuState, value: string | undefined, signal: AbortSignal) => {
-    if (!keybindings || state.kind !== "valid" || signal.aborted) return { kind: "rejected" } as const;
+  const saveShortcut = async (
+    state: BtwMenuState,
+    value: string | undefined,
+    signal: AbortSignal,
+  ) => {
+    if (!keybindings || state.kind !== "valid" || signal.aborted)
+      return { kind: "rejected" } as const;
     const action = shortcut;
     const manager = keybindings;
     const validate = (settings: BtwSettings) =>
@@ -184,44 +220,46 @@ export async function showBtwCommandMenu(
   ): Promise<{ kind: "saved" } | { kind: "cancelled" } | { kind: "failed"; error: unknown }> => {
     const modelReference = model ? rawModelReference(model) : undefined;
     if (model && !modelReference) return { kind: "cancelled" };
-    const result = await ctx.ui.custom<{ kind: "saved" } | { kind: "cancelled" } | { kind: "failed"; error: unknown }>(
-      (tui, theme, _keybindings, done) => {
-        const loader = new BorderedLoader(tui, theme, "Saving Pi BTW model...");
-        const ownerController = new AbortController();
-        const saveSignal = AbortSignal.any([signal, loader.signal, ownerController.signal]);
-        let settled = false;
-        const finish = (value: { kind: "saved" } | { kind: "cancelled" } | { kind: "failed"; error: unknown }) => {
-          if (settled) return;
-          settled = true;
-          done(value);
-        };
-        const cancel = () => finish({ kind: "cancelled" });
-        loader.onAbort = cancel;
-        saveSignal.addEventListener("abort", cancel, { once: true });
-        queueMicrotask(() => {
-          void (async () => {
-            // Let the host mount the loader before a synchronous test double or cached write can settle it.
-            await Promise.resolve();
-            if (saveSignal.aborted) return;
-            try {
-              await updateSettings({ model: modelReference }, { settingsPath, signal: saveSignal });
-              finish({ kind: "saved" });
-            } catch (error) {
-              finish(saveSignal.aborted ? { kind: "cancelled" } : { kind: "failed", error });
-            }
-          })();
-        });
-        return {
-          render: (width: number) => loader.render(width),
-          invalidate: () => loader.invalidate(),
-          handleInput: (data: string) => loader.handleInput(data),
-          dispose() {
-            ownerController.abort(new DOMException("Pi BTW model save disposed", "AbortError"));
-            loader.dispose();
-          },
-        };
-      },
-    );
+    const result = await ctx.ui.custom<
+      { kind: "saved" } | { kind: "cancelled" } | { kind: "failed"; error: unknown }
+    >((tui, theme, _keybindings, done) => {
+      const loader = new BorderedLoader(tui, theme, "Saving Pi BTW model...");
+      const ownerController = new AbortController();
+      const saveSignal = AbortSignal.any([signal, loader.signal, ownerController.signal]);
+      let settled = false;
+      const finish = (
+        value: { kind: "saved" } | { kind: "cancelled" } | { kind: "failed"; error: unknown },
+      ) => {
+        if (settled) return;
+        settled = true;
+        done(value);
+      };
+      const cancel = () => finish({ kind: "cancelled" });
+      loader.onAbort = cancel;
+      saveSignal.addEventListener("abort", cancel, { once: true });
+      queueMicrotask(() => {
+        void (async () => {
+          // Let the host mount the loader before a synchronous test double or cached write can settle it.
+          await Promise.resolve();
+          if (saveSignal.aborted) return;
+          try {
+            await updateSettings({ model: modelReference }, { settingsPath, signal: saveSignal });
+            finish({ kind: "saved" });
+          } catch (error) {
+            finish(saveSignal.aborted ? { kind: "cancelled" } : { kind: "failed", error });
+          }
+        })();
+      });
+      return {
+        render: (width: number) => loader.render(width),
+        invalidate: () => loader.invalidate(),
+        handleInput: (data: string) => loader.handleInput(data),
+        dispose() {
+          ownerController.abort(new DOMException("Pi BTW model save disposed", "AbortError"));
+          loader.dispose();
+        },
+      };
+    });
     return result ?? { kind: "cancelled" };
   };
 
@@ -236,7 +274,9 @@ export async function showBtwCommandMenu(
     if (!settings.model) return undefined;
     const reference = parseBtwModelReference(settings.model);
     return reference
-      ? allAvailableModels.find((model) => model.provider === reference.provider && model.id === reference.modelId)
+      ? allAvailableModels.find(
+          (model) => model.provider === reference.provider && model.id === reference.modelId,
+        )
       : undefined;
   };
   const selectableConfiguredModel = (settings: BtwSettings): Model<Api> | undefined => {
@@ -270,10 +310,13 @@ export async function showBtwCommandMenu(
   };
   const displayModelValue = (settings: BtwSettings): string => {
     if (!settings.model) {
-      return currentModel ? `${SAME_AS_MAIN_THREAD} (${displayModelReference(currentModel)})` : SAME_AS_MAIN_THREAD;
+      return currentModel
+        ? `${SAME_AS_MAIN_THREAD} (${displayModelReference(currentModel)})`
+        : SAME_AS_MAIN_THREAD;
     }
     const available = configuredModel(settings);
-    if (!available) return `${SAME_AS_MAIN_THREAD} · ${safeModelMetadata(settings.model, "unknown model")} unavailable`;
+    if (!available)
+      return `${SAME_AS_MAIN_THREAD} · ${safeModelMetadata(settings.model, "unknown model")} unavailable`;
     const reference = displayModelReference(available);
     return selectableConfiguredModel(settings) ? reference : `${reference} · outside current scope`;
   };
@@ -314,10 +357,14 @@ export async function showBtwCommandMenu(
                 ? displayModelReference(configured)
                 : safeModelMetadata(settings.model as string, "unknown model"),
               ...(configured
-                ? { description: "Configured outside the current model scope; retained until changed." }
+                ? {
+                    description:
+                      "Configured outside the current model scope; retained until changed.",
+                  }
                 : {
                     disabled: true,
-                    disabledReason: "Configured model is unavailable; /btw falls back to the main model.",
+                    disabledReason:
+                      "Configured model is unavailable; /btw falls back to the main model.",
                   }),
             },
           ]
@@ -326,7 +373,11 @@ export async function showBtwCommandMenu(
   };
   const selectedModelItemId = (settings: BtwSettings): string => {
     const selected = selectableConfiguredModel(settings);
-    return selected ? (modelItemIds.get(selected) as string) : settings.model ? "configured-model" : "same-as-main";
+    return selected
+      ? (modelItemIds.get(selected) as string)
+      : settings.model
+        ? "configured-model"
+        : "same-as-main";
   };
   const currentModelItemId = (settings: BtwSettings): string =>
     settings.model && configuredModel(settings) ? selectedModelItemId(settings) : "same-as-main";
@@ -395,7 +446,8 @@ export async function showBtwCommandMenu(
           {
             id: "model",
             label: "Model",
-            description: "Choose the model for future pi-btw side threads without changing the main session.",
+            description:
+              "Choose the model for future pi-btw side threads without changing the main session.",
             currentValue: displayModelValue(state.settings),
             action: "open-model",
           },
@@ -418,7 +470,8 @@ export async function showBtwCommandMenu(
           {
             id: "fullscreenCopyOnSelect",
             label: "Copy selection automatically",
-            description: "Copy mouse selections immediately instead of with the configured copy key.",
+            description:
+              "Copy mouse selections immediately instead of with the configured copy key.",
             currentValue: effectiveFullscreenCopyOnSelect(state.settings) ? "On" : "Off",
             values: ["On", "Off"],
             action: "set-fullscreen-copy",
@@ -426,7 +479,8 @@ export async function showBtwCommandMenu(
           {
             id: "layout",
             label: "Side-thread layout",
-            description: "Use the full workspace or place BTW beside the live, click-to-focus main thread.",
+            description:
+              "Use the full workspace or place BTW beside the live, click-to-focus main thread.",
             currentValue: BTW_LAYOUT_LABELS[effectiveBtwLayout(state.settings)],
             values: BTW_LAYOUT_VALUES,
             action: "set-layout",
@@ -434,7 +488,8 @@ export async function showBtwCommandMenu(
           ...BTW_SHORTCUT_ACTIONS.map((action) => ({
             id: action,
             label: shortcutLabels[action],
-            description: "Edit a BTW-only key combination or restore its default. Ctrl+C always hard-cancels.",
+            description:
+              "Edit a BTW-only key combination or restore its default. Ctrl+C always hard-cancels.",
             currentValue: shortcutValue(state.settings, action),
             action: "edit-shortcut" as const,
           })),
@@ -487,11 +542,13 @@ export async function showBtwCommandMenu(
     },
     actions: {
       "edit-shortcut": ({ itemId }) => {
-        if (!BTW_SHORTCUT_ACTIONS.includes(itemId as BtwShortcutAction)) return { kind: "rejected" };
+        if (!BTW_SHORTCUT_ACTIONS.includes(itemId as BtwShortcutAction))
+          return { kind: "rejected" };
         shortcut = itemId as BtwShortcutAction;
         return { kind: "to", screen: "shortcut" };
       },
-      "save-shortcut": ({ state, value, signal }) => saveShortcut(state, value?.trim() ?? "", signal),
+      "save-shortcut": ({ state, value, signal }) =>
+        saveShortcut(state, value?.trim() ?? "", signal),
       "reset-shortcut": ({ state, signal }) => saveShortcut(state, undefined, signal),
       "open-model": async () => ({ kind: "to", screen: "model" }),
       "set-model": async ({ state, itemId, signal }) => {
@@ -499,7 +556,8 @@ export async function showBtwCommandMenu(
           return { kind: "back" };
         }
         const model = itemId ? modelsByItemId.get(itemId) : undefined;
-        if (itemId !== "same-as-main" && (!model || !rawModelReference(model))) return { kind: "rejected" };
+        if (itemId !== "same-as-main" && (!model || !rawModelReference(model)))
+          return { kind: "rejected" };
         const result = await saveModel(model, signal);
         if (result.kind === "failed") {
           notifySaveFailure(ctx, result.error);
@@ -508,7 +566,9 @@ export async function showBtwCommandMenu(
         if (result.kind === "cancelled" || signal.aborted) return { kind: "close" };
         notifySafely(
           ctx,
-          model ? `Pi BTW model: ${displayModelReference(model)}.` : `Pi BTW model: ${SAME_AS_MAIN_THREAD}.`,
+          model
+            ? `Pi BTW model: ${displayModelReference(model)}.`
+            : `Pi BTW model: ${SAME_AS_MAIN_THREAD}.`,
           "info",
         );
         return { kind: "back" };
@@ -551,7 +611,10 @@ export async function showBtwCommandMenu(
       "set-remember": async ({ value, signal }) => {
         if (value !== "On" && value !== "Off") return { kind: "rejected" };
         try {
-          await updateSettings({ rememberThinkingLevelChanges: value === "On" }, { settingsPath, signal });
+          await updateSettings(
+            { rememberThinkingLevelChanges: value === "On" },
+            { settingsPath, signal },
+          );
           if (signal.aborted) return { kind: "rejected" };
           notifySafely(ctx, `Remember thinking level changes: ${value}.`, "info");
           return { kind: "stay" };
@@ -563,7 +626,10 @@ export async function showBtwCommandMenu(
       "set-fullscreen-copy": async ({ value, signal }) => {
         if (value !== "On" && value !== "Off") return { kind: "rejected" };
         try {
-          await updateSettings({ fullscreenCopyOnSelect: value === "On" }, { settingsPath, signal });
+          await updateSettings(
+            { fullscreenCopyOnSelect: value === "On" },
+            { settingsPath, signal },
+          );
           if (signal.aborted) return { kind: "rejected" };
           notifySafely(ctx, `Copy selection automatically: ${value}.`, "info");
           return { kind: "stay" };
@@ -573,14 +639,18 @@ export async function showBtwCommandMenu(
         }
       },
       "set-layout": async ({ value, signal }) => {
-        const layout = Object.entries(BTW_LAYOUT_LABELS).find(([, label]) => label === value)?.[0] as
-          | BtwLayout
-          | undefined;
+        const layout = Object.entries(BTW_LAYOUT_LABELS).find(
+          ([, label]) => label === value,
+        )?.[0] as BtwLayout | undefined;
         if (!layout) return { kind: "rejected" };
         try {
           await updateSettings({ layout }, { settingsPath, signal });
           if (signal.aborted) return { kind: "rejected" };
-          notifySafely(ctx, `Pi BTW layout: ${BTW_LAYOUT_LABELS[layout]}. Applies when BTW next opens.`, "info");
+          notifySafely(
+            ctx,
+            `Pi BTW layout: ${BTW_LAYOUT_LABELS[layout]}. Applies when BTW next opens.`,
+            "info",
+          );
           return { kind: "stay" };
         } catch (error) {
           if (!signal.aborted) notifySaveFailure(ctx, error);
@@ -670,7 +740,9 @@ export async function runBtwMenuPreservingEditor(
 }
 
 function deduplicateModels(models: readonly Model<Api>[]): Model<Api>[] {
-  return models.filter((model, index) => models.findIndex((candidate) => sameModel(candidate, model)) === index);
+  return models.filter(
+    (model, index) => models.findIndex((candidate) => sameModel(candidate, model)) === index,
+  );
 }
 
 function availableModelsInScope(
@@ -686,7 +758,10 @@ function availableModelsInScope(
   );
 }
 
-function sameModel(left: Pick<Model<Api>, "provider" | "id">, right: Pick<Model<Api>, "provider" | "id">): boolean {
+function sameModel(
+  left: Pick<Model<Api>, "provider" | "id">,
+  right: Pick<Model<Api>, "provider" | "id">,
+): boolean {
   return left.provider === right.provider && left.id === right.id;
 }
 

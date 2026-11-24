@@ -26,15 +26,19 @@ export function createDelegatedChildGoalService(
   let binding: string | undefined;
   let boundProgressId: string | undefined;
   for (const entry of ctx.sessionManager.getBranch() as any[]) {
-    const isBinding = entry.type === "custom" && entry.customType === BINDING
-      && typeof entry.data?.goalId === "string";
+    const isBinding =
+      entry.type === "custom" &&
+      entry.customType === BINDING &&
+      typeof entry.data?.goalId === "string";
     if (!isBinding) continue;
     binding = entry.data.goalId;
     boundProgressId = typeof entry.data.progressId === "string" ? entry.data.progressId : undefined;
   }
   const newRecorder = (goalId: string) => {
     const branch = ctx.sessionManager.getBranch() as unknown[];
-    return createGoalStoryRecorder(goalId, branch, data => pi.appendEntry(GOAL_STORY_ENTRY, data));
+    return createGoalStoryRecorder(goalId, branch, (data) =>
+      pi.appendEntry(GOAL_STORY_ENTRY, data),
+    );
   };
   let recorder = binding ? newRecorder(binding) : undefined;
   const storyState = () => {
@@ -67,9 +71,10 @@ export function createDelegatedChildGoalService(
     if (childGoalId !== undefined) {
       const goalId = runtime.activeGoal?.id ?? completedProjection()?.state.id;
       if (goalId !== childGoalId) throw new Error("Child goal identity changed");
-      const currentActivation = runtime.activeGoal?.activationId
-        ?? completedProjection()?.state.activationId
-        ?? childGoalId;
+      const currentActivation =
+        runtime.activeGoal?.activationId ??
+        completedProjection()?.state.activationId ??
+        childGoalId;
       if (activationId !== currentActivation) throw new Error("Child goal activation changed");
     }
     const goal = runtime.activeGoal;
@@ -88,26 +93,27 @@ export function createDelegatedChildGoalService(
     if (completed && Number.isSafeInteger(completed.endedAt)) recordState(completed.endedAt);
     const goal = runtime.activeGoal ?? completed?.state;
     const terminal = runtime.snapshotSettingsApplicationState().terminalDetails;
-    const terminalSummary = terminal?.goalId === goal?.id
-      ? terminal?.summary ?? terminal?.reason ?? null
+    const terminalSummary =
+      terminal?.goalId === goal?.id ? (terminal?.summary ?? terminal?.reason ?? null) : null;
+    const goalView = goal
+      ? {
+          status: goal.status,
+          tasks: readGoalTasks(ctx, goal),
+          tokensUsed: goal.tokensUsed,
+          automaticTurns: goal.automaticModelTurns,
+          noProgressTurns: goal.toolFreeRepeatCount,
+          summary: completed?.summary ?? terminalSummary,
+          waiting: goal.waiting?.reason ?? null,
+          prs: goal.prs ?? [],
+          checks: goal.checks ?? [],
+          diagnostics: {
+            waitDeadline: goal.waiting?.resumeAt ?? null,
+            lastTaskUpdateAt: goal.lastTaskUpdateAt ?? null,
+            lastWake: goal.lastWake ?? null,
+            lastBlocker: goal.lastBlocker ?? null,
+          },
+        }
       : null;
-    const goalView = goal ? {
-      status: goal.status,
-      tasks: readGoalTasks(ctx, goal),
-      tokensUsed: goal.tokensUsed,
-      automaticTurns: goal.automaticModelTurns,
-      noProgressTurns: goal.toolFreeRepeatCount,
-      summary: completed?.summary ?? terminalSummary,
-      waiting: goal.waiting?.reason ?? null,
-      prs: goal.prs ?? [],
-      checks: goal.checks ?? [],
-      diagnostics: {
-        waitDeadline: goal.waiting?.resumeAt ?? null,
-        lastTaskUpdateAt: goal.lastTaskUpdateAt ?? null,
-        lastWake: goal.lastWake ?? null,
-        lastBlocker: goal.lastBlocker ?? null,
-      },
-    } : null;
     return {
       entryId: binding ?? null,
       childGoalId: goal?.id ?? null,
@@ -125,13 +131,14 @@ export function createDelegatedChildGoalService(
     lane = next.catch(() => {});
     return next;
   }
-  const commandContext = () => new Proxy(ctx, {
-    get(target, key) {
-      if (key === "hasUI") return true;
-      if (key === "ui") return { ...target.ui, confirm: async () => false };
-      return Reflect.get(target, key, target);
-    },
-  });
+  const commandContext = () =>
+    new Proxy(ctx, {
+      get(target, key) {
+        if (key === "hasUI") return true;
+        if (key === "ui") return { ...target.ui, confirm: async () => false };
+        return Reflect.get(target, key, target);
+      },
+    });
   const runsOrFinished = (observed: ReturnType<typeof snapshot>) =>
     ["active", "complete"].includes(observed.goal?.status ?? "");
 
@@ -184,8 +191,11 @@ export function createDelegatedChildGoalService(
   }
 
   function updateLimits(
-    entryId: string, childGoalId: string, revision: number,
-    entry: Readonly<DelegatedGoalEntry>, activationId: string,
+    entryId: string,
+    childGoalId: string,
+    revision: number,
+    entry: Readonly<DelegatedGoalEntry>,
+    activationId: string,
   ) {
     current(entryId, childGoalId, activationId);
     if (entry.id !== entryId) throw new Error("Limit policy belongs to another goal");
@@ -198,7 +208,11 @@ export function createDelegatedChildGoalService(
     runtime.settings = { ...runtime.settings, continuationLimits: limits };
     try {
       runtime.updateGoalLimits(
-        ctx, childGoalId, runtime.policyRevision, entry.tokenBudget, entry.continuationLimits!,
+        ctx,
+        childGoalId,
+        runtime.policyRevision,
+        entry.tokenBudget,
+        entry.continuationLimits!,
       );
     } catch (error) {
       runtime.settings = previousSettings;
@@ -211,8 +225,10 @@ export function createDelegatedChildGoalService(
   }
 
   async function resume(
-    entryId: string, childGoalId: string,
-    entry: Readonly<DelegatedGoalEntry> | undefined, activationId: string,
+    entryId: string,
+    childGoalId: string,
+    entry: Readonly<DelegatedGoalEntry> | undefined,
+    activationId: string,
   ) {
     current(entryId, childGoalId, activationId);
     if (!ctx.isIdle() || ctx.hasPendingMessages()) throw new Error("Dedicated child is not idle");
@@ -238,16 +254,20 @@ export function createDelegatedChildGoalService(
     await commands.resumeGoal(commandContext());
     recordState();
     const observed = snapshot();
-    const resumed = resumedLineage && boundProgressId === resumedLineage
-      && observed.childGoalId === childGoalId
-      && observed.childActivationId !== activationId
-      && runsOrFinished(observed);
+    const resumed =
+      resumedLineage &&
+      boundProgressId === resumedLineage &&
+      observed.childGoalId === childGoalId &&
+      observed.childActivationId !== activationId &&
+      runsOrFinished(observed);
     if (!resumed) throw new Error("Child goal resume failed");
     return observed;
   }
 
   return {
-    protocol: 1 as const, sessionId, snapshot,
+    protocol: 1 as const,
+    sessionId,
+    snapshot,
     recordState,
     recordActivity(id: string, text: string) {
       current();
@@ -257,41 +277,57 @@ export function createDelegatedChildGoalService(
     pause: (entryId: string, childGoalId: string, activationId: string) =>
       serial(() => pause(entryId, childGoalId, activationId)),
     updateLimits: (
-      entryId: string, childGoalId: string, revision: number,
-      entry: Readonly<DelegatedGoalEntry>, activationId: string,
+      entryId: string,
+      childGoalId: string,
+      revision: number,
+      entry: Readonly<DelegatedGoalEntry>,
+      activationId: string,
     ) => serial(() => updateLimits(entryId, childGoalId, revision, entry, activationId)),
     resume: (
-      entryId: string, childGoalId: string,
-      entry: Readonly<DelegatedGoalEntry> | undefined, activationId: string,
+      entryId: string,
+      childGoalId: string,
+      entry: Readonly<DelegatedGoalEntry> | undefined,
+      activationId: string,
     ) => serial(() => resume(entryId, childGoalId, entry, activationId)),
     refreshContext(next: ExtensionContext) {
       if (!closed && next.sessionManager.getSessionId() === sessionId) ctx = next;
     },
-    dispose() { closed = true; },
+    dispose() {
+      closed = true;
+    },
   };
 }
 
 /** A completed goal-history record of the bound lineage with a non-empty summary. */
 function isCompletedHistory(entry: any, boundProgressId: string) {
   const history = entry?.data;
-  return entry?.type === "custom" && entry.customType === "goal-history"
-    && history?.status === "completed"
-    && history.progressId === boundProgressId
-    && typeof history.id === "string"
-    && typeof history.summary === "string" && history.summary.trim();
+  return (
+    entry?.type === "custom" &&
+    entry.customType === "goal-history" &&
+    history?.status === "completed" &&
+    history.progressId === boundProgressId &&
+    typeof history.id === "string" &&
+    typeof history.summary === "string" &&
+    history.summary.trim()
+  );
 }
 
 /** The completed state was active under its own contract and lineage. */
 function completedUnderContract(
-  state: any, contract: any, historyId: string, boundProgressId: string,
+  state: any,
+  contract: any,
+  historyId: string,
+  boundProgressId: string,
 ) {
-  const activationMatches = state?.activationId === undefined
-    || contract?.details?.activationId === state.activationId;
-  return state?.status === "complete"
-    && (state.progressId ?? state.id) === boundProgressId
-    && contract?.details?.state === "active"
-    && contract.details.goalId === historyId
-    && activationMatches;
+  const activationMatches =
+    state?.activationId === undefined || contract?.details?.activationId === state.activationId;
+  return (
+    state?.status === "complete" &&
+    (state.progressId ?? state.id) === boundProgressId &&
+    contract?.details?.state === "active" &&
+    contract.details.goalId === historyId &&
+    activationMatches
+  );
 }
 
 /** The engine's successful goal_complete result for exactly this summary. */
@@ -299,19 +335,27 @@ function isAcceptedCompletion(e: any, history: any) {
   const message = e.message;
   const confirmsSummary = (part: any) =>
     part.type === "text" && part.text === `Goal complete: ${history.summary}`;
-  return e.type === "message" && message?.role === "toolResult"
-    && message.toolName === "goal_complete" && message.isError !== true
-    && message.details?.goal_id === history.id
-    && message.details?.summary === history.summary
-    && message.content?.some(confirmsSummary);
+  return (
+    e.type === "message" &&
+    message?.role === "toolResult" &&
+    message.toolName === "goal_complete" &&
+    message.isError !== true &&
+    message.details?.goal_id === history.id &&
+    message.details?.summary === history.summary &&
+    message.content?.some(confirmsSummary)
+  );
 }
 
 /** The assistant's goal_complete call that produced `toolCallId`. */
 function isCompletionCall(e: any, toolCallId: string, summary: string) {
-  const matchesCall = (part: any) => part.type === "toolCall" && part.name === "goal_complete"
-    && part.id === toolCallId && part.arguments?.summary === summary;
-  return e.type === "message" && e.message?.role === "assistant"
-    && e.message.content?.some(matchesCall);
+  const matchesCall = (part: any) =>
+    part.type === "toolCall" &&
+    part.name === "goal_complete" &&
+    part.id === toolCallId &&
+    part.arguments?.summary === summary;
+  return (
+    e.type === "message" && e.message?.role === "assistant" && e.message.content?.some(matchesCall)
+  );
 }
 
 export function retainedGoalCompletion(branch: any[], binding?: string, boundProgressId?: string) {
@@ -324,15 +368,18 @@ export function retainedGoalCompletion(branch: any[], binding?: string, boundPro
     if (!isCompletedHistory(entry, boundProgressId)) continue;
     const history = entry.data;
     const prior = branch.slice(0, index);
-    const state = prior.findLast(e => e.type === "custom" && e.customType === "goal-state"
-      && e.data?.goal?.id === history.id)?.data?.goal;
-    const contract = prior.findLast(e =>
-      e.type === "custom_message" && e.customType === "goal-contract");
+    const state = prior.findLast(
+      (e) =>
+        e.type === "custom" && e.customType === "goal-state" && e.data?.goal?.id === history.id,
+    )?.data?.goal;
+    const contract = prior.findLast(
+      (e) => e.type === "custom_message" && e.customType === "goal-contract",
+    );
     if (!completedUnderContract(state, contract, history.id, boundProgressId)) continue;
-    const accepted = branch.slice(index + 1).find(e => isAcceptedCompletion(e, history));
+    const accepted = branch.slice(index + 1).find((e) => isAcceptedCompletion(e, history));
     if (!accepted) continue;
     const toolCallId = accepted.message.toolCallId;
-    const call = prior.findLast(e => isCompletionCall(e, toolCallId, history.summary));
+    const call = prior.findLast((e) => isCompletionCall(e, toolCallId, history.summary));
     if (call) return { state, summary: history.summary, endedAt: history.endedAt };
   }
   return undefined;

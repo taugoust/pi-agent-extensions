@@ -11,9 +11,16 @@ const execFileAsync = promisify(execFile);
 const tmux = process.env.TEST_TMUX;
 const runner = process.env.TEST_RUNNER;
 if (!tmux || !runner) throw new Error("TEST_TMUX and TEST_RUNNER are required");
-const assert = (condition, message) => { if (!condition) throw new Error(message); };
+const assert = (condition, message) => {
+  if (!condition) throw new Error(message);
+};
 async function assertReject(promise, pattern) {
-  try { await promise; } catch(error) { assert(pattern.test(String(error)), `wrong rejection: ${error}`); return; }
+  try {
+    await promise;
+  } catch (error) {
+    assert(pattern.test(String(error)), `wrong rejection: ${error}`);
+    return;
+  }
   throw new Error(`Expected rejection ${pattern}`);
 }
 
@@ -24,37 +31,87 @@ async function assertReject(promise, pattern) {
   const finishSecond = gate.enter();
   let cleanupRan = false;
   let drained = false;
-  const draining = gate.prepare(async () => { cleanupRan = true; }, 1000).then(release => { drained = true; return release; });
+  const draining = gate
+    .prepare(async () => {
+      cleanupRan = true;
+    }, 1000)
+    .then((release) => {
+      drained = true;
+      return release;
+    });
   await Promise.resolve();
-  assert(!cleanupRan, 'cleanup ran before an entered operation drained');
-  try { gate.enter(); throw new Error('reservation missing while draining'); } catch (error) { assert(/reserved/.test(String(error)), String(error)); }
-  finish(); finish(); // release is idempotent, and another operation still owns the barrier
+  assert(!cleanupRan, "cleanup ran before an entered operation drained");
+  try {
+    gate.enter();
+    throw new Error("reservation missing while draining");
+  } catch (error) {
+    assert(/reserved/.test(String(error)), String(error));
+  }
+  finish();
+  finish(); // release is idempotent, and another operation still owns the barrier
   await Promise.resolve();
-  assert(!cleanupRan, 'cleanup ran while a second operation was still active');
+  assert(!cleanupRan, "cleanup ran while a second operation was still active");
   finishSecond();
   const drainRelease = await draining;
-  assert(drained && cleanupRan, 'cleanup did not proceed after drain');
+  assert(drained && cleanupRan, "cleanup did not proceed after drain");
   drainRelease();
   let finishCleanup;
-  const preparing = gate.prepare(() => new Promise(resolve => { finishCleanup = resolve; }));
-  try { gate.enter(); throw new Error('reservation missing'); } catch (error) { assert(/reserved/.test(String(error)), String(error)); }
-  await assertReject(gate.prepare(async () => {}), /already reserved/);
+  const preparing = gate.prepare(
+    () =>
+      new Promise((resolve) => {
+        finishCleanup = resolve;
+      }),
+  );
+  try {
+    gate.enter();
+    throw new Error("reservation missing");
+  } catch (error) {
+    assert(/reserved/.test(String(error)), String(error));
+  }
+  await assertReject(
+    gate.prepare(async () => {}),
+    /already reserved/,
+  );
   finishCleanup();
   const release = await preparing;
-  try { gate.enter(); throw new Error('reservation released too soon'); } catch (error) { assert(/reserved/.test(String(error)), String(error)); }
-  release(); release(); gate.enter()();
-  await assertReject(gate.prepare(async () => { throw new Error('preserve failed'); }), /preserve failed/);
+  try {
+    gate.enter();
+    throw new Error("reservation released too soon");
+  } catch (error) {
+    assert(/reserved/.test(String(error)), String(error));
+  }
+  release();
+  release();
+  gate.enter()();
+  await assertReject(
+    gate.prepare(async () => {
+      throw new Error("preserve failed");
+    }),
+    /preserve failed/,
+  );
   const stuck = gate.enter();
   let timedOutCleanupRan = false;
-  await assertReject(gate.prepare(async () => { timedOutCleanupRan = true; }, 5), /did not finish before cleanup deadline/);
+  await assertReject(
+    gate.prepare(async () => {
+      timedOutCleanupRan = true;
+    }, 5),
+    /did not finish before cleanup deadline/,
+  );
   gate.enter()(); // timeout released the reservation even while the old operation remains unsettled
   let nextCleanupRan = false;
-  const next = gate.prepare(async () => { nextCleanupRan = true; }, 1000);
-  assert(!nextCleanupRan, 'a fresh reservation ignored the old operation');
+  const next = gate.prepare(async () => {
+    nextCleanupRan = true;
+  }, 1000);
+  assert(!nextCleanupRan, "a fresh reservation ignored the old operation");
   stuck();
   const releaseNext = await next;
-  assert(nextCleanupRan && !timedOutCleanupRan, 'late drain resurrected timed-out cleanup');
-  try { gate.enter(); throw new Error('fresh reservation released too soon'); } catch (error) { assert(/reserved/.test(String(error)), String(error)); }
+  assert(nextCleanupRan && !timedOutCleanupRan, "late drain resurrected timed-out cleanup");
+  try {
+    gate.enter();
+    throw new Error("fresh reservation released too soon");
+  } catch (error) {
+    assert(/reserved/.test(String(error)), String(error));
+  }
   releaseNext();
   gate.enter()();
 }
@@ -62,41 +119,110 @@ async function assertReject(promise, pattern) {
 // Use real cleanup orchestration with a fake backend inventory: >list maximum,
 // foreign ownership, adopted/running refusal, and preservation before deletion.
 {
-  const records = new Map(Array.from({length: 1002}, (_, i) => {
-    const id = `job-${i.toString(16).padStart(24, '0')}`;
-    return [id, { metadata: { id, sessionId: i === 1001 ? 'foreign' : 'owner' }, status: 'completed', result: { status: 'completed' } }];
-  }));
-  const fake = new BackgroundJobManager({withRetentionLock: async operation => operation(), listIds: async () => [...records.keys()], readMetadata: async id => records.get(id).metadata}, {});
-  fake.get = async id => records.get(id);
-  fake.readOutput = async () => ({text: '界'.repeat(20000) + 'FINAL ERROR MARKER', truncated: false});
+  const records = new Map(
+    Array.from({ length: 1002 }, (_, i) => {
+      const id = `job-${i.toString(16).padStart(24, "0")}`;
+      return [
+        id,
+        {
+          metadata: { id, sessionId: i === 1001 ? "foreign" : "owner" },
+          status: "completed",
+          result: { status: "completed" },
+        },
+      ];
+    }),
+  );
+  const fake = new BackgroundJobManager(
+    {
+      withRetentionLock: async (operation) => operation(),
+      listIds: async () => [...records.keys()],
+      readMetadata: async (id) => records.get(id).metadata,
+    },
+    {},
+  );
+  fake.get = async (id) => records.get(id);
+  fake.readOutput = async () => ({
+    text: "界".repeat(20000) + "FINAL ERROR MARKER",
+    truncated: false,
+  });
   let preserved = false;
-  fake.reapLocked = async id => { assert(preserved, 'deleted before preservation'); assert(records.get(id).metadata.sessionId === 'owner', 'foreign deletion'); records.delete(id); };
+  fake.reapLocked = async (id) => {
+    assert(preserved, "deleted before preservation");
+    assert(records.get(id).metadata.sessionId === "owner", "foreign deletion");
+    records.delete(id);
+  };
   const first = records.values().next().value;
   first.metadata.observed = {};
-  await assertReject(fake.reapSession('owner', async () => {}), /adopted.*job-/);
+  await assertReject(
+    fake.reapSession("owner", async () => {}),
+    /adopted.*job-/,
+  );
   delete first.metadata.observed;
-  first.status = 'starting';
-  await assertReject(fake.reapSession('owner', async () => {}), /starting.*job-/);
-  first.status = 'completed';
-  for (const record of records.values()) record.status = 'running';
-  await assertReject(fake.reapSession('owner', async () => {}), /901 more \(1001 total\)/);
-  for (const record of records.values()) record.status = 'completed';
-  await assertReject(fake.reapSession('owner', async () => { throw new Error('disk full'); }), /disk full/);
-  assert(records.size === 1002, 'preservation failure deleted jobs');
-  await assertReject(fake.reapSession('owner', async () => {}, () => { throw new Error('cleanup deadline'); }), /cleanup deadline/);
-  assert(records.size === 1002, 'deadline failure deleted jobs');
+  first.status = "starting";
+  await assertReject(
+    fake.reapSession("owner", async () => {}),
+    /starting.*job-/,
+  );
+  first.status = "completed";
+  for (const record of records.values()) record.status = "running";
+  await assertReject(
+    fake.reapSession("owner", async () => {}),
+    /901 more \(1001 total\)/,
+  );
+  for (const record of records.values()) record.status = "completed";
+  await assertReject(
+    fake.reapSession("owner", async () => {
+      throw new Error("disk full");
+    }),
+    /disk full/,
+  );
+  assert(records.size === 1002, "preservation failure deleted jobs");
+  await assertReject(
+    fake.reapSession(
+      "owner",
+      async () => {},
+      () => {
+        throw new Error("cleanup deadline");
+      },
+    ),
+    /cleanup deadline/,
+  );
+  assert(records.size === 1002, "deadline failure deleted jobs");
   let expired = false;
-  await assertReject(fake.reapSession('owner', async () => { expired = true; }, () => { if (expired) throw new Error('cleanup deadline'); }), /cleanup deadline/);
-  assert(records.size === 1002, 'deadline after preservation deleted jobs');
-  await fake.reapSession('owner', async payload => {
-    assert(payload.jobs.length === 1001, 'cleanup truncated inventory');
-    assert(payload.jobs[0].output.endsWith('FINAL ERROR MARKER'), 'cleanup dropped final error output');
-    assert(!payload.jobs[0].output.includes('\ufffd') && payload.jobs[0].outputTruncated, 'cleanup split UTF-8 or lost truncation flag');
-    assert(payload.jobs.reduce((n, job) => n + Buffer.byteLength(job.output), 0) <= 256 * 1024, 'output budget exceeded');
-    assert(payload.jobs.every(job => Buffer.byteLength(job.output) <= 16 * 1024), 'per-job budget exceeded');
+  await assertReject(
+    fake.reapSession(
+      "owner",
+      async () => {
+        expired = true;
+      },
+      () => {
+        if (expired) throw new Error("cleanup deadline");
+      },
+    ),
+    /cleanup deadline/,
+  );
+  assert(records.size === 1002, "deadline after preservation deleted jobs");
+  await fake.reapSession("owner", async (payload) => {
+    assert(payload.jobs.length === 1001, "cleanup truncated inventory");
+    assert(
+      payload.jobs[0].output.endsWith("FINAL ERROR MARKER"),
+      "cleanup dropped final error output",
+    );
+    assert(
+      !payload.jobs[0].output.includes("\ufffd") && payload.jobs[0].outputTruncated,
+      "cleanup split UTF-8 or lost truncation flag",
+    );
+    assert(
+      payload.jobs.reduce((n, job) => n + Buffer.byteLength(job.output), 0) <= 256 * 1024,
+      "output budget exceeded",
+    );
+    assert(
+      payload.jobs.every((job) => Buffer.byteLength(job.output) <= 16 * 1024),
+      "per-job budget exceeded",
+    );
     preserved = true;
   });
-  assert(records.size === 1, 'foreign job was not retained');
+  assert(records.size === 1, "foreign job was not retained");
 }
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "background-job-test-"));
@@ -108,8 +234,12 @@ const backend = new TmuxBackend(store, tmux, process.execPath, runner);
 const manager = new BackgroundJobManager(store, backend);
 
 async function cleanup() {
-  await execFileAsync(tmux, ["-S", store.socketPath, "kill-server"], { timeout: 3000 }).catch(() => undefined);
-  await execFileAsync(tmux, ["-S", sentinelSocket, "kill-server"], { timeout: 3000 }).catch(() => undefined);
+  await execFileAsync(tmux, ["-S", store.socketPath, "kill-server"], { timeout: 3000 }).catch(
+    () => undefined,
+  );
+  await execFileAsync(tmux, ["-S", sentinelSocket, "kill-server"], { timeout: 3000 }).catch(
+    () => undefined,
+  );
   fs.rmSync(root, { recursive: true, force: true });
   fs.rmSync(runtimeRoot, { recursive: true, force: true });
   fs.rmSync(sentinelSocket, { force: true });
@@ -122,16 +252,34 @@ try {
   await assertReject(untouchedStore.listIdsReadOnly(), /ENOENT/);
   assert(!fs.existsSync(untouchedStore.root), "read-only ID enumeration initialized storage");
   const scanStore = new JobStore(path.join(root, "scan-state"));
-  const retained = Array.from({ length: 80 }, (_, index) => `job-${index.toString(16).padStart(24, "0")}`);
+  const retained = Array.from(
+    { length: 80 },
+    (_, index) => `job-${index.toString(16).padStart(24, "0")}`,
+  );
   const retainedSet = new Set(retained);
   const listIds = scanStore.listIds.bind(scanStore);
-  scanStore.listIds = async () => [...retained, ...await listIds()];
+  scanStore.listIds = async () => [...retained, ...(await listIds())];
   let scanning;
-  const scanStarted = new Promise(resolve => { scanning = resolve; });
-  let activeReads = 0, maximumReads = 0, scannedCount = 0;
+  const scanStarted = new Promise((resolve) => {
+    scanning = resolve;
+  });
+  let activeReads = 0,
+    maximumReads = 0,
+    scannedCount = 0;
   const scanBackend = {
-    async launch() { return { schemaVersion: 1, windowId: "@1", paneId: "%1", panePid: process.pid, paneStartToken: "fixture", launchedAt: new Date().toISOString() }; },
-    async paneState() { return { exists: true, dead: false }; },
+    async launch() {
+      return {
+        schemaVersion: 1,
+        windowId: "@1",
+        paneId: "%1",
+        panePid: process.pid,
+        paneStartToken: "fixture",
+        launchedAt: new Date().toISOString(),
+      };
+    },
+    async paneState() {
+      return { exists: true, dead: false };
+    },
   };
   const scanManager = new BackgroundJobManager(scanStore, scanBackend);
   const get = scanManager.get.bind(scanManager);
@@ -141,29 +289,68 @@ try {
     maximumReads = Math.max(maximumReads, activeReads);
     scanning();
     try {
-      await new Promise(resolve => setTimeout(resolve, 80));
+      await new Promise((resolve) => setTimeout(resolve, 80));
       scannedCount++;
       // Corrupt retained entries must not abort the remaining scan.
       if (id === retained[5]) throw new Error("fixture corrupt metadata");
-      return { metadata: { id, createdAt: "2026-01-01T00:00:00Z" }, status: "completed", result: { status: "completed", finishedAt: "2026-01-01T00:00:00Z" } };
-    } finally { activeReads--; }
+      return {
+        metadata: { id, createdAt: "2026-01-01T00:00:00Z" },
+        status: "completed",
+        result: { status: "completed", finishedAt: "2026-01-01T00:00:00Z" },
+      };
+    } finally {
+      activeReads--;
+    }
   };
   const scanAt = Date.now();
   const firstScan = scanManager.start({ command: ":", cwd: root });
   await scanStarted;
-  const scans = await Promise.allSettled([firstScan, scanManager.start({ command: ":", cwd: root })]);
+  const scans = await Promise.allSettled([
+    firstScan,
+    scanManager.start({ command: ":", cwd: root }),
+  ]);
   const startsElapsedMs = Date.now() - scanAt;
-  assert(scans.every(result => result.status === "fulfilled"), `retained-job scan caused start lock contention: ${scans.map(result => result.reason).join(", ")}`);
+  assert(
+    scans.every((result) => result.status === "fulfilled"),
+    `retained-job scan caused start lock contention: ${scans.map((result) => result.reason).join(", ")}`,
+  );
   assert(maximumReads > 1 && maximumReads <= 8, `unbounded or serial scan: ${maximumReads}`);
   assert(scannedCount === 160, "start quota scans skipped retained entries");
   const limited = await scanManager.list(3, false);
   assert(limited.length === 3, "list limit changed");
   // Newly created real jobs sort first; equal-timestamp fixtures keep ID-list order.
   assert(limited[2].metadata.id === retained[0], "concurrent list changed stable ordering");
-  console.log(`PASS bounded retained-job scans: two starts in ${startsElapsedMs}ms, ${maximumReads} maximum concurrent reads (including corrupt entries); ordering/limits preserved`);
+  console.log(
+    `PASS bounded retained-job scans: two starts in ${startsElapsedMs}ms, ${maximumReads} maximum concurrent reads (including corrupt entries); ordering/limits preserved`,
+  );
 
-  await execFileAsync(tmux, ["-S", sentinelSocket, "-f", "/dev/null", "new-session", "-d", "-x", "240", "-y", "1000", "-s", "sentinel", "sleep", "60"]);
-  const caller = (await execFileAsync(tmux, ['-S', sentinelSocket, 'display-message', '-p', '-t', 'sentinel', '#{pane_id}'])).stdout.trim();
+  await execFileAsync(tmux, [
+    "-S",
+    sentinelSocket,
+    "-f",
+    "/dev/null",
+    "new-session",
+    "-d",
+    "-x",
+    "240",
+    "-y",
+    "1000",
+    "-s",
+    "sentinel",
+    "sleep",
+    "60",
+  ]);
+  const caller = (
+    await execFileAsync(tmux, [
+      "-S",
+      sentinelSocket,
+      "display-message",
+      "-p",
+      "-t",
+      "sentinel",
+      "#{pane_id}",
+    ])
+  ).stdout.trim();
   process.env.TMUX = `${sentinelSocket},0,0`;
   process.env.TMUX_PANE = caller;
   process.env.BG_TEST_VALUE = "exact value with spaces";
@@ -174,34 +361,81 @@ try {
     name: "  survival\n ",
     sessionId: "test-session",
   });
-  assert(first.status === "running" && first.launch?.paneStartToken, "job did not launch with process identity");
-  const paneTitle = (await execFileAsync(tmux, ["-S", first.launch.socketPath, "display-message", "-p", "-t", first.launch.paneId, "#{@pi_background_job_name}"])).stdout.trim();
-  assert(paneTitle === "survival", `pane-local title must use the human job name, got ${JSON.stringify(paneTitle)}`);
+  assert(
+    first.status === "running" && first.launch?.paneStartToken,
+    "job did not launch with process identity",
+  );
+  const paneTitle = (
+    await execFileAsync(tmux, [
+      "-S",
+      first.launch.socketPath,
+      "display-message",
+      "-p",
+      "-t",
+      first.launch.paneId,
+      "#{@pi_background_job_name}",
+    ])
+  ).stdout.trim();
+  assert(
+    paneTitle === "survival",
+    `pane-local title must use the human job name, got ${JSON.stringify(paneTitle)}`,
+  );
   assert(paneTitle !== first.metadata.id, "pane-local title must not expose the opaque job ID");
-  assert((fs.statSync(store.jobDir(first.metadata.id)).mode & 0o077) === 0, "job directory is not private");
-  assert(!fs.existsSync(store.path(first.metadata.id, "environment")) || (fs.statSync(store.path(first.metadata.id, "environment")).mode & 0o077) === 0, "environment snapshot is not private");
+  assert(
+    (fs.statSync(store.jobDir(first.metadata.id)).mode & 0o077) === 0,
+    "job directory is not private",
+  );
+  assert(
+    !fs.existsSync(store.path(first.metadata.id, "environment")) ||
+      (fs.statSync(store.path(first.metadata.id, "environment")).mode & 0o077) === 0,
+    "environment snapshot is not private",
+  );
 
   const shortWait = await manager.wait(first.metadata.id, 10);
-  assert(shortWait.timedOut && shortWait.record.status === "running", "bounded wait did not time out while leaving the job running");
+  assert(
+    shortWait.timedOut && shortWait.record.status === "running",
+    "bounded wait did not time out while leaving the job running",
+  );
   const controller = new AbortController();
   controller.abort();
   let aborted = false;
-  try { await manager.wait(first.metadata.id, 43_200_000, controller.signal); }
-  catch (error) { aborted = error?.name === "AbortError" && String(error.message).includes("Wait cancelled"); }
+  try {
+    await manager.wait(first.metadata.id, 43_200_000, controller.signal);
+  } catch (error) {
+    aborted = error?.name === "AbortError" && String(error.message).includes("Wait cancelled");
+  }
   assert(aborted, "aborted wait did not report cancellation");
-  assert((await manager.get(first.metadata.id)).status === "running", "aborting the wait cancelled the job itself");
+  assert(
+    (await manager.get(first.metadata.id)).status === "running",
+    "aborting the wait cancelled the job itself",
+  );
 
   const reloadedStore = new JobStore(stateRoot, runtimeRoot);
-  const reloaded = new BackgroundJobManager(reloadedStore, new TmuxBackend(reloadedStore, tmux, process.execPath, runner));
+  const reloaded = new BackgroundJobManager(
+    reloadedStore,
+    new TmuxBackend(reloadedStore, tmux, process.execPath, runner),
+  );
   await assertReject(reloaded.wait(first.metadata.id, 43_200_001), /Wait timeout/);
   const finished = await reloaded.wait(first.metadata.id, 43_200_000);
-  assert(!finished.timedOut && finished.record.status === "completed" && finished.record.result?.exitCode === 0, "reloaded manager did not recover completed job");
+  assert(
+    !finished.timedOut &&
+      finished.record.status === "completed" &&
+      finished.record.result?.exitCode === 0,
+    "reloaded manager did not recover completed job",
+  );
   // The runner records when output arrived: the first lines a second before "done".
   const timing = finished.record.result?.output;
   const printed = `cwd=${root}\nenv=exact value with spaces\ndone\n`;
-  assert(timing && timing.bytes === Buffer.byteLength(printed), `output byte count was not recorded: ${JSON.stringify(timing)}`);
-  assert(timing.durationMs >= 1000 && timing.finalSecondBytes >= 5 && timing.finalSecondBytes < timing.bytes,
-    `output timing did not separate early and final output: ${JSON.stringify(timing)}`);
+  assert(
+    timing && timing.bytes === Buffer.byteLength(printed),
+    `output byte count was not recorded: ${JSON.stringify(timing)}`,
+  );
+  assert(
+    timing.durationMs >= 1000 &&
+      timing.finalSecondBytes >= 5 &&
+      timing.finalSecondBytes < timing.bytes,
+    `output timing did not separate early and final output: ${JSON.stringify(timing)}`,
+  );
   const notifiedPath = store.path(first.metadata.id, "notified");
   fs.rmSync(notifiedPath, { force: true });
   const metadataBefore = fs.readFileSync(store.path(first.metadata.id, "metadata.json"), "utf8");
@@ -209,205 +443,473 @@ try {
   fs.rmSync(store.path(first.metadata.id, "result.json"));
   const metadataMtimeBefore = fs.statSync(store.path(first.metadata.id, "metadata.json")).mtimeMs;
   const inferred = await reloaded.get(first.metadata.id, false);
-  assert(inferred.status === "lost" && !fs.existsSync(store.path(first.metadata.id, "result.json")), "non-reconciling observation persisted inferred terminal state");
-  assert(fs.statSync(store.path(first.metadata.id, "metadata.json")).mtimeMs === metadataMtimeBefore, "non-reconciling observation changed metadata mtime");
+  assert(
+    inferred.status === "lost" && !fs.existsSync(store.path(first.metadata.id, "result.json")),
+    "non-reconciling observation persisted inferred terminal state",
+  );
+  assert(
+    fs.statSync(store.path(first.metadata.id, "metadata.json")).mtimeMs === metadataMtimeBefore,
+    "non-reconciling observation changed metadata mtime",
+  );
   fs.writeFileSync(store.path(first.metadata.id, "result.json"), resultBefore, { mode: 0o600 });
   const readonlyOutput = await reloaded.outputReadOnly(first.metadata.id);
-  assert(readonlyOutput.text.includes("done") && !fs.existsSync(notifiedPath), "read-only output wrote notification state");
-  assert(fs.readFileSync(store.path(first.metadata.id, "metadata.json"), "utf8") === metadataBefore, "read-only output changed metadata");
-  assert(fs.readFileSync(store.path(first.metadata.id, "result.json"), "utf8") === resultBefore, "read-only output changed terminal result");
+  assert(
+    readonlyOutput.text.includes("done") && !fs.existsSync(notifiedPath),
+    "read-only output wrote notification state",
+  );
+  assert(
+    fs.readFileSync(store.path(first.metadata.id, "metadata.json"), "utf8") === metadataBefore,
+    "read-only output changed metadata",
+  );
+  assert(
+    fs.readFileSync(store.path(first.metadata.id, "result.json"), "utf8") === resultBefore,
+    "read-only output changed terminal result",
+  );
   const foreignId = `job-${"f".repeat(24)}`;
-  await store.create({ schemaVersion: 1, id: foreignId, command: "secret command", cwd: root, shell: "/bin/bash", createdAt: new Date().toISOString(), ownerPid: process.pid, sessionId: "other-session" }, "secret command", Buffer.alloc(0));
+  await store.create(
+    {
+      schemaVersion: 1,
+      id: foreignId,
+      command: "secret command",
+      cwd: root,
+      shell: "/bin/bash",
+      createdAt: new Date().toISOString(),
+      ownerPid: process.pid,
+      sessionId: "other-session",
+    },
+    "secret command",
+    Buffer.alloc(0),
+  );
   const observedIds = [];
   const originalGet = reloaded.get.bind(reloaded);
-  reloaded.get = async (id, reconcile) => { observedIds.push(id); return await originalGet(id, reconcile); };
+  reloaded.get = async (id, reconcile) => {
+    observedIds.push(id);
+    return await originalGet(id, reconcile);
+  };
   const readonlyJobs = await reloaded.listReadOnly("test-session", 50);
-  assert(!observedIds.includes(foreignId), "read-only list observed a foreign-owner job before filtering");
-  assert(readonlyJobs.some(record => record.metadata.id === first.metadata.id), "read-only owner list omitted own job");
-  assert(readonlyJobs.every(record => record.metadata.sessionId === "test-session" && !record.metadata.childId && !record.metadata.infrastructure), "read-only owner list leaked foreign/child/infrastructure jobs");
+  assert(
+    !observedIds.includes(foreignId),
+    "read-only list observed a foreign-owner job before filtering",
+  );
+  assert(
+    readonlyJobs.some((record) => record.metadata.id === first.metadata.id),
+    "read-only owner list omitted own job",
+  );
+  assert(
+    readonlyJobs.every(
+      (record) =>
+        record.metadata.sessionId === "test-session" &&
+        !record.metadata.childId &&
+        !record.metadata.infrastructure,
+    ),
+    "read-only owner list leaked foreign/child/infrastructure jobs",
+  );
   assert(!fs.existsSync(notifiedPath), "read-only list wrote notification state");
   await store.remove(foreignId);
   const output = await reloaded.output(first.metadata.id);
-  assert(output.text.includes(`cwd=${root}`) && output.text.includes("env=exact value with spaces") && output.text.includes("done"), "job output/cwd/environment was not preserved");
-  assert(!(await store.markNotified(first.metadata.id)), "reading completed output did not suppress the pending completion notification");
-  assert(first.launch.socketPath === sentinelSocket, 'user job launched on a private server');
-  assert((await backend.paneState(first.metadata.id, first.launch)).dead, 'completed pane was not retained');
+  assert(
+    output.text.includes(`cwd=${root}`) &&
+      output.text.includes("env=exact value with spaces") &&
+      output.text.includes("done"),
+    "job output/cwd/environment was not preserved",
+  );
+  assert(
+    !(await store.markNotified(first.metadata.id)),
+    "reading completed output did not suppress the pending completion notification",
+  );
+  assert(first.launch.socketPath === sentinelSocket, "user job launched on a private server");
+  assert(
+    (await backend.paneState(first.metadata.id, first.launch)).dead,
+    "completed pane was not retained",
+  );
 
   if (process.platform === "linux") {
     const previousCwd = process.cwd();
     process.chdir(root);
     try {
-      const log = path.join(root, "external.log"); fs.writeFileSync(log, "stage: ready\n");
-      const adopted = await manager.adopt({ pid: process.pid, logPath: log, cwd: root, sessionId: "test-session", childId: "child-a" });
+      const log = path.join(root, "external.log");
+      fs.writeFileSync(log, "stage: ready\n");
+      const adopted = await manager.adopt({
+        pid: process.pid,
+        logPath: log,
+        cwd: root,
+        sessionId: "test-session",
+        childId: "child-a",
+      });
       assert(adopted.metadata.observed?.pid === process.pid, "adoption lost process identity");
-      assert((await manager.output(adopted.metadata.id)).text.includes("stage: ready"), "adopted log could not be read");
-      assert((await manager.get(adopted.metadata.id)).metadata.childId === "child-a", "delegated job ownership was not persisted");
-      let denied = false; try { await manager.cancel(adopted.metadata.id); } catch (error) { denied = String(error).includes("observation-only"); }
+      assert(
+        (await manager.output(adopted.metadata.id)).text.includes("stage: ready"),
+        "adopted log could not be read",
+      );
+      assert(
+        (await manager.get(adopted.metadata.id)).metadata.childId === "child-a",
+        "delegated job ownership was not persisted",
+      );
+      let denied = false;
+      try {
+        await manager.cancel(adopted.metadata.id);
+      } catch (error) {
+        denied = String(error).includes("observation-only");
+      }
       assert(denied, "adoption acquired destructive authority");
-      fs.renameSync(log, log + ".old"); fs.writeFileSync(log, "replaced");
-      denied = false; try { await manager.output(adopted.metadata.id); } catch (error) { denied = String(error).includes("identity changed"); }
+      fs.renameSync(log, log + ".old");
+      fs.writeFileSync(log, "replaced");
+      denied = false;
+      try {
+        await manager.output(adopted.metadata.id);
+      } catch (error) {
+        denied = String(error).includes("identity changed");
+      }
       assert(denied, "adoption silently followed a replaced log");
-    } finally { process.chdir(previousCwd); }
+    } finally {
+      process.chdir(previousCwd);
+    }
   }
 
   const failing = await manager.start({ command: "printf 'failure output\\n'; exit 7", cwd: root });
   const failed = await manager.wait(failing.metadata.id, 5000);
-  assert(failed.record.status === "failed" && failed.record.result?.exitCode === 7, "nonzero exit was not preserved");
+  assert(
+    failed.record.status === "failed" && failed.record.result?.exitCode === 7,
+    "nonzero exit was not preserved",
+  );
 
-  const noisy = await manager.start({ command: "head -c 2000000 /dev/zero | tr '\\0' x; printf '\\nend\\n'", cwd: root });
+  const noisy = await manager.start({
+    command: "head -c 2000000 /dev/zero | tr '\\0' x; printf '\\nend\\n'",
+    cwd: root,
+  });
   await manager.wait(noisy.metadata.id, 5000);
   const noisyOutput = await manager.output(noisy.metadata.id);
-  assert(Buffer.byteLength(noisyOutput.text, "utf8") <= 50 * 1024 && noisyOutput.truncated && noisyOutput.text.endsWith("end\n"), "model-facing output was not tail-bounded");
-  assert(fs.statSync(store.path(noisy.metadata.id, "output.log")).size <= 1024 * 1024, "persistent output exceeded its bound");
+  assert(
+    Buffer.byteLength(noisyOutput.text, "utf8") <= 50 * 1024 &&
+      noisyOutput.truncated &&
+      noisyOutput.text.endsWith("end\n"),
+    "model-facing output was not tail-bounded",
+  );
+  assert(
+    fs.statSync(store.path(noisy.metadata.id, "output.log")).size <= 1024 * 1024,
+    "persistent output exceeded its bound",
+  );
 
   const childPidPath = path.join(root, "cancel-child.pid");
-  const cancellable = await manager.start({ command: `printf 'started\\n'; sleep 60 & echo $! > '${childPidPath}'; wait`, cwd: root });
-  for (let attempt = 0; attempt < 50 && !fs.existsSync(childPidPath); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  const cancellable = await manager.start({
+    command: `printf 'started\\n'; sleep 60 & echo $! > '${childPidPath}'; wait`,
+    cwd: root,
+  });
+  for (let attempt = 0; attempt < 50 && !fs.existsSync(childPidPath); attempt += 1)
+    await new Promise((resolve) => setTimeout(resolve, 20));
   const childPid = Number(fs.readFileSync(childPidPath, "utf8").trim());
   const cancelled = await manager.cancel(cancellable.metadata.id);
   assert(cancelled.status === "cancelled", "cancel did not publish a cancelled terminal state");
-  assert((await backend.paneState(cancellable.metadata.id, cancellable.launch)).exists, 'cancel destroyed retained pane');
+  assert(
+    (await backend.paneState(cancellable.metadata.id, cancellable.launch)).exists,
+    "cancel destroyed retained pane",
+  );
   await new Promise((resolve) => setTimeout(resolve, 100));
   let childAlive = true;
-  try { process.kill(childPid, 0); } catch { childAlive = false; }
+  try {
+    process.kill(childPid, 0);
+  } catch {
+    childAlive = false;
+  }
   assert(!childAlive, "cancel left a command descendant alive");
 
   const orphaned = await manager.start({ command: "trap '' HUP; sleep 60", cwd: root });
   const processPath = path.join(store.jobDir(orphaned.metadata.id), "process.json");
-  for (let attempt = 0; attempt < 100 && !fs.existsSync(processPath); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  for (let attempt = 0; attempt < 100 && !fs.existsSync(processPath); attempt += 1)
+    await new Promise((resolve) => setTimeout(resolve, 10));
   assert(fs.existsSync(processPath), "runner did not publish command process identity");
   process.kill(orphaned.launch.panePid, "SIGKILL");
   await new Promise((resolve) => setTimeout(resolve, 100));
   const recoveredOrphan = await manager.get(orphaned.metadata.id);
   assert(recoveredOrphan.status === "running", "runner loss hid a still-running command process");
   const cancelledOrphan = await manager.cancel(orphaned.metadata.id);
-  assert(cancelledOrphan.status === "cancelled", "cancel could not terminate a command after runner loss");
+  assert(
+    cancelledOrphan.status === "cancelled",
+    "cancel could not terminate a command after runner loss",
+  );
 
-  const sentinel = await execFileAsync(tmux, ["-S", sentinelSocket, "has-session", "-t", "sentinel"]);
+  const sentinel = await execFileAsync(tmux, [
+    "-S",
+    sentinelSocket,
+    "has-session",
+    "-t",
+    "sentinel",
+  ]);
   assert(sentinel.stdout === "", "unexpected sentinel output");
 
   const escaped = boundedTail("before\u001b[31mred\u001b[0m\u0000after");
   assert(escaped.text === "beforeredafter", "terminal controls were not removed from output");
 
   const ids = await store.listIds();
-  assert(ids.length === (process.platform === "linux" ? 6 : 5) && ids.every((id) => /^job-[0-9a-f]{24}$/.test(id)), "opaque persisted job IDs are malformed");
+  assert(
+    ids.length === (process.platform === "linux" ? 6 : 5) &&
+      ids.every((id) => /^job-[0-9a-f]{24}$/.test(id)),
+    "opaque persisted job IDs are malformed",
+  );
 
   // A crash-looping infrastructure service must not evict a recently completed
   // user handle, even when the user already read its result.
   for (let index = 1; index <= 110; index++) {
-    const id = 'job-' + index.toString(16).padStart(24, '0');
-    await store.create({ ...first.metadata, id, command: ':', infrastructure: true, createdAt: new Date().toISOString() }, ':', Buffer.alloc(0));
-    await store.publishResult(id, { ...finished.record.result, finishedAt: new Date().toISOString() });
+    const id = "job-" + index.toString(16).padStart(24, "0");
+    await store.create(
+      {
+        ...first.metadata,
+        id,
+        command: ":",
+        infrastructure: true,
+        createdAt: new Date().toISOString(),
+      },
+      ":",
+      Buffer.alloc(0),
+    );
+    await store.publishResult(id, {
+      ...finished.record.result,
+      finishedAt: new Date().toISOString(),
+    });
   }
   // Even acknowledged old user jobs must survive automatic pruning.
   await store.publishResult(first.metadata.id, finished.record.result);
-  const oldResult = {...finished.record.result, finishedAt:'2000-01-01T00:00:00.000Z'};
-  fs.writeFileSync(store.path(first.metadata.id,'result.json'), JSON.stringify(oldResult));
-  const afterChurn = await manager.start({ command: 'printf retention-trigger', cwd: root, sessionId: 'test-session' });
+  const oldResult = { ...finished.record.result, finishedAt: "2000-01-01T00:00:00.000Z" };
+  fs.writeFileSync(store.path(first.metadata.id, "result.json"), JSON.stringify(oldResult));
+  const afterChurn = await manager.start({
+    command: "printf retention-trigger",
+    cwd: root,
+    sessionId: "test-session",
+  });
   await manager.wait(afterChurn.metadata.id, 5000);
-  assert((await manager.wait(first.metadata.id, 0)).record.status === 'completed', 'infrastructure churn evicted user metadata');
-  assert((await manager.output(first.metadata.id)).text.includes('done'), 'infrastructure churn removed user output');
+  assert(
+    (await manager.wait(first.metadata.id, 0)).record.status === "completed",
+    "infrastructure churn evicted user metadata",
+  );
+  assert(
+    (await manager.output(first.metadata.id)).text.includes("done"),
+    "infrastructure churn removed user output",
+  );
 
-  const tmuxCall = async (...args) => (await execFileAsync(tmux, ['-S',sentinelSocket,...args])).stdout.trim();
-  const window = await tmuxCall('display-message','-p','-t',caller,'#{window_id}');
-  const session = await tmuxCall('display-message','-p','-t',caller,'#{session_id}');
-  assert((await tmuxCall('list-windows','-t',session,'-F','#{window_id}')) === window, 'launch created private windows instead of caller-window panes');
+  const tmuxCall = async (...args) =>
+    (await execFileAsync(tmux, ["-S", sentinelSocket, ...args])).stdout.trim();
+  const window = await tmuxCall("display-message", "-p", "-t", caller, "#{window_id}");
+  const session = await tmuxCall("display-message", "-p", "-t", caller, "#{session_id}");
+  assert(
+    (await tmuxCall("list-windows", "-t", session, "-F", "#{window_id}")) === window,
+    "launch created private windows instead of caller-window panes",
+  );
   for (const job of [first, failing, noisy, cancellable, orphaned, afterChurn]) {
-    assert(job.launch.windowId === window && job.launch.sessionId === session, 'job escaped caller tmux window');
-    assert((await backend.paneState(job.metadata.id, job.launch)).exists, 'terminal/read/cancel automatically removed a user pane');
+    assert(
+      job.launch.windowId === window && job.launch.sessionId === session,
+      "job escaped caller tmux window",
+    );
+    assert(
+      (await backend.paneState(job.metadata.id, job.launch)).exists,
+      "terminal/read/cancel automatically removed a user pane",
+    );
   }
-  for (const job of [failing, noisy, cancellable, orphaned, afterChurn]) await manager.reap(job.metadata.id);
-  assert((await tmuxCall('list-panes','-t',window,'-F','#{pane_id}')).split('\n').length === 2, 'reap removed siblings or retained owned panes');
-  assert((await backend.paneState(first.metadata.id, first.launch)).exists, 'reaping siblings removed a retained completed pane');
+  for (const job of [failing, noisy, cancellable, orphaned, afterChurn])
+    await manager.reap(job.metadata.id);
+  assert(
+    (await tmuxCall("list-panes", "-t", window, "-F", "#{pane_id}")).split("\n").length === 2,
+    "reap removed siblings or retained owned panes",
+  );
+  assert(
+    (await backend.paneState(first.metadata.id, first.launch)).exists,
+    "reaping siblings removed a retained completed pane",
+  );
 
   const placement = await resolveLocalPlacement(tmux);
-  await assertReject(manager.start({command:':',cwd:root,placement:{...placement,paneStartToken:'stale'}}), /placement is stale/);
-  const savedTmux = process.env.TMUX, savedPane = process.env.TMUX_PANE;
-  delete process.env.TMUX; delete process.env.TMUX_PANE;
-  await assertReject(manager.start({command:':',cwd:root}), /requires Pi to run inside tmux/);
-  process.env.TMUX = savedTmux; process.env.TMUX_PANE = savedPane;
+  await assertReject(
+    manager.start({
+      command: ":",
+      cwd: root,
+      placement: { ...placement, paneStartToken: "stale" },
+    }),
+    /placement is stale/,
+  );
+  const savedTmux = process.env.TMUX,
+    savedPane = process.env.TMUX_PANE;
+  delete process.env.TMUX;
+  delete process.env.TMUX_PANE;
+  await assertReject(manager.start({ command: ":", cwd: root }), /requires Pi to run inside tmux/);
+  process.env.TMUX = savedTmux;
+  process.env.TMUX_PANE = savedPane;
 
   // This controller really crashes (SIGKILL), not just reconstructs a manager.
   const controllerCode = `
-    import {BackgroundJobManager} from ${JSON.stringify(new URL('./manager.js',import.meta.url).href)};
-    import {JobStore} from ${JSON.stringify(new URL('./store.js',import.meta.url).href)};
-    import {TmuxBackend} from ${JSON.stringify(new URL('./tmux.js',import.meta.url).href)};
+    import {BackgroundJobManager} from ${JSON.stringify(new URL("./manager.js", import.meta.url).href)};
+    import {JobStore} from ${JSON.stringify(new URL("./store.js", import.meta.url).href)};
+    import {TmuxBackend} from ${JSON.stringify(new URL("./tmux.js", import.meta.url).href)};
     const store=new JobStore(${JSON.stringify(stateRoot)},${JSON.stringify(runtimeRoot)});
     const manager=new BackgroundJobManager(store,new TmuxBackend(store,${JSON.stringify(tmux)},process.execPath,${JSON.stringify(runner)}));
     const job=await manager.start({command:'sleep 0.3; printf parent-crash-survived',cwd:${JSON.stringify(root)}});
     process.stdout.write(job.metadata.id+'\\n',()=>process.kill(process.pid,'SIGKILL'));
   `;
   let crashId;
-  try { await execFileAsync(process.execPath,['--input-type=module','-e',controllerCode]); }
-  catch(error) { assert(error.signal==='SIGKILL', 'controller did not crash as intended'); crashId=error.stdout.trim(); }
-  assert(/^job-[0-9a-f]{24}$/.test(crashId), 'crashed controller did not persist launch');
-  assert((await manager.wait(crashId,5000)).record.status==='completed', 'job did not survive controller SIGKILL');
-  assert((await manager.output(crashId)).text.includes('parent-crash-survived'), 'crash survivor lost output');
-  const crashJob=await manager.get(crashId);
-  assert((await backend.paneState(crashId,crashJob.launch)).exists,'crash survivor pane disappeared after completion');
+  try {
+    await execFileAsync(process.execPath, ["--input-type=module", "-e", controllerCode]);
+  } catch (error) {
+    assert(error.signal === "SIGKILL", "controller did not crash as intended");
+    crashId = error.stdout.trim();
+  }
+  assert(/^job-[0-9a-f]{24}$/.test(crashId), "crashed controller did not persist launch");
+  assert(
+    (await manager.wait(crashId, 5000)).record.status === "completed",
+    "job did not survive controller SIGKILL",
+  );
+  assert(
+    (await manager.output(crashId)).text.includes("parent-crash-survived"),
+    "crash survivor lost output",
+  );
+  const crashJob = await manager.get(crashId);
+  assert(
+    (await backend.paneState(crashId, crashJob.launch)).exists,
+    "crash survivor pane disappeared after completion",
+  );
 
   // Fail closed on stale server, pane start token, and pane-local claim. Keep
   // runtime on refusal, then restore the fixture and explicitly reap it.
-  await store.writeLaunch(crashId,{...crashJob.launch,serverStartToken:'stale'});
+  await store.writeLaunch(crashId, { ...crashJob.launch, serverStartToken: "stale" });
   await assertReject(manager.reap(crashId), /identity changed/);
-  await store.writeLaunch(crashId,{...crashJob.launch,paneStartToken:'stale'});
+  await store.writeLaunch(crashId, { ...crashJob.launch, paneStartToken: "stale" });
   await assertReject(manager.reap(crashId), /ownership\/placement changed/);
-  await store.writeLaunch(crashId,{...crashJob.launch,panePid:crashJob.launch.panePid+1});
+  await store.writeLaunch(crashId, { ...crashJob.launch, panePid: crashJob.launch.panePid + 1 });
   await assertReject(manager.reap(crashId), /identity changed/);
-  await store.writeLaunch(crashId,crashJob.launch);
-  await tmuxCall('set-option','-p','-t',crashJob.launch.paneId,'@pi_background_job_token','00000000000000000000000000000000');
+  await store.writeLaunch(crashId, crashJob.launch);
+  await tmuxCall(
+    "set-option",
+    "-p",
+    "-t",
+    crashJob.launch.paneId,
+    "@pi_background_job_token",
+    "00000000000000000000000000000000",
+  );
   await assertReject(manager.reap(crashId), /ownership\/placement changed/);
-  assert(fs.existsSync(store.jobDir(crashId)), 'failed reap deleted inspectable runtime');
-  await tmuxCall('set-option','-p','-t',crashJob.launch.paneId,'@pi_background_job_token',crashJob.launch.ownershipToken);
+  assert(fs.existsSync(store.jobDir(crashId)), "failed reap deleted inspectable runtime");
+  await tmuxCall(
+    "set-option",
+    "-p",
+    "-t",
+    crashJob.launch.paneId,
+    "@pi_background_job_token",
+    crashJob.launch.ownershipToken,
+  );
   await manager.reap(crashId);
-  assert(!fs.existsSync(store.jobDir(crashId)), 'explicit reap did not release runtime');
-  assert((await tmuxCall('list-panes','-t',window,'-F','#{pane_id}')).split('\n').length===2, 'reap killed sibling panes');
+  assert(!fs.existsSync(store.jobDir(crashId)), "explicit reap did not release runtime");
+  assert(
+    (await tmuxCall("list-panes", "-t", window, "-F", "#{pane_id}")).split("\n").length === 2,
+    "reap killed sibling panes",
+  );
 
   // Promotion moves an intact foreground WINDOW out of the staging session.
   // Session changes are not pane replacement; all ownership checks still apply.
-  const stagedCaller = await tmuxCall('new-session','-d','-P','-F','#{pane_id}','-x','240','-y','200','-s','staging','-c',root,'sleep','120');
-  await tmuxCall('set-option','-t','staging','@pi_infrastructure','1');
+  const stagedCaller = await tmuxCall(
+    "new-session",
+    "-d",
+    "-P",
+    "-F",
+    "#{pane_id}",
+    "-x",
+    "240",
+    "-y",
+    "200",
+    "-s",
+    "staging",
+    "-c",
+    root,
+    "sleep",
+    "120",
+  );
+  await tmuxCall("set-option", "-t", "staging", "@pi_infrastructure", "1");
   process.env.TMUX_PANE = stagedCaller;
-  const stagedRunning = await manager.start({command:'printf staged-running; sleep 60',cwd:root});
-  const stagedDone = await manager.start({command:'printf staged-completed',cwd:root});
-  await manager.wait(stagedDone.metadata.id,5000);
+  const stagedRunning = await manager.start({
+    command: "printf staged-running; sleep 60",
+    cwd: root,
+  });
+  const stagedDone = await manager.start({ command: "printf staged-completed", cwd: root });
+  await manager.wait(stagedDone.metadata.id, 5000);
   process.env.TMUX_PANE = caller;
   const stagingWindow = stagedRunning.launch.windowId;
-  const callerPid = await tmuxCall('display-message','-p','-t',stagedCaller,'#{pane_pid}');
-  await tmuxCall('move-window','-s',stagingWindow,'-t',`${session}:`);
-  assert(await tmuxCall('display-message','-p','-t',stagedCaller,'#{session_id}') === session, 'promotion did not move the window into the user session');
-  assert(stagedRunning.launch.sessionId !== session, 'promotion fixture did not change sessions');
-  assert((await manager.get(stagedRunning.metadata.id)).status === 'running', 'session promotion lost a running job');
-  assert((await backend.paneState(stagedDone.metadata.id,stagedDone.launch)).exists, 'session promotion invalidated a completed job');
-  assert((await manager.cancel(stagedRunning.metadata.id)).status === 'cancelled', 'promoted job could not be cancelled');
-  assert((await manager.output(stagedDone.metadata.id)).text.includes('staged-completed'), 'promotion lost completed output');
-  await store.writeLaunch(stagedDone.metadata.id,{...stagedDone.launch,windowId:window});
+  const callerPid = await tmuxCall("display-message", "-p", "-t", stagedCaller, "#{pane_pid}");
+  await tmuxCall("move-window", "-s", stagingWindow, "-t", `${session}:`);
+  assert(
+    (await tmuxCall("display-message", "-p", "-t", stagedCaller, "#{session_id}")) === session,
+    "promotion did not move the window into the user session",
+  );
+  assert(stagedRunning.launch.sessionId !== session, "promotion fixture did not change sessions");
+  assert(
+    (await manager.get(stagedRunning.metadata.id)).status === "running",
+    "session promotion lost a running job",
+  );
+  assert(
+    (await backend.paneState(stagedDone.metadata.id, stagedDone.launch)).exists,
+    "session promotion invalidated a completed job",
+  );
+  assert(
+    (await manager.cancel(stagedRunning.metadata.id)).status === "cancelled",
+    "promoted job could not be cancelled",
+  );
+  assert(
+    (await manager.output(stagedDone.metadata.id)).text.includes("staged-completed"),
+    "promotion lost completed output",
+  );
+  await store.writeLaunch(stagedDone.metadata.id, { ...stagedDone.launch, windowId: window });
   await assertReject(manager.reap(stagedDone.metadata.id), /ownership\/placement changed/);
-  await store.writeLaunch(stagedDone.metadata.id,stagedDone.launch);
+  await store.writeLaunch(stagedDone.metadata.id, stagedDone.launch);
   await manager.reap(stagedRunning.metadata.id);
   await manager.reap(stagedDone.metadata.id);
-  assert(await tmuxCall('list-panes','-t',stagingWindow,'-F','#{pane_id}') === stagedCaller, 'promoted reap touched a sibling pane');
-  assert(await tmuxCall('display-message','-p','-t',stagedCaller,'#{pane_pid}') === callerPid, 'promotion/reap restarted the group controller');
-  assert((await backend.paneState(first.metadata.id,first.launch)).exists, 'promoted reap touched an unrelated user window');
+  assert(
+    (await tmuxCall("list-panes", "-t", stagingWindow, "-F", "#{pane_id}")) === stagedCaller,
+    "promoted reap touched a sibling pane",
+  );
+  assert(
+    (await tmuxCall("display-message", "-p", "-t", stagedCaller, "#{pane_pid}")) === callerPid,
+    "promotion/reap restarted the group controller",
+  );
+  assert(
+    (await backend.paneState(first.metadata.id, first.launch)).exists,
+    "promoted reap touched an unrelated user window",
+  );
 
   const raceStore = new JobStore(path.join(root, "race-state"), path.join(root, "race-runtime"));
   let releaseLaunch;
   let enteredLaunch;
-  const launchEntered = new Promise(resolve => { enteredLaunch = resolve; });
+  const launchEntered = new Promise((resolve) => {
+    enteredLaunch = resolve;
+  });
   let killed = false;
   const raceBackend = {
     async launch() {
-      await new Promise((resolve) => { releaseLaunch = resolve; enteredLaunch(); });
-      return { schemaVersion: 1, windowId: "@99", paneId: "%99", panePid: process.pid, paneStartToken: "test", launchedAt: new Date().toISOString() };
+      await new Promise((resolve) => {
+        releaseLaunch = resolve;
+        enteredLaunch();
+      });
+      return {
+        schemaVersion: 1,
+        windowId: "@99",
+        paneId: "%99",
+        panePid: process.pid,
+        paneStartToken: "test",
+        launchedAt: new Date().toISOString(),
+      };
     },
-    async paneState() { return { exists: true, dead: false, panePid: process.pid }; },
-    async capture() { return ""; },
+    async paneState() {
+      return { exists: true, dead: false, panePid: process.pid };
+    },
+    async capture() {
+      return "";
+    },
     async signal() {},
-    async kill() { killed = true; },
-    attachCommand() { return "test"; },
+    async kill() {
+      killed = true;
+    },
+    attachCommand() {
+      return "test";
+    },
   };
   const raceManager = new BackgroundJobManager(raceStore, raceBackend);
-  const starting = raceManager.start({ command: "printf must-not-run", cwd: root, sessionId: "race" });
+  const starting = raceManager.start({
+    command: "printf must-not-run",
+    cwd: root,
+    sessionId: "race",
+  });
   // Directory allocation precedes metadata publication. Synchronize on backend
   // entry so cancellation exercises an actual in-flight launch, not setup.
   await launchEntered;
@@ -416,8 +918,14 @@ try {
   await raceManager.cancel(raceIds[0]);
   releaseLaunch();
   const raced = await starting;
-  assert(raced.status === "cancelled" && killed, "cancel-during-launch allowed the job to become live");
-  assert(!fs.existsSync(path.join(raceStore.jobDir(raceIds[0]), "launch-ready")), "cancelled launch opened its runner gate");
+  assert(
+    raced.status === "cancelled" && killed,
+    "cancel-during-launch allowed the job to become live",
+  );
+  assert(
+    !fs.existsSync(path.join(raceStore.jobDir(raceIds[0]), "launch-ready")),
+    "cancelled launch opened its runner gate",
+  );
 
   console.log("background-job checks passed");
 } finally {

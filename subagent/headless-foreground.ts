@@ -6,29 +6,81 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { spawn, execFile } from "node:child_process";
 import { TuiNativeManager } from "./tui-native.ts";
 import { workerWorktreeContext, type WorktreeIdentity } from "../shared/worker-worktree-context.ts";
-import { provisionWorktrees, releaseWorktree, worktreeOption, type WorktreeOption, type WorktreeInfo } from "../shared/subagent-worktrees.ts";
+import {
+  provisionWorktrees,
+  releaseWorktree,
+  worktreeOption,
+  type WorktreeOption,
+  type WorktreeInfo,
+} from "../shared/subagent-worktrees.ts";
 import { promisify } from "node:util";
-import { constants, chmodSync, closeSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, readSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  constants,
+  chmodSync,
+  closeSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, join, resolve, relative, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
-import { TUI_WORKER_DISCOVERY_ENV, TUI_WORKER_MANIFEST_ENV, type HeadlessWorkerManifest, type TuiWorkerEvent } from "../shared/tui-worker-protocol.ts";
-import { extractRetainedToolPresentation, extractToolPresentationArguments } from "../shared/tool-presentation.ts";
-import { FOREGROUND_TASKS_PROTOCOL, type ForegroundTask, type ForegroundTaskRequest, type ForegroundTaskResponse, type ForegroundTasksService, type TaskMessage, type TaskTarget, type TaskView } from "../shared/foreground-tasks.ts";
-import { processIdentity, processIsAlive, tuiWorkerLaunchContract, verificationBudget } from "./tui-worker-tmux.ts";
+import {
+  TUI_WORKER_DISCOVERY_ENV,
+  TUI_WORKER_MANIFEST_ENV,
+  type HeadlessWorkerManifest,
+  type TuiWorkerEvent,
+} from "../shared/tui-worker-protocol.ts";
+import {
+  extractRetainedToolPresentation,
+  extractToolPresentationArguments,
+} from "../shared/tool-presentation.ts";
+import {
+  FOREGROUND_TASKS_PROTOCOL,
+  type ForegroundTask,
+  type ForegroundTaskRequest,
+  type ForegroundTaskResponse,
+  type ForegroundTasksService,
+  type TaskMessage,
+  type TaskTarget,
+  type TaskView,
+} from "../shared/foreground-tasks.ts";
+import {
+  processIdentity,
+  processIsAlive,
+  tuiWorkerLaunchContract,
+  verificationBudget,
+} from "./tui-worker-tmux.ts";
 import { deliverMode, type ModeDelivery, type ModeTarget } from "./operator-mode.ts";
-import { TuiWorkerStore, atomicPrivateJson, privateDirectory, readPrivateJson } from "./tui-worker-store.ts";
+import {
+  TuiWorkerStore,
+  atomicPrivateJson,
+  privateDirectory,
+  readPrivateJson,
+} from "./tui-worker-store.ts";
 import { physicalPath } from "./physical-path.ts";
-import { callTuiWorker, awaitTuiWorkerVerification, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
+import {
+  callTuiWorker,
+  awaitTuiWorkerVerification,
+  applyTuiWorkerOperatorMode,
+} from "./tui-worker-client.ts";
 import { validateAcceptance } from "./outcome.ts";
 import { validateVerification } from "./acceptance.ts";
-import { readRetainedConversation, validateRetainedConversationFile } from "./retained-conversation.ts";
+import {
+  readRetainedConversation,
+  validateRetainedConversationFile,
+} from "./retained-conversation.ts";
 import { TaskNameStore } from "./task-name-store.ts";
 import { validateSubagentName, canonicalSubagentName } from "./tui-names.ts";
 import type { QuietUpdate } from "../shared/quiet-state.ts";
 
 const exec = promisify(execFile);
-const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const id = (prefix: string) => `${prefix}-${randomBytes(12).toString("hex")}`;
 export const HEADLESS_WORKER_RUNTIME_POLICY = [
   "Headless foreground execution policy (runtime-enforced): you are a flat helper and MUST NOT call the subagent tool or create further agents.",
@@ -39,27 +91,121 @@ export const HEADLESS_WORKER_RUNTIME_POLICY = [
 ].join("\n");
 const MAX_HISTORY_MESSAGES = 100;
 const MAX_MESSAGE_TEXT = 4 * 1024;
-const stripControls = (text: string) => text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+const stripControls = (text: string) =>
+  text
+    .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
+    .replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 
-type Spec = { name?: string; displayName?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: import("./acceptance.ts").VerificationGate[]; cleanupWorktreesOnReap?: boolean; automaticWorktrees?: boolean; worktree?: WorktreeOption; worktreeInfo?: WorktreeInfo };
-type Child = { taskId: string; childId: string; attempt: number; directory: string; activityCwd?: string; spec: Spec; status: ForegroundTask["status"]; createdAt: string; updatedAt: string; started: boolean; launching?: boolean; reaped?: boolean; cleanupWorktreeRequested?: boolean; worktreeCleanup?: ReapReport; report?: string; outcome?: unknown; error?: string; workerAlive?: boolean; requiresCompaction?: boolean; notifiedSequence?: number; launcherPid?: number; launcherToken?: string; ownerToken: string; operatorCapability: string; resumeMessage?: string; compactBeforePrompt?: boolean; stopRequested?: boolean; initialPromptDispatching?: boolean; verificationBypasses?: Array<{ attempt: number; workerEpoch: string; reason: string; at: string }>; };
-type Group = { version: 1; id: string; owner: string; ownerToken: string; createdAt: string; mode: "single" | "parallel" | "chain"; cancelled: boolean; guidanceYielded?: boolean; guidanceCompletion?: string; launchMode: "none" | "guard-only"; launcher: string; children: Child[] };
+type Spec = {
+  name?: string;
+  displayName?: string;
+  task: string;
+  cwd: string;
+  model?: string;
+  tools?: string[];
+  systemPrompt?: string;
+  acceptance?: string[];
+  verification?: import("./acceptance.ts").VerificationGate[];
+  cleanupWorktreesOnReap?: boolean;
+  automaticWorktrees?: boolean;
+  worktree?: WorktreeOption;
+  worktreeInfo?: WorktreeInfo;
+};
+type Child = {
+  taskId: string;
+  childId: string;
+  attempt: number;
+  directory: string;
+  activityCwd?: string;
+  spec: Spec;
+  status: ForegroundTask["status"];
+  createdAt: string;
+  updatedAt: string;
+  started: boolean;
+  launching?: boolean;
+  reaped?: boolean;
+  cleanupWorktreeRequested?: boolean;
+  worktreeCleanup?: ReapReport;
+  report?: string;
+  outcome?: unknown;
+  error?: string;
+  workerAlive?: boolean;
+  requiresCompaction?: boolean;
+  notifiedSequence?: number;
+  launcherPid?: number;
+  launcherToken?: string;
+  ownerToken: string;
+  operatorCapability: string;
+  resumeMessage?: string;
+  compactBeforePrompt?: boolean;
+  stopRequested?: boolean;
+  initialPromptDispatching?: boolean;
+  verificationBypasses?: Array<{
+    attempt: number;
+    workerEpoch: string;
+    reason: string;
+    at: string;
+  }>;
+};
+type Group = {
+  version: 1;
+  id: string;
+  owner: string;
+  ownerToken: string;
+  createdAt: string;
+  mode: "single" | "parallel" | "chain";
+  cancelled: boolean;
+  guidanceYielded?: boolean;
+  guidanceCompletion?: string;
+  launchMode: "none" | "guard-only";
+  launcher: string;
+  children: Child[];
+};
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
-const active = (c: Child) => ["pending", "running", "waiting-input", "waiting-permission"].includes(c.status);
-const pathWithin = (root: string, path: string) => { const part = relative(root, path); return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`)); };
-const statusText = (child: Child) => child.status === "waiting-input" ? "waiting-input (open the Foreground panel in Paseo)"
-  : child.status === "waiting-permission" ? "waiting-permission (open the Foreground panel in Paseo)" : child.status;
-const contentText = (message: any): string => typeof message?.content === "string" ? message.content : Array.isArray(message?.content) ? message.content.filter((p: any) => p?.type === "text" && typeof p.text === "string").map((p: any) => p.text).join("\n") : "";
+const active = (c: Child) =>
+  ["pending", "running", "waiting-input", "waiting-permission"].includes(c.status);
+const pathWithin = (root: string, path: string) => {
+  const part = relative(root, path);
+  return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`));
+};
+const statusText = (child: Child) =>
+  child.status === "waiting-input"
+    ? "waiting-input (open the Foreground panel in Paseo)"
+    : child.status === "waiting-permission"
+      ? "waiting-permission (open the Foreground panel in Paseo)"
+      : child.status;
+const contentText = (message: any): string =>
+  typeof message?.content === "string"
+    ? message.content
+    : Array.isArray(message?.content)
+      ? message.content
+          .filter((p: any) => p?.type === "text" && typeof p.text === "string")
+          .map((p: any) => p.text)
+          .join("\n")
+      : "";
 const timestampText = (value: unknown, fallback: string): string => {
   try {
-    const timestamp = typeof value === "number" ? new Date(value).toISOString() : typeof value === "string" ? value : fallback;
+    const timestamp =
+      typeof value === "number"
+        ? new Date(value).toISOString()
+        : typeof value === "string"
+          ? value
+          : fallback;
     return Number.isFinite(Date.parse(timestamp)) ? new Date(timestamp).toISOString() : fallback;
-  } catch { return fallback; }
+  } catch {
+    return fallback;
+  }
 };
 function toolArgsText(value: unknown): { text: string; truncated: boolean } {
   let raw: string;
-  try { raw = JSON.stringify(value ?? {} , (key, item) => /token|password|secret|api.?key|credential|capability/i.test(key) ? "[redacted]" : item); }
-  catch { raw = "[arguments unavailable]"; }
+  try {
+    raw = JSON.stringify(value ?? {}, (key, item) =>
+      /token|password|secret|api.?key|credential|capability/i.test(key) ? "[redacted]" : item,
+    );
+  } catch {
+    raw = "[arguments unavailable]";
+  }
   const truncated = Buffer.byteLength(raw) > 2048;
   return { text: boundedUtf8(stripControls(raw), 2048), truncated };
 }
@@ -69,37 +215,76 @@ function boundedUtf8(text: string, maximum: number): string {
   while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
   return bytes.subarray(0, end).toString("utf8");
 }
-export function pageHeadlessHistory(messages: TaskMessage[], workerEpoch: string, cursor?: string, historyTruncated = false,
-  maximumEntries = 50, maximumBytes = 16 * 1024): { messages: TaskMessage[]; nextCursor?: string; truncated: boolean } {
+export function pageHeadlessHistory(
+  messages: TaskMessage[],
+  workerEpoch: string,
+  cursor?: string,
+  historyTruncated = false,
+  maximumEntries = 50,
+  maximumBytes = 16 * 1024,
+): { messages: TaskMessage[]; nextCursor?: string; truncated: boolean } {
   let end = messages.length;
   if (cursor) {
     if (Buffer.byteLength(cursor) > 4096) throw new Error("Invalid history cursor");
     let decoded: any;
-    try { decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")); } catch { throw new Error("Invalid history cursor"); }
-    if (!decoded || decoded.v !== 1 || decoded.workerEpoch !== workerEpoch || typeof decoded.before !== "string") throw new Error("Invalid history cursor");
-    end = messages.findIndex(message => message.id === decoded.before);
+    try {
+      decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    } catch {
+      throw new Error("Invalid history cursor");
+    }
+    if (
+      !decoded ||
+      decoded.v !== 1 ||
+      decoded.workerEpoch !== workerEpoch ||
+      typeof decoded.before !== "string"
+    )
+      throw new Error("Invalid history cursor");
+    end = messages.findIndex((message) => message.id === decoded.before);
     if (end < 0) throw new Error("History cursor expired; refresh the latest task view");
   }
-  let start = end, bytes = 0;
+  let start = end,
+    bytes = 0;
   while (start > 0 && end - start < maximumEntries) {
     const candidate = messages[start - 1]!;
     const added = Buffer.byteLength(JSON.stringify(candidate));
     if (start < end && bytes + added > maximumBytes) break;
-    bytes += added; start--;
+    bytes += added;
+    start--;
   }
   const page = messages.slice(start, end);
-  const nextCursor = start > 0 ? Buffer.from(JSON.stringify({ v: 1, workerEpoch, before: messages[start]!.id })).toString("base64url") : undefined;
-  return { messages: page, ...(nextCursor ? { nextCursor } : {}), truncated: historyTruncated || start > 0 || end < messages.length || page.some(message => message.truncated === true) };
+  const nextCursor =
+    start > 0
+      ? Buffer.from(JSON.stringify({ v: 1, workerEpoch, before: messages[start]!.id })).toString(
+          "base64url",
+        )
+      : undefined;
+  return {
+    messages: page,
+    ...(nextCursor ? { nextCursor } : {}),
+    truncated:
+      historyTruncated ||
+      start > 0 ||
+      end < messages.length ||
+      page.some((message) => message.truncated === true),
+  };
 }
 function readBoundedTail(path: string, maximum: number): { text: string; truncated: boolean } {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) throw new Error("Unsafe worker session file");
-    const length = Math.min(stat.size, maximum), buffer = Buffer.alloc(length);
+    if (
+      !stat.isFile() ||
+      (stat.mode & 0o077) !== 0 ||
+      (process.getuid && stat.uid !== process.getuid())
+    )
+      throw new Error("Unsafe worker session file");
+    const length = Math.min(stat.size, maximum),
+      buffer = Buffer.alloc(length);
     readSync(fd, buffer, 0, length, Math.max(0, stat.size - length));
     return { text: buffer.toString("utf8"), truncated: stat.size > maximum };
-  } finally { closeSync(fd); }
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Owner-bound native RPC workers. No tmux discovery, placement, or stdin writer. */
@@ -128,7 +313,15 @@ export class HeadlessForegroundManager {
   private notify?: (update: QuietUpdate) => boolean;
   private routingEnvironment: (model?: string) => Record<string, string>;
   private resolveRoleModel: (model: string | undefined) => string | undefined;
-  constructor(root: string, disposition: () => Disposition, ready: () => boolean, groupLimit = 16, notify?: (update: QuietUpdate) => boolean, routingEnvironment: (model?: string) => Record<string, string> = () => ({}), resolveRoleModel: (model: string | undefined) => string | undefined = model => model) {
+  constructor(
+    root: string,
+    disposition: () => Disposition,
+    ready: () => boolean,
+    groupLimit = 16,
+    notify?: (update: QuietUpdate) => boolean,
+    routingEnvironment: (model?: string) => Record<string, string> = () => ({}),
+    resolveRoleModel: (model: string | undefined) => string | undefined = (model) => model,
+  ) {
     this.routingEnvironment = routingEnvironment;
     this.resolveRoleModel = resolveRoleModel;
     this.disposition = disposition;
@@ -143,91 +336,176 @@ export class HeadlessForegroundManager {
       if (!/^subagent-job-[a-f0-9]{24}\.json$/.test(file)) continue;
       try {
         const group = readPrivateJson(join(root, "headless-groups", file)) as Group;
-        if (group.version === 1 && typeof group.owner === "string" && `${group.id}.json` === file && Array.isArray(group.children) && group.children.length <= 8
-          && group.children.every(child => /^subagent-child-[a-f0-9]{24}$/.test(child.childId) && /^subagent-task-[a-f0-9]{24}$/.test(child.taskId)
-            && /^[a-f0-9]{64}$/.test(child.operatorCapability)
-            && ((child.launcherPid === undefined && child.launcherToken === undefined)
-              || Number.isSafeInteger(child.launcherPid) && child.launcherPid! > 0 && typeof child.launcherToken === "string" && /^[a-zA-Z0-9:._-]{1,256}$/.test(child.launcherToken))
-            && (child.activityCwd === undefined || typeof child.activityCwd === "string" && isAbsolute(child.activityCwd))
-            && typeof child.directory === "string" && /^[a-f0-9]{24}$/.test(basename(child.directory))
-            && child.directory === join(this.root, "workers", basename(child.directory))
-            && (child.spec?.cleanupWorktreesOnReap === undefined || typeof child.spec.cleanupWorktreesOnReap === "boolean")
-            && (child.spec?.automaticWorktrees === undefined || typeof child.spec.automaticWorktrees === "boolean"))) {
-          for (const child of group.children) { child.spec.cleanupWorktreesOnReap ??= false; child.spec.automaticWorktrees ??= false; }
+        if (
+          group.version === 1 &&
+          typeof group.owner === "string" &&
+          `${group.id}.json` === file &&
+          Array.isArray(group.children) &&
+          group.children.length <= 8 &&
+          group.children.every(
+            (child) =>
+              /^subagent-child-[a-f0-9]{24}$/.test(child.childId) &&
+              /^subagent-task-[a-f0-9]{24}$/.test(child.taskId) &&
+              /^[a-f0-9]{64}$/.test(child.operatorCapability) &&
+              ((child.launcherPid === undefined && child.launcherToken === undefined) ||
+                (Number.isSafeInteger(child.launcherPid) &&
+                  child.launcherPid! > 0 &&
+                  typeof child.launcherToken === "string" &&
+                  /^[a-zA-Z0-9:._-]{1,256}$/.test(child.launcherToken))) &&
+              (child.activityCwd === undefined ||
+                (typeof child.activityCwd === "string" && isAbsolute(child.activityCwd))) &&
+              typeof child.directory === "string" &&
+              /^[a-f0-9]{24}$/.test(basename(child.directory)) &&
+              child.directory === join(this.root, "workers", basename(child.directory)) &&
+              (child.spec?.cleanupWorktreesOnReap === undefined ||
+                typeof child.spec.cleanupWorktreesOnReap === "boolean") &&
+              (child.spec?.automaticWorktrees === undefined ||
+                typeof child.spec.automaticWorktrees === "boolean"),
+          )
+        ) {
+          for (const child of group.children) {
+            child.spec.cleanupWorktreesOnReap ??= false;
+            child.spec.automaticWorktrees ??= false;
+          }
           this.groups.set(group.id, group);
-        }
-        else this.inventoryErrors.push(file);
-      } catch { this.inventoryErrors.push(file); /* Invalid manifests never authorize execution or deletion. */ }
+        } else this.inventoryErrors.push(file);
+      } catch {
+        this.inventoryErrors.push(
+          file,
+        ); /* Invalid manifests never authorize execution or deletion. */
+      }
     }
   }
-  private persist(group: Group): void { atomicPrivateJson(join(this.root, "headless-groups", `${group.id}.json`), group); }
-  private serial<T>(fn: () => Promise<T>): Promise<T> { const next = this.queue.catch(() => undefined).then(fn); this.queue = next; return next; }
+  private persist(group: Group): void {
+    atomicPrivateJson(join(this.root, "headless-groups", `${group.id}.json`), group);
+  }
+  private serial<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.queue.catch(() => undefined).then(fn);
+    this.queue = next;
+    return next;
+  }
   activate(owner: string): void {
     this.owner = owner;
     this.ownerToken = this.processToken(process.pid);
     if (!this.ownerToken) throw new Error("Cannot verify foreground owner process identity");
-    const lock = join(this.root, `headless-owner-${createHash("sha256").update(owner).digest("hex").slice(0, 32)}.lock`);
+    const lock = join(
+      this.root,
+      `headless-owner-${createHash("sha256").update(owner).digest("hex").slice(0, 32)}.lock`,
+    );
     for (let retry = 0; ; retry++) {
-      try { writeFileSync(lock, JSON.stringify({ pid: process.pid, token: this.ownerToken }), { flag: "wx", mode: 0o600 }); break; }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || retry >= 2) throw new Error("Another live parent owns this session's headless task service");
+      try {
+        writeFileSync(lock, JSON.stringify({ pid: process.pid, token: this.ownerToken }), {
+          flag: "wx",
+          mode: 0o600,
+        });
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || retry >= 2)
+          throw new Error("Another live parent owns this session's headless task service");
         const prior = readPrivateJson(lock) as any;
-        if (!Number.isSafeInteger(prior.pid) || typeof prior.token !== "string" || this.processToken(prior.pid) === prior.token) throw new Error("Another live parent owns this session's headless task service");
+        if (
+          !Number.isSafeInteger(prior.pid) ||
+          typeof prior.token !== "string" ||
+          this.processToken(prior.pid) === prior.token
+        )
+          throw new Error("Another live parent owns this session's headless task service");
         unlinkSync(lock);
       }
     }
     this.ownerLock = lock;
     this.closed = false;
     if (this.observerTimer) clearInterval(this.observerTimer);
-    this.observerTimer = setInterval(() => { void this.refresh(owner).catch(() => undefined); }, 1000);
+    this.observerTimer = setInterval(() => {
+      void this.refresh(owner).catch(() => undefined);
+    }, 1000);
     this.observerTimer.unref?.();
     void this.refresh(owner).catch(() => undefined);
   }
-  private generation(child: Child): number { return this.generations.get(child.childId) ?? 0; }
-  private bumpGeneration(child: Child): number { const next = this.generation(child) + 1; this.generations.set(child.childId, next); return next; }
+  private generation(child: Child): number {
+    return this.generations.get(child.childId) ?? 0;
+  }
+  private bumpGeneration(child: Child): number {
+    const next = this.generation(child) + 1;
+    this.generations.set(child.childId, next);
+    return next;
+  }
   private async refresh(owner: string): Promise<void> {
     if (this.closed) return;
     if (this.observerFlight) return this.observerFlight;
-    const flight = Promise.all([...this.groups.values()].filter(group => group.owner === owner)
-      .flatMap(group => group.children.map(child => this.observe(group, child)))).then(() => {
-        for (const group of this.groups.values()) if (group.owner === owner) this.notifyGuidanceCompletion(group);
-      });
+    const flight = Promise.all(
+      [...this.groups.values()]
+        .filter((group) => group.owner === owner)
+        .flatMap((group) => group.children.map((child) => this.observe(group, child))),
+    ).then(() => {
+      for (const group of this.groups.values())
+        if (group.owner === owner) this.notifyGuidanceCompletion(group);
+    });
     this.observerFlight = flight;
-    try { await flight; } finally { if (this.observerFlight === flight) this.observerFlight = undefined; }
+    try {
+      await flight;
+    } finally {
+      if (this.observerFlight === flight) this.observerFlight = undefined;
+    }
   }
   private processToken(pid: number): string | undefined {
-    try { const stat = readFileSync(`/proc/${pid}/stat`, "utf8"); const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-      if (fields[0] === "Z" || fields[0] === "X" || !/^\d+$/.test(fields[19] ?? "")) return undefined;
-      return `${pid}:${fields[19]}`; } catch { return undefined; }
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      if (fields[0] === "Z" || fields[0] === "X" || !/^\d+$/.test(fields[19] ?? ""))
+        return undefined;
+      return `${pid}:${fields[19]}`;
+    } catch {
+      return undefined;
+    }
   }
-  private async runtimeState(manifest: HeadlessWorkerManifest): Promise<"alive" | "dead" | "unknown"> {
+  private async runtimeState(
+    manifest: HeadlessWorkerManifest,
+  ): Promise<"alive" | "dead" | "unknown"> {
     if (manifest.runtimePid === undefined || !manifest.runtimeProcessToken) return "unknown";
-    return await processIsAlive(manifest.runtimePid, manifest.runtimeProcessToken) ? "alive" : "dead";
+    return (await processIsAlive(manifest.runtimePid, manifest.runtimeProcessToken))
+      ? "alive"
+      : "dead";
   }
-  private async recordRuntimeIdentity(manifest: HeadlessWorkerManifest, pid: unknown): Promise<HeadlessWorkerManifest> {
-    if (!Number.isSafeInteger(pid) || (pid as number) < 1 || pid === manifest.foregroundOwner?.pid) throw new Error("Worker returned an invalid Pi runtime PID");
+  private async recordRuntimeIdentity(
+    manifest: HeadlessWorkerManifest,
+    pid: unknown,
+  ): Promise<HeadlessWorkerManifest> {
+    if (!Number.isSafeInteger(pid) || (pid as number) < 1 || pid === manifest.foregroundOwner?.pid)
+      throw new Error("Worker returned an invalid Pi runtime PID");
     const runtimePid = pid as number;
     const runtimeProcessToken = await processIdentity(runtimePid);
-    if (!await processIsAlive(runtimePid, runtimeProcessToken)) throw new Error("Worker process exited before runtime identity could be committed");
-    if (manifest.runtimePid !== undefined && (manifest.runtimePid !== runtimePid || manifest.runtimeProcessToken !== runtimeProcessToken)) {
-      throw new Error("Headless Pi runtime identity changed; refusing to control or recover another process");
+    if (!(await processIsAlive(runtimePid, runtimeProcessToken)))
+      throw new Error("Worker process exited before runtime identity could be committed");
+    if (
+      manifest.runtimePid !== undefined &&
+      (manifest.runtimePid !== runtimePid || manifest.runtimeProcessToken !== runtimeProcessToken)
+    ) {
+      throw new Error(
+        "Headless Pi runtime identity changed; refusing to control or recover another process",
+      );
     }
     if (manifest.runtimePid !== undefined) return manifest;
     const updated: HeadlessWorkerManifest = { ...manifest, runtimePid, runtimeProcessToken };
     new TuiWorkerStore(dirname(manifest.sessionFile)).writeManifest(updated);
     return updated;
   }
-  private async ensureRuntimeIdentity(manifest: HeadlessWorkerManifest, timeoutMs = 15_000): Promise<HeadlessWorkerManifest> {
+  private async ensureRuntimeIdentity(
+    manifest: HeadlessWorkerManifest,
+    timeoutMs = 15_000,
+  ): Promise<HeadlessWorkerManifest> {
     if (manifest.runtimePid !== undefined && manifest.runtimeProcessToken) return manifest;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
         const status = await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 1000 });
-        if (status.ok && Number.isSafeInteger((status.data as any)?.pid)) return await this.recordRuntimeIdentity(manifest, (status.data as any).pid);
+        if (status.ok && Number.isSafeInteger((status.data as any)?.pid))
+          return await this.recordRuntimeIdentity(manifest, (status.data as any).pid);
       } catch {}
       await pause(100);
     }
-    throw new Error("Actual Pi runtime identity was never authenticated; launcher death is not proof of worker death, refusing reap/recovery");
+    throw new Error(
+      "Actual Pi runtime identity was never authenticated; launcher death is not proof of worker death, refusing reap/recovery",
+    );
   }
   private canonicalTitle(child: Child): string {
     try {
@@ -236,61 +514,123 @@ export class HeadlessForegroundManager {
         const record = new TaskNameStore(child.directory, manifest).read(false);
         if (record) return record.displayName;
       }
-    } catch { /* Invalid metadata never supplies a cross-session title. */ }
-    return child.spec.displayName ?? canonicalSubagentName(child.spec.task, undefined, child.spec.name);
+    } catch {
+      /* Invalid metadata never supplies a cross-session title. */
+    }
+    return (
+      child.spec.displayName ?? canonicalSubagentName(child.spec.task, undefined, child.spec.name)
+    );
   }
   private manifest(child: Child): HeadlessWorkerManifest | undefined {
     try {
-      const group = [...this.groups.values()].find(candidate => candidate.children.includes(child));
+      const group = [...this.groups.values()].find((candidate) =>
+        candidate.children.includes(child),
+      );
       if (!group) throw new Error("Headless worker has no owned group record");
       const manifest = new TuiWorkerStore(child.directory).readManifest();
-      if (manifest.execution !== "rpc-headless" || manifest.taskId !== child.taskId || manifest.childId !== child.childId
-        || manifest.ownerSessionId !== group.owner || manifest.groupId !== group.id || manifest.attempt !== child.attempt
-        || manifest.foregroundOwner?.token !== group.ownerToken) throw new Error("Headless worker identity mismatch");
-      if (child.activityCwd !== undefined && manifest.activityCwd !== child.activityCwd) throw new Error("Headless worker launch-time checkout identity mismatch");
-      if ((manifest.cleanupWorktreesOnReap === true) !== (child.spec.cleanupWorktreesOnReap === true)) throw new Error("Headless worker trusted reap policy mismatch");
-      if ((manifest.automaticWorktrees === true) !== (child.spec.automaticWorktrees === true)) throw new Error("Headless worker trusted automatic worktree policy mismatch");
+      if (
+        manifest.execution !== "rpc-headless" ||
+        manifest.taskId !== child.taskId ||
+        manifest.childId !== child.childId ||
+        manifest.ownerSessionId !== group.owner ||
+        manifest.groupId !== group.id ||
+        manifest.attempt !== child.attempt ||
+        manifest.foregroundOwner?.token !== group.ownerToken
+      )
+        throw new Error("Headless worker identity mismatch");
+      if (child.activityCwd !== undefined && manifest.activityCwd !== child.activityCwd)
+        throw new Error("Headless worker launch-time checkout identity mismatch");
+      if (
+        (manifest.cleanupWorktreesOnReap === true) !==
+        (child.spec.cleanupWorktreesOnReap === true)
+      )
+        throw new Error("Headless worker trusted reap policy mismatch");
+      if ((manifest.automaticWorktrees === true) !== (child.spec.automaticWorktrees === true))
+        throw new Error("Headless worker trusted automatic worktree policy mismatch");
       return manifest;
-    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
   }
-  private owned(owner: string, target: TaskTarget): { group: Group; child: Child; manifest: HeadlessWorkerManifest } {
-    const group = [...this.groups.values()].find(g => g.owner === owner && g.children.some(c => c.taskId === target.taskId && c.childId === target.childId));
-    const child = group?.children.find(c => c.taskId === target.taskId && c.childId === target.childId);
+  private owned(
+    owner: string,
+    target: TaskTarget,
+  ): { group: Group; child: Child; manifest: HeadlessWorkerManifest } {
+    const group = [...this.groups.values()].find(
+      (g) =>
+        g.owner === owner &&
+        g.children.some((c) => c.taskId === target.taskId && c.childId === target.childId),
+    );
+    const child = group?.children.find(
+      (c) => c.taskId === target.taskId && c.childId === target.childId,
+    );
     if (!group || !child) throw new Error("Foreground task does not belong to this Pi session");
     const manifest = this.manifest(child);
-    if (!manifest || manifest.workerEpoch !== target.workerEpoch) throw new Error("Stale foreground worker epoch");
+    if (!manifest || manifest.workerEpoch !== target.workerEpoch)
+      throw new Error("Stale foreground worker epoch");
     return { group, child, manifest };
   }
   private liveOperatorMode(owner: string): boolean {
     const service = (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__;
-    if (service?.version !== 1 || typeof service.status !== "function") throw new Error("Live parent operator authority unavailable");
+    if (service?.version !== 1 || typeof service.status !== "function")
+      throw new Error("Live parent operator authority unavailable");
     const status = service.status(owner);
-    if (status?.sessionId !== owner || typeof status.enabled !== "boolean") throw new Error("Invalid live parent operator mode");
+    if (status?.sessionId !== owner || typeof status.enabled !== "boolean")
+      throw new Error("Invalid live parent operator mode");
     return status.enabled;
   }
-  private async launchWorker(group: Group, child: Child, resumeSessionFile?: string, signal?: AbortSignal): Promise<HeadlessWorkerManifest> {
-    if (signal?.aborted || !this.ready() || this.closed) throw new Error("Parent authority is not active; refusing headless launch");
+  private async launchWorker(
+    group: Group,
+    child: Child,
+    resumeSessionFile?: string,
+    signal?: AbortSignal,
+  ): Promise<HeadlessWorkerManifest> {
+    if (signal?.aborted || !this.ready() || this.closed)
+      throw new Error("Parent authority is not active; refusing headless launch");
     const contract = tuiWorkerLaunchContract(this.disposition());
-    if (group.launchMode !== contract.launchMode) throw new Error("Current launcher authority does not match committed task; refusing fallback");
-    child.launching = true; child.updatedAt = new Date().toISOString(); this.persist(group);
-    const launcher = await import("node:fs/promises").then(fs => fs.realpath(contract.launcher));
-    if (!launcher.startsWith("/nix/store/")) throw new Error("Worker launcher must resolve inside immutable Nix store");
+    if (group.launchMode !== contract.launchMode)
+      throw new Error(
+        "Current launcher authority does not match committed task; refusing fallback",
+      );
+    child.launching = true;
+    child.updatedAt = new Date().toISOString();
+    this.persist(group);
+    const launcher = await import("node:fs/promises").then((fs) => fs.realpath(contract.launcher));
+    if (!launcher.startsWith("/nix/store/"))
+      throw new Error("Worker launcher must resolve inside immutable Nix store");
     const fs = await import("node:fs/promises");
     const cwd = await fs.realpath(child.spec.cwd);
-    const worktreeRoot = child.spec.worktreeInfo ? await fs.realpath(child.spec.worktreeInfo.path) : undefined;
-    if (child.spec.worktreeInfo && worktreeRoot !== resolve(child.spec.worktreeInfo.path)) throw new Error("Provisioned worktree root physical identity changed before launch");
+    const worktreeRoot = child.spec.worktreeInfo
+      ? await fs.realpath(child.spec.worktreeInfo.path)
+      : undefined;
+    if (child.spec.worktreeInfo && worktreeRoot !== resolve(child.spec.worktreeInfo.path))
+      throw new Error("Provisioned worktree root physical identity changed before launch");
     const activityCwd = worktreeRoot ?? cwd;
-    if (!pathWithin(activityCwd, cwd)) throw new Error("Worker launch cwd is outside its trusted effective checkout");
-    child.activityCwd = activityCwd; child.updatedAt = new Date().toISOString(); this.persist(group);
+    if (!pathWithin(activityCwd, cwd))
+      throw new Error("Worker launch cwd is outside its trusted effective checkout");
+    child.activityCwd = activityCwd;
+    child.updatedAt = new Date().toISOString();
+    this.persist(group);
     const store = new TuiWorkerStore(child.directory, true);
     await writeFileSync(store.path("launch.lock"), "committed\n", { flag: "wx", mode: 0o600 });
-    const sessionFile = store.path("session.jsonl"), fifoPath = store.path("stdin.fifo"), gate = store.path("launch-ready");
-    if (resumeSessionFile) { const source = await import("node:fs/promises").then(fs => fs.realpath(resumeSessionFile)); await import("node:fs/promises").then(fs => fs.copyFile(source, sessionFile, 1)); chmodSync(sessionFile, 0o600); }
-    else writeFileSync(sessionFile, "", { flag: "wx", mode: 0o600 });
+    const sessionFile = store.path("session.jsonl"),
+      fifoPath = store.path("stdin.fifo"),
+      gate = store.path("launch-ready");
+    if (resumeSessionFile) {
+      const source = await import("node:fs/promises").then((fs) => fs.realpath(resumeSessionFile));
+      await import("node:fs/promises").then((fs) => fs.copyFile(source, sessionFile, 1));
+      chmodSync(sessionFile, 0o600);
+    } else writeFileSync(sessionFile, "", { flag: "wx", mode: 0o600 });
     await exec(process.env.TEST_MKFIFO ?? "mkfifo", [fifoPath], { timeout: 5000 });
     chmodSync(fifoPath, 0o600);
     const fifoStat = lstatSync(fifoPath);
-    if (!fifoStat.isFIFO() || (fifoStat.mode & 0o077) !== 0 || (process.getuid && fifoStat.uid !== process.getuid())) throw new Error("Unsafe worker stdin FIFO");
+    if (
+      !fifoStat.isFIFO() ||
+      (fifoStat.mode & 0o077) !== 0 ||
+      (process.getuid && fifoStat.uid !== process.getuid())
+    )
+      throw new Error("Unsafe worker stdin FIFO");
     const runtimeId = `rpc-${randomBytes(12).toString("hex")}`;
     const workerEpoch = randomBytes(16).toString("hex");
     const controlSocket = store.path("control.sock");
@@ -300,138 +640,326 @@ export class HeadlessForegroundManager {
     const roleModel = this.resolveRoleModel(child.spec.model);
     if (roleModel) args.push("--model", roleModel);
     const promptPath = store.path("system-prompt.txt");
-    const runtimePrompt = [child.spec.systemPrompt, HEADLESS_WORKER_RUNTIME_POLICY].filter(Boolean).join("\n\n");
+    const runtimePrompt = [child.spec.systemPrompt, HEADLESS_WORKER_RUNTIME_POLICY]
+      .filter(Boolean)
+      .join("\n\n");
     writeFileSync(promptPath, runtimePrompt, { flag: "wx", mode: 0o600 });
     args.push("--append-system-prompt", promptPath);
-    if (child.spec.tools) args.push("--tools", [...new Set([...child.spec.tools, "notify_parent", "task_outcome", "request_guidance"])].join(","));
+    if (child.spec.tools)
+      args.push(
+        "--tools",
+        [
+          ...new Set([...child.spec.tools, "notify_parent", "task_outcome", "request_guidance"]),
+        ].join(","),
+      );
     const childEnv: Record<string, string> = {
-      ...guidanceLaunchEnvironment({ ownerSessionId: group.owner, taskId: child.taskId, childId: child.childId, attempt: child.attempt, workerEpoch }),
+      ...guidanceLaunchEnvironment({
+        ownerSessionId: group.owner,
+        taskId: child.taskId,
+        childId: child.childId,
+        attempt: child.attempt,
+        workerEpoch,
+      }),
       // Headless workers share the caller's selected config/defaults root.
       PI_CODING_AGENT_DIR: getAgentDir(),
       ...this.routingEnvironment(roleModel),
-      [TUI_WORKER_MANIFEST_ENV]: manifestPath, PI_TUI_WORKER_LAUNCH_MODE: contract.launchMode,
-      PI_TUI_WORKER_LAUNCHER: launcher, PI_SUBAGENT_ID: child.childId,
+      [TUI_WORKER_MANIFEST_ENV]: manifestPath,
+      PI_TUI_WORKER_LAUNCH_MODE: contract.launchMode,
+      PI_TUI_WORKER_LAUNCHER: launcher,
+      PI_SUBAGENT_ID: child.childId,
       PI_SUBAGENT_CANONICAL_NAMES: "1",
-      PI_SUBAGENT_NAME: child.spec.displayName ?? canonicalSubagentName(child.spec.task, undefined, child.spec.name),
-      [TUI_WORKER_DISCOVERY_ENV.ownerSessionId]: group.owner, [TUI_WORKER_DISCOVERY_ENV.taskId]: child.taskId,
-      [TUI_WORKER_DISCOVERY_ENV.groupId]: group.id, [TUI_WORKER_DISCOVERY_ENV.childId]: child.childId,
-      [TUI_WORKER_DISCOVERY_ENV.attempt]: String(child.attempt), [TUI_WORKER_DISCOVERY_ENV.runtimeId]: runtimeId,
+      PI_SUBAGENT_NAME:
+        child.spec.displayName ??
+        canonicalSubagentName(child.spec.task, undefined, child.spec.name),
+      [TUI_WORKER_DISCOVERY_ENV.ownerSessionId]: group.owner,
+      [TUI_WORKER_DISCOVERY_ENV.taskId]: child.taskId,
+      [TUI_WORKER_DISCOVERY_ENV.groupId]: group.id,
+      [TUI_WORKER_DISCOVERY_ENV.childId]: child.childId,
+      [TUI_WORKER_DISCOVERY_ENV.attempt]: String(child.attempt),
+      [TUI_WORKER_DISCOVERY_ENV.runtimeId]: runtimeId,
       [TUI_WORKER_DISCOVERY_ENV.controlSocket]: controlSocket,
     };
     const env = { ...process.env };
-    for (const key of ["AGENTSH_PERMISSION_GATE_SOCKET", "PI_SUBAGENT_PERMISSION_SOCKET", "PI_SUBAGENT_PERMISSION_TOKEN", "PI_SUBAGENT_OUTCOME_PATH",
-      "AGENTSH_SESSION_SUPERVISOR", "AGENTSH_CHILD_CAPABILITY", "AGENTSH_APPROVAL_UI_SOCKET", "PI_AGENTSH_ENABLE", "PI_AGENTSH_MOCK_SUPERVISOR",
-      "PI_SUPERVISED", "PI_AUTO", "PI_AGENTSH_REMOTE", "PI_AGENTSH_READ_MODE", "TMUX", "TMUX_PANE", "PI_SESSION_ROUTING_FILE", "PI_SESSION_ROUTING_OWNER_SESSION"]) delete env[key];
+    for (const key of [
+      "AGENTSH_PERMISSION_GATE_SOCKET",
+      "PI_SUBAGENT_PERMISSION_SOCKET",
+      "PI_SUBAGENT_PERMISSION_TOKEN",
+      "PI_SUBAGENT_OUTCOME_PATH",
+      "AGENTSH_SESSION_SUPERVISOR",
+      "AGENTSH_CHILD_CAPABILITY",
+      "AGENTSH_APPROVAL_UI_SOCKET",
+      "PI_AGENTSH_ENABLE",
+      "PI_AGENTSH_MOCK_SUPERVISOR",
+      "PI_SUPERVISED",
+      "PI_AUTO",
+      "PI_AGENTSH_REMOTE",
+      "PI_AGENTSH_READ_MODE",
+      "TMUX",
+      "TMUX_PANE",
+      "PI_SESSION_ROUTING_FILE",
+      "PI_SESSION_ROUTING_OWNER_SESSION",
+    ])
+      delete env[key];
     for (const key of Object.keys(env)) if (key.startsWith("PI_PASEO_")) delete env[key];
     env.PI_PASEO_BRIDGE_NO_IMPORT = "1";
     Object.assign(env, childEnv);
     // The FIFO is opened O_RDWR by this child launcher and retained as Pi stdin.
     // No parent descriptor or FIFO writer participates in worker lifetime/control.
     const shell = "/bin/sh";
-    const stdoutFd = openSync(store.path("rpc.stdout.log"), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW | constants.O_APPEND, 0o600);
+    const stdoutFd = openSync(
+      store.path("rpc.stdout.log"),
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW |
+        constants.O_APPEND,
+      0o600,
+    );
     let stderrFd: number | undefined;
     let childProc: ReturnType<typeof spawn>;
     try {
-      stderrFd = openSync(store.path("rpc.stderr.log"), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW | constants.O_APPEND, 0o600);
-      childProc = spawn(shell, ["-c", 'i=0; while [ ! -f "$1" ]; do i=$((i+1)); [ "$i" -lt 400 ] || exit 125; sleep 0.05; done; exec 0<>"$2"; shift 2; exec "$@"', "headless-worker", gate, fifoPath, launcher, ...args],
-        { cwd, env, detached: true, stdio: ["ignore", stdoutFd, stderrFd] });
-    } finally { closeSync(stdoutFd); if (stderrFd !== undefined) closeSync(stderrFd); }
+      stderrFd = openSync(
+        store.path("rpc.stderr.log"),
+        constants.O_WRONLY |
+          constants.O_CREAT |
+          constants.O_EXCL |
+          constants.O_NOFOLLOW |
+          constants.O_APPEND,
+        0o600,
+      );
+      childProc = spawn(
+        shell,
+        [
+          "-c",
+          'i=0; while [ ! -f "$1" ]; do i=$((i+1)); [ "$i" -lt 400 ] || exit 125; sleep 0.05; done; exec 0<>"$2"; shift 2; exec "$@"',
+          "headless-worker",
+          gate,
+          fifoPath,
+          launcher,
+          ...args,
+        ],
+        { cwd, env, detached: true, stdio: ["ignore", stdoutFd, stderrFd] },
+      );
+    } finally {
+      closeSync(stdoutFd);
+      if (stderrFd !== undefined) closeSync(stderrFd);
+    }
     childProc.on("error", () => undefined);
     childProc.unref();
-    if (!Number.isSafeInteger(childProc.pid) || !childProc.pid) throw new Error("Failed to create headless worker launcher");
+    if (!Number.isSafeInteger(childProc.pid) || !childProc.pid)
+      throw new Error("Failed to create headless worker launcher");
     const processToken = await processIdentity(childProc.pid);
     child.launcherPid = childProc.pid;
     child.launcherToken = processToken;
     child.updatedAt = new Date().toISOString();
     this.persist(group);
-    let manifest: HeadlessWorkerManifest = { protocol: 1, ownerSessionId: group.owner, taskId: child.taskId, runtimeId, groupId: group.id,
-      childId: child.childId, attempt: child.attempt, workerEpoch, controlSocket, controlToken: randomBytes(32).toString("hex"),
-      operatorCapabilityHash: contract.launchMode === "guard-only" ? createHash("sha256").update(capability).digest("hex") : undefined,
-      launchMode: contract.launchMode, foregroundOwner: { pid: process.pid, token: this.ownerToken! }, acceptance: child.spec.acceptance ?? [],
-      tools: child.spec.tools, verification: child.spec.verification, cleanupWorktreesOnReap: child.spec.cleanupWorktreesOnReap === true,
-      automaticWorktrees: child.spec.automaticWorktrees === true, ...(child.spec.worktreeInfo?.identity ? { worktreeIdentity: child.spec.worktreeInfo.identity } : {}),
-      activityCwd, sessionFile, presentation: "headless-foreground", execution: "rpc-headless", processPid: childProc.pid,
-      processToken, fifoPath };
+    let manifest: HeadlessWorkerManifest = {
+      protocol: 1,
+      ownerSessionId: group.owner,
+      taskId: child.taskId,
+      runtimeId,
+      groupId: group.id,
+      childId: child.childId,
+      attempt: child.attempt,
+      workerEpoch,
+      controlSocket,
+      controlToken: randomBytes(32).toString("hex"),
+      operatorCapabilityHash:
+        contract.launchMode === "guard-only"
+          ? createHash("sha256").update(capability).digest("hex")
+          : undefined,
+      launchMode: contract.launchMode,
+      foregroundOwner: { pid: process.pid, token: this.ownerToken! },
+      acceptance: child.spec.acceptance ?? [],
+      tools: child.spec.tools,
+      verification: child.spec.verification,
+      cleanupWorktreesOnReap: child.spec.cleanupWorktreesOnReap === true,
+      automaticWorktrees: child.spec.automaticWorktrees === true,
+      ...(child.spec.worktreeInfo?.identity
+        ? { worktreeIdentity: child.spec.worktreeInfo.identity }
+        : {}),
+      activityCwd,
+      sessionFile,
+      presentation: "headless-foreground",
+      execution: "rpc-headless",
+      processPid: childProc.pid,
+      processToken,
+      fifoPath,
+    };
     store.writeManifest(manifest);
-    await new TaskNameStore(child.directory, manifest).claim(child.spec.displayName ?? canonicalSubagentName(child.spec.task, undefined, child.spec.name));
+    await new TaskNameStore(child.directory, manifest).claim(
+      child.spec.displayName ?? canonicalSubagentName(child.spec.task, undefined, child.spec.name),
+    );
     child.launching = false;
-    atomicPrivateJson(store.path("launch-intent.json"), { groupId: group.id, childId: child.childId, runtimeId, workerEpoch, fifoPath });
-    await import("node:fs/promises").then(fs => fs.writeFile(gate, "ready\n", { flag: "wx", mode: 0o600 }));
+    atomicPrivateJson(store.path("launch-intent.json"), {
+      groupId: group.id,
+      childId: child.childId,
+      runtimeId,
+      workerEpoch,
+      fifoPath,
+    });
+    await import("node:fs/promises").then((fs) =>
+      fs.writeFile(gate, "ready\n", { flag: "wx", mode: 0o600 }),
+    );
     if (!child.stopRequested) child.status = "running";
-    child.workerAlive = true; child.updatedAt = new Date().toISOString(); this.persist(group);
+    child.workerAlive = true;
+    child.updatedAt = new Date().toISOString();
+    this.persist(group);
     manifest = await this.waitReady(manifest, 45_000, signal);
     if (contract.launchMode === "guard-only") {
-      const applied = await applyTuiWorkerOperatorMode(manifest, capability, this.liveOperatorMode(group.owner));
+      const applied = await applyTuiWorkerOperatorMode(
+        manifest,
+        capability,
+        this.liveOperatorMode(group.owner),
+      );
       if (!applied.ok) throw new Error(`Child operator mode rejected: ${applied.code}`);
     }
-    if (child.stopRequested || group.cancelled) { await this.sealAndReap(group, child, manifest); child.status = "cancelled"; this.persist(group); return manifest; }
-    if (child.compactBeforePrompt) {
-      const compacted = await callTuiWorker(manifest, { operation: "compact" }, { requestId: `resume-compact:${child.childId}`, timeoutMs: 300_000, signal });
-      if (!compacted.ok) throw new Error(`Resume compaction not confirmed: ${compacted.code}: ${compacted.message}`);
+    if (child.stopRequested || group.cancelled) {
+      await this.sealAndReap(group, child, manifest);
+      child.status = "cancelled";
+      this.persist(group);
+      return manifest;
     }
-    if (child.stopRequested || group.cancelled) { await this.sealAndReap(group, child, manifest); child.status = "cancelled"; this.persist(group); return manifest; }
-    child.initialPromptDispatching = true; child.updatedAt = new Date().toISOString(); this.bumpGeneration(child); this.persist(group);
-    const prompt = child.attempt > 1
-      ? `Continue the retained session, not a new assignment. Latest parent instruction: ${child.resumeMessage ?? "Continue from the saved checkpoint."}\n\nDo not replay the original task. Report useful findings with notify_parent and your outcome with task_outcome. Use verify to explicitly start configured gates; delivered outcomes trigger gates, and failures require correction. This is a flat foreground helper: do not delegate further.`
-      : `Task: ${child.spec.task}\n\nAcceptance criteria: ${JSON.stringify(child.spec.acceptance ?? [])}\nReport useful findings with notify_parent and your outcome with task_outcome. Use verify to explicitly start configured gates; delivered outcomes trigger gates, and failures require correction. This is a flat foreground helper: do not delegate further. Report a concise final answer.`;
-    const accepted = await callTuiWorker(manifest, { operation: "prompt", mode: "steer", message: prompt }, { requestId: `initial:${child.childId}`, signal });
+    if (child.compactBeforePrompt) {
+      const compacted = await callTuiWorker(
+        manifest,
+        { operation: "compact" },
+        { requestId: `resume-compact:${child.childId}`, timeoutMs: 300_000, signal },
+      );
+      if (!compacted.ok)
+        throw new Error(`Resume compaction not confirmed: ${compacted.code}: ${compacted.message}`);
+    }
+    if (child.stopRequested || group.cancelled) {
+      await this.sealAndReap(group, child, manifest);
+      child.status = "cancelled";
+      this.persist(group);
+      return manifest;
+    }
+    child.initialPromptDispatching = true;
+    child.updatedAt = new Date().toISOString();
+    this.bumpGeneration(child);
+    this.persist(group);
+    const prompt =
+      child.attempt > 1
+        ? `Continue the retained session, not a new assignment. Latest parent instruction: ${child.resumeMessage ?? "Continue from the saved checkpoint."}\n\nDo not replay the original task. Report useful findings with notify_parent and your outcome with task_outcome. Use verify to explicitly start configured gates; delivered outcomes trigger gates, and failures require correction. This is a flat foreground helper: do not delegate further.`
+        : `Task: ${child.spec.task}\n\nAcceptance criteria: ${JSON.stringify(child.spec.acceptance ?? [])}\nReport useful findings with notify_parent and your outcome with task_outcome. Use verify to explicitly start configured gates; delivered outcomes trigger gates, and failures require correction. This is a flat foreground helper: do not delegate further. Report a concise final answer.`;
+    const accepted = await callTuiWorker(
+      manifest,
+      { operation: "prompt", mode: "steer", message: prompt },
+      { requestId: `initial:${child.childId}`, signal },
+    );
     child.initialPromptDispatching = false;
     if (!accepted.ok) throw new Error(`Initial prompt not confirmed: ${accepted.code}`);
-    child.started = true; child.initialPromptDispatching = false; child.workerAlive = true; child.updatedAt = new Date().toISOString(); this.persist(group);
+    child.started = true;
+    child.initialPromptDispatching = false;
+    child.workerAlive = true;
+    child.updatedAt = new Date().toISOString();
+    this.persist(group);
     return manifest;
   }
-  private async waitReady(initial: HeadlessWorkerManifest, timeoutMs = 45_000, signal?: AbortSignal): Promise<HeadlessWorkerManifest> {
+  private async waitReady(
+    initial: HeadlessWorkerManifest,
+    timeoutMs = 45_000,
+    signal?: AbortSignal,
+  ): Promise<HeadlessWorkerManifest> {
     const deadline = Date.now() + timeoutMs;
     let manifest = initial;
     while (Date.now() < deadline) {
-      try { new TuiWorkerStore(dirname(manifest.sessionFile)).trimRpcLogs(); } catch {}
+      try {
+        new TuiWorkerStore(dirname(manifest.sessionFile)).trimRpcLogs();
+      } catch {}
       if (this.closed) throw new Error("Headless foreground owner is shutting down");
       if (signal?.aborted) throw new Error("Headless worker startup cancelled");
       try {
-        const result = await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 500, signal });
+        const result = await callTuiWorker(
+          manifest,
+          { operation: "status" },
+          { timeoutMs: 500, signal },
+        );
         if (result.ok) {
           const snapshot = result.data as any;
-          if (Number.isSafeInteger(snapshot?.pid)) manifest = await this.recordRuntimeIdentity(manifest, snapshot.pid);
-          if (snapshot?.readyForPrompts === true && manifest.runtimePid !== undefined) return manifest;
+          if (Number.isSafeInteger(snapshot?.pid))
+            manifest = await this.recordRuntimeIdentity(manifest, snapshot.pid);
+          if (snapshot?.readyForPrompts === true && manifest.runtimePid !== undefined)
+            return manifest;
         }
       } catch {}
-      if (manifest.runtimePid !== undefined && !await processIsAlive(manifest.runtimePid, manifest.runtimeProcessToken!)) {
+      if (
+        manifest.runtimePid !== undefined &&
+        !(await processIsAlive(manifest.runtimePid, manifest.runtimeProcessToken!))
+      ) {
         throw new Error("Authenticated Pi runtime exited before becoming ready");
       }
       await pause(50);
     }
-    throw new Error(manifest.runtimePid === undefined
-      ? "Headless Pi startup timed out before authenticated runtime identity; process death is unverified and task will not be replayed"
-      : "Headless Pi startup timed out; launch artifacts retained and task will not be replayed");
+    throw new Error(
+      manifest.runtimePid === undefined
+        ? "Headless Pi startup timed out before authenticated runtime identity; process death is unverified and task will not be replayed"
+        : "Headless Pi startup timed out; launch artifacts retained and task will not be replayed",
+    );
   }
   private async stopUnreleasedLauncher(child: Child): Promise<boolean> {
-    if (!child.launcherPid || !child.launcherToken || !await processIsAlive(child.launcherPid, child.launcherToken)) return false;
+    if (
+      !child.launcherPid ||
+      !child.launcherToken ||
+      !(await processIsAlive(child.launcherPid, child.launcherToken))
+    )
+      return false;
     const gate = new TuiWorkerStore(child.directory).path("launch-ready");
-    try { lstatSync(gate); return false; }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false; }
+    try {
+      lstatSync(gate);
+      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+    }
     try {
       const args = readFileSync(`/proc/${child.launcherPid}/cmdline`).toString("utf8").split("\0");
       if (!args.includes("headless-worker") || !args.includes(gate)) return false;
       process.kill(child.launcherPid, "SIGTERM");
       return true;
-    } catch { return false; }
+    } catch {
+      return false;
+    }
   }
-  private artifactPath(child: Child, value: unknown, kind: "report" | "outcome" | "notification" | "job-cleanup"): string | undefined {
+  private artifactPath(
+    child: Child,
+    value: unknown,
+    kind: "report" | "outcome" | "notification" | "job-cleanup",
+  ): string | undefined {
     if (typeof value !== "string") return;
-    const path = resolve(value), base = path.slice(path.lastIndexOf("/") + 1);
-    if (!path.startsWith(`${resolve(child.directory)}/`) || !new RegExp(`^${kind}-[0-9]+-[a-f0-9]{16}\\.json$`).test(base)) return;
+    const path = resolve(value),
+      base = path.slice(path.lastIndexOf("/") + 1);
+    if (
+      !path.startsWith(`${resolve(child.directory)}/`) ||
+      !new RegExp(`^${kind}-[0-9]+-[a-f0-9]{16}\\.json$`).test(base)
+    )
+      return;
     return path;
   }
-  private async deliverEvents(group: Group, child: Child, manifest: HeadlessWorkerManifest, generation: number): Promise<void> {
+  private async deliverEvents(
+    group: Group,
+    child: Child,
+    manifest: HeadlessWorkerManifest,
+    generation: number,
+  ): Promise<void> {
     const afterSequence = child.notifiedSequence ?? 0;
     let result;
-    try { result = await callTuiWorker(manifest, { operation: "events", afterSequence }, { timeoutMs: 1200 }); }
-    catch { return; }
+    try {
+      result = await callTuiWorker(
+        manifest,
+        { operation: "events", afterSequence },
+        { timeoutMs: 1200 },
+      );
+    } catch {
+      return;
+    }
     if (!result.ok) return;
     const data = result.data as any;
-    let events = Array.isArray(data?.events) ? data.events as TuiWorkerEvent[] : [];
+    let events = Array.isArray(data?.events) ? (data.events as TuiWorkerEvent[]) : [];
     if (Number.isSafeInteger(data?.oldestSequence) && data.oldestSequence > afterSequence + 1) {
-      const durable = new TuiWorkerStore(child.directory).readTimeline().filter(event => event.sequence > afterSequence);
+      const durable = new TuiWorkerStore(child.directory)
+        .readTimeline()
+        .filter((event) => event.sequence > afterSequence);
       if (durable.length) events = durable;
     }
     let changed = false;
@@ -443,8 +971,15 @@ export class HeadlessForegroundManager {
         if (path && this.notify) {
           const value = readPrivateJson(path) as any;
           if (typeof value.message === "string" && Buffer.byteLength(value.message) <= 1000) {
-            const update: QuietUpdate = { kind: "notification", id: `${group.id}:${child.childId}:${event.sequence}`,
-              child_id: child.childId, displayName: this.canonicalTitle(child), message: value.message, requires_guidance: value.requires_guidance === true, through_sequence: event.sequence };
+            const update: QuietUpdate = {
+              kind: "notification",
+              id: `${group.id}:${child.childId}:${event.sequence}`,
+              child_id: child.childId,
+              displayName: this.canonicalTitle(child),
+              message: value.message,
+              requires_guidance: value.requires_guidance === true,
+              through_sequence: event.sequence,
+            };
             if (!this.notify(update)) break;
           }
         }
@@ -452,7 +987,10 @@ export class HeadlessForegroundManager {
       child.notifiedSequence = event.sequence;
       changed = true;
     }
-    if (changed) { child.updatedAt = new Date().toISOString(); this.persist(group); }
+    if (changed) {
+      child.updatedAt = new Date().toISOString();
+      this.persist(group);
+    }
   }
   private async observe(group: Group, child: Child): Promise<void> {
     const pending = this.observeFlights.get(child.childId);
@@ -460,15 +998,31 @@ export class HeadlessForegroundManager {
     const generation = this.generation(child);
     const flight = this.observeOnce(group, child, generation);
     this.observeFlights.set(child.childId, flight);
-    try { await flight; } finally { if (this.observeFlights.get(child.childId) === flight) this.observeFlights.delete(child.childId); }
+    try {
+      await flight;
+    } finally {
+      if (this.observeFlights.get(child.childId) === flight)
+        this.observeFlights.delete(child.childId);
+    }
   }
   private async observeOnce(group: Group, child: Child, generation: number): Promise<void> {
     let manifest = this.manifest(child);
     if (!manifest) {
-      if (child.launching || child.status === "pending" && group.ownerToken === this.ownerToken && !group.cancelled) return;
-      if (active(child)) { const released = await this.stopUnreleasedLauncher(child);
-        child.status = "lost"; child.workerAlive = false; child.error = released ? "Uncommitted launcher stopped before Pi exec; no replay attempted" : "No committed worker manifest; automatic replay refused";
-        child.updatedAt = new Date().toISOString(); this.persist(group); }
+      if (
+        child.launching ||
+        (child.status === "pending" && group.ownerToken === this.ownerToken && !group.cancelled)
+      )
+        return;
+      if (active(child)) {
+        const released = await this.stopUnreleasedLauncher(child);
+        child.status = "lost";
+        child.workerAlive = false;
+        child.error = released
+          ? "Uncommitted launcher stopped before Pi exec; no replay attempted"
+          : "No committed worker manifest; automatic replay refused";
+        child.updatedAt = new Date().toISOString();
+        this.persist(group);
+      }
       return;
     }
     try {
@@ -476,135 +1030,355 @@ export class HeadlessForegroundManager {
       const status = await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 1200 });
       if (!status.ok || generation !== this.generation(child)) return;
       const state = status.data as any;
-      if (Number.isSafeInteger(state.pid)) manifest = await this.recordRuntimeIdentity(manifest, state.pid);
-      const pendingInteraction = (state.interactions ?? []).find((item: any) => !item.answer && !item.cancelledAt);
-      let nextStatus: Child["status"] = child.stopRequested ? "cancelled"
-        : pendingInteraction ? pendingInteraction.request?.kind === "permission" ? "waiting-permission" : "waiting-input"
-          : state.active ? "running" : state.lastReport ? "completed" : "pending";
+      if (Number.isSafeInteger(state.pid))
+        manifest = await this.recordRuntimeIdentity(manifest, state.pid);
+      const pendingInteraction = (state.interactions ?? []).find(
+        (item: any) => !item.answer && !item.cancelledAt,
+      );
+      let nextStatus: Child["status"] = child.stopRequested
+        ? "cancelled"
+        : pendingInteraction
+          ? pendingInteraction.request?.kind === "permission"
+            ? "waiting-permission"
+            : "waiting-input"
+          : state.active
+            ? "running"
+            : state.lastReport
+              ? "completed"
+              : "pending";
       let nextError: string | undefined;
       const reportPath = this.artifactPath(child, state.lastReport, "report");
-      if (state.lastReport && !reportPath) { nextError = "Worker returned an invalid report artifact"; nextStatus = "failed"; }
+      if (state.lastReport && !reportPath) {
+        nextError = "Worker returned an invalid report artifact";
+        nextStatus = "failed";
+      }
       if (reportPath) {
         const report = readPrivateJson(reportPath) as any;
-        if (typeof report.error === "string") { nextError = report.error; nextStatus = "failed"; }
-        else if (report.assistant?.stopReason === "error") { nextError = "Worker reported an error"; nextStatus = "failed"; }
-        else if (report.assistant?.stopReason === "aborted" || group.cancelled) nextStatus = "cancelled";
+        if (typeof report.error === "string") {
+          nextError = report.error;
+          nextStatus = "failed";
+        } else if (report.assistant?.stopReason === "error") {
+          nextError = "Worker reported an error";
+          nextStatus = "failed";
+        } else if (report.assistant?.stopReason === "aborted" || group.cancelled)
+          nextStatus = "cancelled";
       }
-      if (!state.active && state.lastReport && child.spec.verification?.length && state.verification?.status !== "passed") {
-        nextStatus = "failed"; nextError = `Runtime verification ${state.verification?.status ?? "unavailable"}; accepted delivery blocked`;
+      if (
+        !state.active &&
+        state.lastReport &&
+        child.spec.verification?.length &&
+        state.verification?.status !== "passed"
+      ) {
+        nextStatus = "failed";
+        nextError = `Runtime verification ${state.verification?.status ?? "unavailable"}; accepted delivery blocked`;
       }
       const outcomePath = this.artifactPath(child, state.lastOutcome, "outcome");
       const outcome = outcomePath ? readPrivateJson(outcomePath) : undefined;
-      const report = reportPath ? readPrivateJson(reportPath) as any : undefined;
-      const requiresCompaction = Number.isFinite(report?.contextTokens) && Number.isFinite(report?.contextWindow)
-        && report.contextWindow > 0 && report.contextTokens >= report.contextWindow * 0.8;
+      const report = reportPath ? (readPrivateJson(reportPath) as any) : undefined;
+      const requiresCompaction =
+        Number.isFinite(report?.contextTokens) &&
+        Number.isFinite(report?.contextWindow) &&
+        report.contextWindow > 0 &&
+        report.contextTokens >= report.contextWindow * 0.8;
       await this.deliverEvents(group, child, manifest, generation);
-      if (child.status !== nextStatus || child.report !== reportPath || child.error !== nextError || child.workerAlive !== true
-        || child.requiresCompaction !== requiresCompaction || JSON.stringify(child.outcome) !== JSON.stringify(outcome)) {
-        child.status = nextStatus; child.report = reportPath; child.outcome = outcome; child.error = nextError;
-        child.requiresCompaction = requiresCompaction; child.workerAlive = true; child.updatedAt = new Date().toISOString();
+      if (
+        child.status !== nextStatus ||
+        child.report !== reportPath ||
+        child.error !== nextError ||
+        child.workerAlive !== true ||
+        child.requiresCompaction !== requiresCompaction ||
+        JSON.stringify(child.outcome) !== JSON.stringify(outcome)
+      ) {
+        child.status = nextStatus;
+        child.report = reportPath;
+        child.outcome = outcome;
+        child.error = nextError;
+        child.requiresCompaction = requiresCompaction;
+        child.workerAlive = true;
+        child.updatedAt = new Date().toISOString();
         this.persist(group);
       }
     } catch {
       if (generation !== this.generation(child)) return;
       if (await this.stopUnreleasedLauncher(child)) {
-        child.status = "lost"; child.workerAlive = false; child.error = "Uncommitted launcher stopped before Pi exec; no replay attempted";
-        child.updatedAt = new Date().toISOString(); this.persist(group); return;
+        child.status = "lost";
+        child.workerAlive = false;
+        child.error = "Uncommitted launcher stopped before Pi exec; no replay attempted";
+        child.updatedAt = new Date().toISOString();
+        this.persist(group);
+        return;
       }
       const runtimeState = await this.runtimeState(manifest);
       if (runtimeState === "unknown") {
-        child.error = "Actual Pi runtime identity is not yet authenticated; refusing to infer death from launcher PID";
+        child.error =
+          "Actual Pi runtime identity is not yet authenticated; refusing to infer death from launcher PID";
         return;
       }
       if (runtimeState === "dead") {
         try {
-          const store = new TuiWorkerStore(child.directory), state = store.readState(false);
+          const store = new TuiWorkerStore(child.directory),
+            state = store.readState(false);
           let tombstone: any;
-          try { tombstone = readPrivateJson(store.path("reaped.json")); } catch {}
-          if (tombstone?.workerEpoch === manifest.workerEpoch && tombstone.processPid === manifest.processPid && tombstone.processToken === manifest.processToken
-            && tombstone.runtimePid === manifest.runtimePid && tombstone.runtimeProcessToken === manifest.runtimeProcessToken) {
+          try {
+            tombstone = readPrivateJson(store.path("reaped.json"));
+          } catch {}
+          if (
+            tombstone?.workerEpoch === manifest.workerEpoch &&
+            tombstone.processPid === manifest.processPid &&
+            tombstone.processToken === manifest.processToken &&
+            tombstone.runtimePid === manifest.runtimePid &&
+            tombstone.runtimeProcessToken === manifest.runtimeProcessToken
+          ) {
             child.status = "reaped";
           } else {
             const reportPath = this.artifactPath(child, state.lastReport, "report");
             child.report = reportPath;
-            const report = reportPath ? readPrivateJson(reportPath) as any : undefined;
-            child.error = typeof report?.error === "string" ? report.error
-              : report?.assistant?.stopReason === "error" ? "Worker reported an error" : undefined;
-            if (child.spec.verification?.length) child.error = "Runtime verification unavailable in headless execution; accepted delivery blocked";
-            child.status = report?.assistant?.stopReason === "aborted" || group.cancelled ? "cancelled"
-              : child.error ? "failed" : reportPath ? "completed" : "lost";
-            child.requiresCompaction = Number.isFinite(report?.contextTokens) && Number.isFinite(report?.contextWindow)
-              && report.contextWindow > 0 && report.contextTokens >= report.contextWindow * 0.8;
+            const report = reportPath ? (readPrivateJson(reportPath) as any) : undefined;
+            child.error =
+              typeof report?.error === "string"
+                ? report.error
+                : report?.assistant?.stopReason === "error"
+                  ? "Worker reported an error"
+                  : undefined;
+            if (child.spec.verification?.length)
+              child.error =
+                "Runtime verification unavailable in headless execution; accepted delivery blocked";
+            child.status =
+              report?.assistant?.stopReason === "aborted" || group.cancelled
+                ? "cancelled"
+                : child.error
+                  ? "failed"
+                  : reportPath
+                    ? "completed"
+                    : "lost";
+            child.requiresCompaction =
+              Number.isFinite(report?.contextTokens) &&
+              Number.isFinite(report?.contextWindow) &&
+              report.contextWindow > 0 &&
+              report.contextTokens >= report.contextWindow * 0.8;
             const outcomePath = this.artifactPath(child, state.lastOutcome, "outcome");
             child.outcome = outcomePath ? readPrivateJson(outcomePath) : undefined;
           }
-        } catch { child.status = "lost"; child.error = "Pi exited without a confirmed settlement"; }
-        child.workerAlive = false; child.updatedAt = new Date().toISOString(); this.persist(group);
+        } catch {
+          child.status = "lost";
+          child.error = "Pi exited without a confirmed settlement";
+        }
+        child.workerAlive = false;
+        child.updatedAt = new Date().toISOString();
+        this.persist(group);
       }
     }
   }
-  launch(params: any, owner: string, cwd: string, signal?: AbortSignal, update?: (value: any) => void,
-    resume?: { taskId: string; sessionFile: string; attempt: number; spec: Spec; previousChildId?: string; message?: string; compact?: boolean }): Promise<any> {
+  launch(
+    params: any,
+    owner: string,
+    cwd: string,
+    signal?: AbortSignal,
+    update?: (value: any) => void,
+    resume?: {
+      taskId: string;
+      sessionFile: string;
+      attempt: number;
+      spec: Spec;
+      previousChildId?: string;
+      message?: string;
+      compact?: boolean;
+    },
+  ): Promise<any> {
     // Return the coordinator's turn when its child needs a structured answer.
     // Keep the existing chain/parallel scheduler alive; do not abandon later work.
-    const lifetime = new AbortController(); let yielded = false;
+    const lifetime = new AbortController();
+    let yielded = false;
     const abort = () => lifetime.abort(signal?.reason);
-    signal?.addEventListener("abort", abort, { once: true }); if (signal?.aborted) abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
     let yieldGuidance!: (value: any) => void;
-    const guidance = new Promise<any>(resolve => { yieldGuidance = resolve; });
-    const flight = this.launchImpl(params, owner, cwd, lifetime.signal, value => { if (!yielded) update?.(value); }, resume, value => {
-      if (yielded) return;
-      const group = this.groups.get(value.details.job_id)!; group.guidanceYielded = true; this.persist(group);
-      yielded = true; signal?.removeEventListener("abort", abort);
-      yieldGuidance({ ...value, content: [...value.content, { type: "text", text: "Coordinator guidance is waiting; use guidance list. Workers remain live." }], details: { ...value.details, guidance_waiting: true } });
+    const guidance = new Promise<any>((resolve) => {
+      yieldGuidance = resolve;
     });
+    const flight = this.launchImpl(
+      params,
+      owner,
+      cwd,
+      lifetime.signal,
+      (value) => {
+        if (!yielded) update?.(value);
+      },
+      resume,
+      (value) => {
+        if (yielded) return;
+        const group = this.groups.get(value.details.job_id)!;
+        group.guidanceYielded = true;
+        this.persist(group);
+        yielded = true;
+        signal?.removeEventListener("abort", abort);
+        yieldGuidance({
+          ...value,
+          content: [
+            ...value.content,
+            {
+              type: "text",
+              text: "Coordinator guidance is waiting; use guidance list. Workers remain live.",
+            },
+          ],
+          details: { ...value.details, guidance_waiting: true },
+        });
+      },
+    );
     this.activeLaunches.add(flight);
     const settled = flight.finally(() => {
-      this.activeLaunches.delete(flight); signal?.removeEventListener("abort", abort);
-      if (yielded) for (const group of this.groups.values()) if (group.owner === owner) this.notifyGuidanceCompletion(group);
+      this.activeLaunches.delete(flight);
+      signal?.removeEventListener("abort", abort);
+      if (yielded)
+        for (const group of this.groups.values())
+          if (group.owner === owner) this.notifyGuidanceCompletion(group);
     });
     return Promise.race([settled, guidance]);
   }
-  private async launchImpl(params: any, owner: string, cwd: string, signal?: AbortSignal, update?: (value: any) => void,
-    resume?: { taskId: string; sessionFile: string; attempt: number; spec: Spec; previousChildId?: string; message?: string; compact?: boolean }, yieldGuidance?: (value: any) => void) {
-    if (this.owner !== owner || this.closed || this.reapReserved) throw new Error("Headless foreground manager is not active for this session or cleanup reserved");
-    const forms = [typeof params.task === "string" && params.task.trim(), Array.isArray(params.tasks) && params.tasks.length, Array.isArray(params.chain) && params.chain.length].filter(Boolean);
+  private async launchImpl(
+    params: any,
+    owner: string,
+    cwd: string,
+    signal?: AbortSignal,
+    update?: (value: any) => void,
+    resume?: {
+      taskId: string;
+      sessionFile: string;
+      attempt: number;
+      spec: Spec;
+      previousChildId?: string;
+      message?: string;
+      compact?: boolean;
+    },
+    yieldGuidance?: (value: any) => void,
+  ) {
+    if (this.owner !== owner || this.closed || this.reapReserved)
+      throw new Error(
+        "Headless foreground manager is not active for this session or cleanup reserved",
+      );
+    const forms = [
+      typeof params.task === "string" && params.task.trim(),
+      Array.isArray(params.tasks) && params.tasks.length,
+      Array.isArray(params.chain) && params.chain.length,
+    ].filter(Boolean);
     if (forms.length !== 1) throw new Error("Provide exactly one task/tasks/chain form");
     const specs: Spec[] = (params.tasks ?? params.chain ?? [params]).map((spec: any) => {
-      if (typeof spec.task !== "string" || !spec.task.trim() || Buffer.byteLength(spec.task) > 48 * 1024) throw new Error("Invalid bounded subagent task");
-      if (spec.systemPrompt !== undefined && (typeof spec.systemPrompt !== "string" || Buffer.byteLength(spec.systemPrompt) > 64 * 1024)) throw new Error("Invalid system prompt");
-      if (spec.model !== undefined && (typeof spec.model !== "string" || Buffer.byteLength(spec.model) > 512)) throw new Error("Invalid model");
-      if (spec.tools !== undefined && (!Array.isArray(spec.tools) || spec.tools.length > 64 || spec.tools.some((tool: any) => typeof tool !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(tool)))) throw new Error("Invalid tool selection");
-      const unavailable = (spec.tools ?? []).filter((tool: string) => ["subagent", "background_job"].includes(tool));
-      if (unavailable.length) throw new Error(`Headless foreground tasks cannot enable tmux/delegation tools: ${unavailable.join(", ")}`);
-      return { name: validateSubagentName(spec.name), displayName: canonicalSubagentName(spec.task, spec.displayName, spec.name), task: spec.task, cwd: resolve(spec.cwd ?? cwd), model: spec.model, tools: spec.tools,
-        systemPrompt: spec.systemPrompt, acceptance: validateAcceptance(spec.acceptance), ...(spec.verification !== undefined ? { verification: validateVerification(spec.verification) } : {}),
-        cleanupWorktreesOnReap: spec.cleanupWorktreesOnReap === true, automaticWorktrees: spec.automaticWorktrees === true,
-        worktree: worktreeOption(spec.worktree), ...(resume?.spec.worktreeInfo ? { worktreeInfo: resume.spec.worktreeInfo } : {}) };
+      if (
+        typeof spec.task !== "string" ||
+        !spec.task.trim() ||
+        Buffer.byteLength(spec.task) > 48 * 1024
+      )
+        throw new Error("Invalid bounded subagent task");
+      if (
+        spec.systemPrompt !== undefined &&
+        (typeof spec.systemPrompt !== "string" || Buffer.byteLength(spec.systemPrompt) > 64 * 1024)
+      )
+        throw new Error("Invalid system prompt");
+      if (
+        spec.model !== undefined &&
+        (typeof spec.model !== "string" || Buffer.byteLength(spec.model) > 512)
+      )
+        throw new Error("Invalid model");
+      if (
+        spec.tools !== undefined &&
+        (!Array.isArray(spec.tools) ||
+          spec.tools.length > 64 ||
+          spec.tools.some(
+            (tool: any) => typeof tool !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(tool),
+          ))
+      )
+        throw new Error("Invalid tool selection");
+      const unavailable = (spec.tools ?? []).filter((tool: string) =>
+        ["subagent", "background_job"].includes(tool),
+      );
+      if (unavailable.length)
+        throw new Error(
+          `Headless foreground tasks cannot enable tmux/delegation tools: ${unavailable.join(", ")}`,
+        );
+      return {
+        name: validateSubagentName(spec.name),
+        displayName: canonicalSubagentName(spec.task, spec.displayName, spec.name),
+        task: spec.task,
+        cwd: resolve(spec.cwd ?? cwd),
+        model: spec.model,
+        tools: spec.tools,
+        systemPrompt: spec.systemPrompt,
+        acceptance: validateAcceptance(spec.acceptance),
+        ...(spec.verification !== undefined
+          ? { verification: validateVerification(spec.verification) }
+          : {}),
+        cleanupWorktreesOnReap: spec.cleanupWorktreesOnReap === true,
+        automaticWorktrees: spec.automaticWorktrees === true,
+        worktree: worktreeOption(spec.worktree),
+        ...(resume?.spec.worktreeInfo ? { worktreeInfo: resume.spec.worktreeInfo } : {}),
+      };
     });
     if (specs.length > 8) throw new Error("At most eight subagent children are allowed");
-    if (!this.ready()) throw new Error("Parent AgentSH authority is not active; refusing headless worker launch");
+    if (!this.ready())
+      throw new Error("Parent AgentSH authority is not active; refusing headless worker launch");
     const contract = tuiWorkerLaunchContract(this.disposition());
-    const group: Group = { version: 1, id: id("subagent-job"), owner, ownerToken: this.ownerToken!, createdAt: new Date().toISOString(),
-      mode: params.chain ? "chain" : params.tasks ? "parallel" : "single", cancelled: false, launchMode: contract.launchMode, launcher: contract.launcher,
-      children: specs.map((spec, index) => ({ taskId: resume?.taskId ?? id("subagent-task"), childId: id("subagent-child"), attempt: resume?.attempt ?? 1,
-        directory: join(this.root, "workers", randomBytes(12).toString("hex")), spec: resume && specs.length === 1 ? resume.spec : spec,
-        status: "pending", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), started: false,
-        ownerToken: this.ownerToken!, operatorCapability: randomBytes(32).toString("hex"), resumeMessage: resume?.message, compactBeforePrompt: resume?.compact,
-        notifiedSequence: 0 })) };
+    const group: Group = {
+      version: 1,
+      id: id("subagent-job"),
+      owner,
+      ownerToken: this.ownerToken!,
+      createdAt: new Date().toISOString(),
+      mode: params.chain ? "chain" : params.tasks ? "parallel" : "single",
+      cancelled: false,
+      launchMode: contract.launchMode,
+      launcher: contract.launcher,
+      children: specs.map((spec, index) => ({
+        taskId: resume?.taskId ?? id("subagent-task"),
+        childId: id("subagent-child"),
+        attempt: resume?.attempt ?? 1,
+        directory: join(this.root, "workers", randomBytes(12).toString("hex")),
+        spec: resume && specs.length === 1 ? resume.spec : spec,
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        started: false,
+        ownerToken: this.ownerToken!,
+        operatorCapability: randomBytes(32).toString("hex"),
+        resumeMessage: resume?.message,
+        compactBeforePrompt: resume?.compact,
+        notifiedSequence: 0,
+      })),
+    };
     await this.serial(async () => {
-      if (signal?.aborted || this.closed || this.reapReserved) throw new Error("Launch cancelled before commit");
-      if ([...this.groups.values()].filter(g => g.owner === owner && g.children.some(active)).length >= this.groupLimit) throw new Error(`Foreground task concurrency limit reached (${this.groupLimit})`);
+      if (signal?.aborted || this.closed || this.reapReserved)
+        throw new Error("Launch cancelled before commit");
+      if (
+        [...this.groups.values()].filter((g) => g.owner === owner && g.children.some(active))
+          .length >= this.groupLimit
+      )
+        throw new Error(`Foreground task concurrency limit reached (${this.groupLimit})`);
       try {
-        await provisionWorktrees(group.children, owner, signal, () => this.owner === owner && !this.closed && !this.reapReserved && this.ready(), !!resume, workerWorktreeContext(owner), resume?.previousChildId, async (path, supervisors) => {
-          if (await this.worktreeReuseActivity(path, supervisors)) return true;
-          return new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit).worktreeReuseActivity(path, supervisors);
-        });
-        if (signal?.aborted || this.closed || this.reapReserved || this.owner !== owner) throw new Error("Worktree launch context changed");
-        this.groups.set(group.id, group); this.persist(group);
+        await provisionWorktrees(
+          group.children,
+          owner,
+          signal,
+          () => this.owner === owner && !this.closed && !this.reapReserved && this.ready(),
+          !!resume,
+          workerWorktreeContext(owner),
+          resume?.previousChildId,
+          async (path, supervisors) => {
+            if (await this.worktreeReuseActivity(path, supervisors)) return true;
+            return new TuiNativeManager(
+              this.root,
+              this.disposition,
+              () => false,
+              this.groupLimit,
+            ).worktreeReuseActivity(path, supervisors);
+          },
+        );
+        if (signal?.aborted || this.closed || this.reapReserved || this.owner !== owner)
+          throw new Error("Worktree launch context changed");
+        this.groups.set(group.id, group);
+        this.persist(group);
       } catch (error) {
         this.groups.delete(group.id);
-        for (const child of group.children) if (child.spec.worktree) await releaseWorktree(owner, child.taskId, child.childId);
+        for (const child of group.children)
+          if (child.spec.worktree) await releaseWorktree(owner, child.taskId, child.childId);
         throw error;
       }
     });
@@ -613,14 +1387,28 @@ export class HeadlessForegroundManager {
         for (let start = 0; start < group.children.length; start += 4) {
           if (signal?.aborted) throw new Error("Foreground task cancelled");
           if (group.cancelled) return this.result(group);
-          const batch = group.children.slice(start, start + 4).filter(child => !child.stopRequested);
-          await Promise.all(batch.map(child => this.launchWorker(group, child, resume?.sessionFile, signal)));
+          const batch = group.children
+            .slice(start, start + 4)
+            .filter((child) => !child.stopRequested);
+          await Promise.all(
+            batch.map((child) => this.launchWorker(group, child, resume?.sessionFile, signal)),
+          );
           while (batch.some(active)) {
-            if (pendingGuidance(owner, batch.map(child => child.childId))) yieldGuidance?.(this.result(group));
+            if (
+              pendingGuidance(
+                owner,
+                batch.map((child) => child.childId),
+              )
+            )
+              yieldGuidance?.(this.result(group));
             if (this.closed) throw new Error("Headless foreground owner is shutting down");
             if (signal?.aborted) throw new Error("Foreground task cancelled");
-            await Promise.all(batch.map(child => this.observe(group, child)));
-            try { update?.(this.result(group)); } catch { /* Rendering cannot abandon a live task. */ }
+            await Promise.all(batch.map((child) => this.observe(group, child)));
+            try {
+              update?.(this.result(group));
+            } catch {
+              /* Rendering cannot abandon a live task. */
+            }
             await pause(200);
           }
         }
@@ -632,9 +1420,20 @@ export class HeadlessForegroundManager {
           if (child.stopRequested) continue;
           if (group.mode === "chain" && index > 0) {
             const prior = group.children[index - 1]!;
-            while (active(prior)) { if (this.closed) throw new Error("Headless foreground owner is shutting down"); await this.observe(group, prior); await pause(200); if (signal?.aborted) throw new Error("Foreground task cancelled"); }
-            if (prior.status !== "completed") { child.status = "cancelled"; continue; }
-            const priorText = this.readMessages(prior, false).filter(message => message.role === "assistant").at(-1)?.text ?? "";
+            while (active(prior)) {
+              if (this.closed) throw new Error("Headless foreground owner is shutting down");
+              await this.observe(group, prior);
+              await pause(200);
+              if (signal?.aborted) throw new Error("Foreground task cancelled");
+            }
+            if (prior.status !== "completed") {
+              child.status = "cancelled";
+              continue;
+            }
+            const priorText =
+              this.readMessages(prior, false)
+                .filter((message) => message.role === "assistant")
+                .at(-1)?.text ?? "";
             child.spec.task = child.spec.task.replaceAll("{previous}", priorText);
           }
           await this.launchWorker(group, child, resume?.sessionFile, signal);
@@ -643,7 +1442,11 @@ export class HeadlessForegroundManager {
             if (this.closed) throw new Error("Headless foreground owner is shutting down");
             if (signal?.aborted) throw new Error("Foreground task cancelled");
             await this.observe(group, child);
-            try { update?.(this.result(group)); } catch { /* Rendering cannot abandon a live task. */ }
+            try {
+              update?.(this.result(group));
+            } catch {
+              /* Rendering cannot abandon a live task. */
+            }
             await pause(200);
           }
         }
@@ -658,10 +1461,18 @@ export class HeadlessForegroundManager {
           // A parallel sibling may have completed and committed its authenticated
           // report before another launch/readiness promise rejects. Group cleanup
           // must not replace that settled result with the unrelated startup error.
-          if (child.report && ["completed", "cancelled", "failed", "lost", "reaped"].includes(child.status)) continue;
+          if (
+            child.report &&
+            ["completed", "cancelled", "failed", "lost", "reaped"].includes(child.status)
+          )
+            continue;
           const diagnostic = this.startupDiagnostics(child);
-          child.error = boundedUtf8(`${message}${diagnostic ? `\nWorker stderr: ${diagnostic}` : ""}`, 3000);
-          child.status = "failed"; child.updatedAt = new Date().toISOString();
+          child.error = boundedUtf8(
+            `${message}${diagnostic ? `\nWorker stderr: ${diagnostic}` : ""}`,
+            3000,
+          );
+          child.status = "failed";
+          child.updatedAt = new Date().toISOString();
         }
         this.persist(group);
         throw new Error(this.result(group).content[0].text);
@@ -671,60 +1482,219 @@ export class HeadlessForegroundManager {
   }
   private notifyGuidanceCompletion(group: Group): void {
     if (this.closed || !group.guidanceYielded || group.children.some(active)) return;
-    const token = createHash("sha256").update(JSON.stringify(group.children.map(child => [child.childId, child.attempt, child.status, child.report ?? null]))).digest("hex").slice(0, 24);
+    const token = createHash("sha256")
+      .update(
+        JSON.stringify(
+          group.children.map((child) => [
+            child.childId,
+            child.attempt,
+            child.status,
+            child.report ?? null,
+          ]),
+        ),
+      )
+      .digest("hex")
+      .slice(0, 24);
     if (group.guidanceCompletion === token) return;
-    const state = group.cancelled || group.children.some(child => child.status === "cancelled") ? "cancelled"
-      : group.children.some(child => ["failed", "lost"].includes(child.status)) ? "failed" : "completed";
+    const state =
+      group.cancelled || group.children.some((child) => child.status === "cancelled")
+        ? "cancelled"
+        : group.children.some((child) => ["failed", "lost"].includes(child.status))
+          ? "failed"
+          : "completed";
     try {
-      if (this.notify?.({ kind: "subagent", id: `${group.id}:guidance-terminal:${token}`, job_id: group.id, state, completion: true })) {
-        group.guidanceCompletion = token; this.persist(group);
+      if (
+        this.notify?.({
+          kind: "subagent",
+          id: `${group.id}:guidance-terminal:${token}`,
+          job_id: group.id,
+          state,
+          completion: true,
+        })
+      ) {
+        group.guidanceCompletion = token;
+        this.persist(group);
       }
-    } catch { /* Existing observer retries; quiet-state receipt IDs deduplicate. */ }
+    } catch {
+      /* Existing observer retries; quiet-state receipt IDs deduplicate. */
+    }
   }
   private startupDiagnostics(child: Child): string {
     try {
       const log = readBoundedTail(new TuiWorkerStore(child.directory).path("rpc.stderr.log"), 8192);
-      const safe = log.text.replace(/[a-f0-9]{64}/gi, "[redacted]").replace(/(token|capability|password|secret)[=: ]+[^\s,;]+/gi, "$1=[redacted]");
+      const safe = log.text
+        .replace(/[a-f0-9]{64}/gi, "[redacted]")
+        .replace(/(token|capability|password|secret)[=: ]+[^\s,;]+/gi, "$1=[redacted]");
       return boundedUtf8(stripControls(safe), 2000);
-    } catch { return ""; }
+    } catch {
+      return "";
+    }
   }
-  private result(group: Group, selected?: Child, options: { operation?: string; offset?: number; limit?: number; diagnostics?: boolean; retained?: boolean } = {}): any {
-    const children = group.children.map((child, index) => ({ child: index + 1, child_id: child.childId, task_id: child.taskId, status: child.status, attempt: child.attempt, displayName: this.canonicalTitle(child), task: child.spec.task.slice(0, 500), cwd: child.spec.cwd, worktree: child.spec.worktreeInfo, worktree_reap_policy: { enabled: child.spec.cleanupWorktreesOnReap === true, scope: "registered-harness-worktrees-only", limitation: "External/unregistered worktrees are not inventoried or removed" }, error: child.error, task_outcome: child.outcome, verification: { status: child.spec.verification?.length ? "unavailable" : "not-configured" }, accepted_delivery: !child.spec.verification?.length && child.status === "completed" && (child.outcome as any)?.state === "delivered", verification_bypasses: child.verificationBypasses ?? [], review: "not-configured" }));
-    const failed = group.children.some(child => ["failed", "lost"].includes(child.status));
+  private result(
+    group: Group,
+    selected?: Child,
+    options: {
+      operation?: string;
+      offset?: number;
+      limit?: number;
+      diagnostics?: boolean;
+      retained?: boolean;
+    } = {},
+  ): any {
+    const children = group.children.map((child, index) => ({
+      child: index + 1,
+      child_id: child.childId,
+      task_id: child.taskId,
+      status: child.status,
+      attempt: child.attempt,
+      displayName: this.canonicalTitle(child),
+      task: child.spec.task.slice(0, 500),
+      cwd: child.spec.cwd,
+      worktree: child.spec.worktreeInfo,
+      worktree_reap_policy: {
+        enabled: child.spec.cleanupWorktreesOnReap === true,
+        scope: "registered-harness-worktrees-only",
+        limitation: "External/unregistered worktrees are not inventoried or removed",
+      },
+      error: child.error,
+      task_outcome: child.outcome,
+      verification: { status: child.spec.verification?.length ? "unavailable" : "not-configured" },
+      accepted_delivery:
+        !child.spec.verification?.length &&
+        child.status === "completed" &&
+        (child.outcome as any)?.state === "delivered",
+      verification_bypasses: child.verificationBypasses ?? [],
+      review: "not-configured",
+    }));
+    const failed = group.children.some((child) => ["failed", "lost"].includes(child.status));
     const operation = options.operation ?? "result";
-    const cancelled = group.cancelled || group.children.some(child => child.status === "cancelled");
-    const groupStatus = group.children.some(active) ? "running" : cancelled ? "cancelled" : failed ? "failed" : "completed";
-    const groupView = { job_id: group.id, mode: group.mode, background: false, created_at: group.createdAt, status: groupStatus, children };
+    const cancelled =
+      group.cancelled || group.children.some((child) => child.status === "cancelled");
+    const groupStatus = group.children.some(active)
+      ? "running"
+      : cancelled
+        ? "cancelled"
+        : failed
+          ? "failed"
+          : "completed";
+    const groupView = {
+      job_id: group.id,
+      mode: group.mode,
+      background: false,
+      created_at: group.createdAt,
+      status: groupStatus,
+      children,
+    };
     if (selected && ["result", "output"].includes(operation)) {
-      if (!selected.report) return { content: [{ type: "text", text: selected.error ? `Worker failed: ${selected.error}` : "Result not ready. Use wait." }],
-        details: { tui_subagent: true, backend: "native", operation, job_id: group.id, child_id: selected.childId, group: groupView,
-          failed: ["failed", "lost"].includes(selected.status), unavailable: selected.status === "lost" } };
+      if (!selected.report)
+        return {
+          content: [
+            {
+              type: "text",
+              text: selected.error
+                ? `Worker failed: ${selected.error}`
+                : "Result not ready. Use wait.",
+            },
+          ],
+          details: {
+            tui_subagent: true,
+            backend: "native",
+            operation,
+            job_id: group.id,
+            child_id: selected.childId,
+            group: groupView,
+            failed: ["failed", "lost"].includes(selected.status),
+            unavailable: selected.status === "lost",
+          },
+        };
       const reportPath = this.artifactPath(selected, selected.report, "report");
-      if (!reportPath) return { content: [{ type: "text", text: "Worker returned an invalid report artifact." }],
-        details: { tui_subagent: true, backend: "native", operation, job_id: group.id, child_id: selected.childId, unavailable: true } };
+      if (!reportPath)
+        return {
+          content: [{ type: "text", text: "Worker returned an invalid report artifact." }],
+          details: {
+            tui_subagent: true,
+            backend: "native",
+            operation,
+            job_id: group.id,
+            child_id: selected.childId,
+            unavailable: true,
+          },
+        };
       const raw = readPrivateJson(reportPath) as any;
-      const body = nativeResultReport(raw, { reportText: contentText(raw.assistant), diagnostics: options.diagnostics,
-        jobId: group.id, childId: selected.childId, taskId: selected.taskId, attempt: selected.attempt,
-        state: selected.status, retained: options.retained, error: selected.error,
+      const body = nativeResultReport(raw, {
+        reportText: contentText(raw.assistant),
+        diagnostics: options.diagnostics,
+        jobId: group.id,
+        childId: selected.childId,
+        taskId: selected.taskId,
+        attempt: selected.attempt,
+        state: selected.status,
+        retained: options.retained,
+        error: selected.error,
         verification: children[group.children.indexOf(selected)].verification,
-        acceptedDelivery: children[group.children.indexOf(selected)].accepted_delivery });
+        acceptedDelivery: children[group.children.indexOf(selected)].accepted_delivery,
+      });
       const page = resultPage(body, options.offset, options.limit);
       const reportSequence = Number(reportPath.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || 0;
-      return { content: [{ type: "text", text: page.text }], details: { tui_subagent: true, backend: "native", operation, job_id: group.id,
-        child_id: selected.childId, task_id: selected.taskId, attempt: selected.attempt, group: groupView, artifact: reportPath, retained: options.retained === true,
-        verification: children[group.children.indexOf(selected)].verification, accepted_delivery: children[group.children.indexOf(selected)].accepted_delivery,
-        terminal_id: createHash("sha256").update(`${selected.attempt}:${reportPath}`).digest("hex").slice(0, 24),
-        report_sequence: reportSequence, offset: page.offset, next_offset: page.nextOffset, complete: page.complete, task_outcome: selected.outcome } };
+      return {
+        content: [{ type: "text", text: page.text }],
+        details: {
+          tui_subagent: true,
+          backend: "native",
+          operation,
+          job_id: group.id,
+          child_id: selected.childId,
+          task_id: selected.taskId,
+          attempt: selected.attempt,
+          group: groupView,
+          artifact: reportPath,
+          retained: options.retained === true,
+          verification: children[group.children.indexOf(selected)].verification,
+          accepted_delivery: children[group.children.indexOf(selected)].accepted_delivery,
+          terminal_id: createHash("sha256")
+            .update(`${selected.attempt}:${reportPath}`)
+            .digest("hex")
+            .slice(0, 24),
+          report_sequence: reportSequence,
+          offset: page.offset,
+          next_offset: page.nextOffset,
+          complete: page.complete,
+          task_outcome: selected.outcome,
+        },
+      };
     }
-    const rows = (selected ? [selected] : group.children).map(child => {
+    const rows = (selected ? [selected] : group.children).map((child) => {
       const index = group.children.indexOf(child);
-      return `${index + 1}. ${this.canonicalTitle(child)} ${statusText(child)}${child.error ? `: ${child.error}` : ""}${child.report ? `\n${this.readMessages(child, false).filter(message => message.role === "assistant").at(-1)?.text ?? ""}` : ""}`;
+      return `${index + 1}. ${this.canonicalTitle(child)} ${statusText(child)}${child.error ? `: ${child.error}` : ""}${
+        child.report
+          ? `\n${
+              this.readMessages(child, false)
+                .filter((message) => message.role === "assistant")
+                .at(-1)?.text ?? ""
+            }`
+          : ""
+      }`;
     });
-    return { content: [{ type: "text", text: boundedUtf8(rows.join("\n\n"), 48 * 1024) }],
-      details: { tui_subagent: true, backend: "native", operation, job_id: group.id, failed: selected ? ["failed", "lost"].includes(selected.status) : failed,
-        cancelled: selected ? selected.status === "cancelled" : cancelled, child_id: selected?.childId, group: groupView } };
+    return {
+      content: [{ type: "text", text: boundedUtf8(rows.join("\n\n"), 48 * 1024) }],
+      details: {
+        tui_subagent: true,
+        backend: "native",
+        operation,
+        job_id: group.id,
+        failed: selected ? ["failed", "lost"].includes(selected.status) : failed,
+        cancelled: selected ? selected.status === "cancelled" : cancelled,
+        child_id: selected?.childId,
+        group: groupView,
+      },
+    };
   }
-  private async stopGroup(group: Group, shutdownAll = false, onlyChild?: Child, userRequestId?: string): Promise<void> {
+  private async stopGroup(
+    group: Group,
+    shutdownAll = false,
+    onlyChild?: Child,
+    userRequestId?: string,
+  ): Promise<void> {
     if (!onlyChild) group.cancelled = true;
     this.persist(group);
     for (const child of group.children) {
@@ -732,25 +1702,54 @@ export class HeadlessForegroundManager {
       this.bumpGeneration(child);
       const manifest = this.manifest(child);
       if (!child.started && !child.initialPromptDispatching) {
-        child.stopRequested = true; child.status = "cancelled"; child.updatedAt = new Date().toISOString(); this.persist(group);
+        child.stopRequested = true;
+        child.status = "cancelled";
+        child.updatedAt = new Date().toISOString();
+        this.persist(group);
         if (shutdownAll && manifest) {
-          try { await this.sealAndReap(group, child, manifest); }
-          catch (error) { child.error = String(error).slice(0, 2000); this.persist(group); }
+          try {
+            await this.sealAndReap(group, child, manifest);
+          } catch (error) {
+            child.error = String(error).slice(0, 2000);
+            this.persist(group);
+          }
         } else if (shutdownAll && !manifest) {
           const released = await this.stopUnreleasedLauncher(child);
-          if (!released) child.error = "No committed worker manifest; launcher ownership is not verified";
+          if (!released)
+            child.error = "No committed worker manifest; launcher ownership is not verified";
           this.persist(group);
         }
         continue;
       }
       if (!active(child) && !shutdownAll) continue;
-      if (!manifest) { const released = await this.stopUnreleasedLauncher(child);
-        if (active(child)) { child.status = "lost"; child.workerAlive = false; child.error = released ? "Uncommitted launcher stopped before Pi exec" : "No committed worker manifest; process is not safely controllable"; }
-        continue; }
-      if (await this.stopUnreleasedLauncher(child)) { child.status = "lost"; child.workerAlive = false; child.error = "Uncommitted launcher stopped before Pi exec"; continue; }
+      if (!manifest) {
+        const released = await this.stopUnreleasedLauncher(child);
+        if (active(child)) {
+          child.status = "lost";
+          child.workerAlive = false;
+          child.error = released
+            ? "Uncommitted launcher stopped before Pi exec"
+            : "No committed worker manifest; process is not safely controllable";
+        }
+        continue;
+      }
+      if (await this.stopUnreleasedLauncher(child)) {
+        child.status = "lost";
+        child.workerAlive = false;
+        child.error = "Uncommitted launcher stopped before Pi exec";
+        continue;
+      }
       if (active(child)) {
-        const cancelId = userRequestId ? `user-stop:${createHash("sha256").update(userRequestId).digest("hex").slice(0, 48)}` : `cancel:${child.childId}:${randomBytes(8).toString("hex")}`;
-        try { await callTuiWorker(manifest, { operation: "cancel" }, { timeoutMs: 10_000, requestId: cancelId }); } catch {}
+        const cancelId = userRequestId
+          ? `user-stop:${createHash("sha256").update(userRequestId).digest("hex").slice(0, 48)}`
+          : `cancel:${child.childId}:${randomBytes(8).toString("hex")}`;
+        try {
+          await callTuiWorker(
+            manifest,
+            { operation: "cancel" },
+            { timeoutMs: 10_000, requestId: cancelId },
+          );
+        } catch {}
         const deadline = Date.now() + 30_000;
         while (Date.now() < deadline) {
           await this.observe(group, child);
@@ -759,13 +1758,16 @@ export class HeadlessForegroundManager {
         }
         if (active(child)) {
           child.error = "Stop was not confirmed; the worker is still active and was not reaped";
-          child.workerAlive = true; child.updatedAt = new Date().toISOString(); this.persist(group);
+          child.workerAlive = true;
+          child.updatedAt = new Date().toISOString();
+          this.persist(group);
           throw new Error(child.error);
         }
       }
       if (shutdownAll) {
-        try { await this.sealAndReap(group, child, manifest); }
-        catch (error) {
+        try {
+          await this.sealAndReap(group, child, manifest);
+        } catch (error) {
           child.error = `Safe headless shutdown could not seal local jobs: ${error instanceof Error ? error.message : String(error)}`;
           this.persist(group);
           throw error;
@@ -775,20 +1777,32 @@ export class HeadlessForegroundManager {
     this.persist(group);
   }
   async operatorMode(owner: string, enabled: boolean): Promise<ModeDelivery | undefined> {
-    if (this.owner !== owner || this.disposition() !== "guard-only" || this.liveOperatorMode(owner) !== enabled) return;
+    if (
+      this.owner !== owner ||
+      this.disposition() !== "guard-only" ||
+      this.liveOperatorMode(owner) !== enabled
+    )
+      return;
     const targets: ModeTarget[] = [];
-    for (const group of this.groups.values()) if (group.owner === owner && group.launchMode === "guard-only") {
-      for (const child of group.children) {
-        const manifest = this.manifest(child);
-        if (!manifest) continue;
-        targets.push({ childId: child.childId,
-          send: async () => {
-            const applied = await applyTuiWorkerOperatorMode(manifest, child.operatorCapability, enabled);
-            if (!applied.ok) throw new Error(`Child operator mode rejected: ${applied.code}`);
-          },
-          stopped: async () => (await this.runtimeState(manifest)) === "dead" });
+    for (const group of this.groups.values())
+      if (group.owner === owner && group.launchMode === "guard-only") {
+        for (const child of group.children) {
+          const manifest = this.manifest(child);
+          if (!manifest) continue;
+          targets.push({
+            childId: child.childId,
+            send: async () => {
+              const applied = await applyTuiWorkerOperatorMode(
+                manifest,
+                child.operatorCapability,
+                enabled,
+              );
+              if (!applied.ok) throw new Error(`Child operator mode rejected: ${applied.code}`);
+            },
+            stopped: async () => (await this.runtimeState(manifest)) === "dead",
+          });
+        }
       }
-    }
     return await deliverMode(targets);
   }
   async shutdown(cancelForeground: boolean): Promise<void> {
@@ -798,19 +1812,53 @@ export class HeadlessForegroundManager {
     await this.observerFlight?.catch(() => undefined);
     await this.queue.catch(() => undefined);
     await Promise.allSettled([...this.activeLaunches, ...this.inFlight]);
-    if (cancelForeground && this.owner) for (const group of this.groups.values()) if (group.owner === this.owner) await this.stopGroup(group, true);
+    if (cancelForeground && this.owner)
+      for (const group of this.groups.values())
+        if (group.owner === this.owner) await this.stopGroup(group, true);
     if (this.ownerLock) {
-      try { const lock = readPrivateJson(this.ownerLock) as any; if (lock.pid === process.pid && lock.token === this.ownerToken) unlinkSync(this.ownerLock); } catch {}
+      try {
+        const lock = readPrivateJson(this.ownerLock) as any;
+        if (lock.pid === process.pid && lock.token === this.ownerToken) unlinkSync(this.ownerLock);
+      } catch {}
       this.ownerLock = undefined;
     }
   }
   private task(group: Group, child: Child): ForegroundTask {
     const manifest = this.manifest(child);
-    const pending = manifest ? (() => { try { const state = new TuiWorkerStore(child.directory).readState(); return (state.interactions ?? []).filter(item => !item.answer && !item.cancelledAt).length; } catch { return 0; } })() : 0;
-    return { taskId: child.taskId, childId: child.childId, workerEpoch: manifest?.workerEpoch ?? "", groupId: group.id, attempt: child.attempt,
-      title: this.canonicalTitle(child), status: child.status, createdAt: child.createdAt, updatedAt: child.updatedAt,
-      pendingInteractions: pending, canPrompt: !!manifest && manifest.foregroundOwner?.token === this.ownerToken && child.started && child.workerAlive === true && ["running", "waiting-input", "waiting-permission", "completed", "cancelled"].includes(child.status),
-      canStop: child.workerAlive === true && (child.started && active(child) || !child.started && !child.initialPromptDispatching) };
+    const pending = manifest
+      ? (() => {
+          try {
+            const state = new TuiWorkerStore(child.directory).readState();
+            return (state.interactions ?? []).filter((item) => !item.answer && !item.cancelledAt)
+              .length;
+          } catch {
+            return 0;
+          }
+        })()
+      : 0;
+    return {
+      taskId: child.taskId,
+      childId: child.childId,
+      workerEpoch: manifest?.workerEpoch ?? "",
+      groupId: group.id,
+      attempt: child.attempt,
+      title: this.canonicalTitle(child),
+      status: child.status,
+      createdAt: child.createdAt,
+      updatedAt: child.updatedAt,
+      pendingInteractions: pending,
+      canPrompt:
+        !!manifest &&
+        manifest.foregroundOwner?.token === this.ownerToken &&
+        child.started &&
+        child.workerAlive === true &&
+        ["running", "waiting-input", "waiting-permission", "completed", "cancelled"].includes(
+          child.status,
+        ),
+      canStop:
+        child.workerAlive === true &&
+        ((child.started && active(child)) || (!child.started && !child.initialPromptDispatching)),
+    };
   }
   private readHistory(child: Child): { messages: TaskMessage[]; truncated: boolean } {
     const messages: TaskMessage[] = [];
@@ -824,72 +1872,160 @@ export class HeadlessForegroundManager {
       const lines = tail.text.split("\n").slice(-MAX_HISTORY_MESSAGES * 3);
       for (const line of lines) {
         if (!line) continue;
-        if (Buffer.byteLength(line) > 512 * 1024) { truncated = true; continue; }
-        let row: any; try { row = JSON.parse(line); } catch { truncated = true; continue; }
-        if (row?.type === "custom_message" && ["harness-control", "harness-user-control"].includes(row.customType)) {
-          const raw = stripControls(typeof row.content === "string" ? row.content : contentText({ content: row.content }));
+        if (Buffer.byteLength(line) > 512 * 1024) {
+          truncated = true;
+          continue;
+        }
+        let row: any;
+        try {
+          row = JSON.parse(line);
+        } catch {
+          truncated = true;
+          continue;
+        }
+        if (
+          row?.type === "custom_message" &&
+          ["harness-control", "harness-user-control"].includes(row.customType)
+        ) {
+          const raw = stripControls(
+            typeof row.content === "string" ? row.content : contentText({ content: row.content }),
+          );
           const wasTruncated = Buffer.byteLength(raw) > MAX_MESSAGE_TEXT;
           const text = boundedUtf8(raw, MAX_MESSAGE_TEXT);
           if (wasTruncated) truncated = true;
-          if (text) messages.push({ id: String(row.id ?? `${messages.length}`), role: row.customType === "harness-user-control" ? "user" : "parent",
-            text, ...(wasTruncated ? { truncated: true } : {}), timestamp: String(row.timestamp ?? child.updatedAt) });
+          if (text)
+            messages.push({
+              id: String(row.id ?? `${messages.length}`),
+              role: row.customType === "harness-user-control" ? "user" : "parent",
+              text,
+              ...(wasTruncated ? { truncated: true } : {}),
+              timestamp: String(row.timestamp ?? child.updatedAt),
+            });
           continue;
         }
         const message = row?.message ?? (row?.type === "message" ? row : undefined);
         if (!message || !["user", "assistant", "toolResult"].includes(message.role)) continue;
-        const id = String(row.id ?? `${messages.length}`), timestamp = timestampText(row.timestamp ?? message.timestamp, child.updatedAt);
+        const id = String(row.id ?? `${messages.length}`),
+          timestamp = timestampText(row.timestamp ?? message.timestamp, child.updatedAt);
         if (message.role === "assistant") {
           const rawText = stripControls(contentText(message));
           const clipped = Buffer.byteLength(rawText) > MAX_MESSAGE_TEXT;
           const text = boundedUtf8(rawText, MAX_MESSAGE_TEXT);
           if (clipped) truncated = true;
-          if (text) messages.push({ id: `${id}:text`, role: "assistant", text, ...(clipped ? { truncated: true } : {}), timestamp });
-          const calls = Array.isArray(message.content) ? message.content.filter((part: any) => part?.type === "toolCall") : [];
+          if (text)
+            messages.push({
+              id: `${id}:text`,
+              role: "assistant",
+              text,
+              ...(clipped ? { truncated: true } : {}),
+              timestamp,
+            });
+          const calls = Array.isArray(message.content)
+            ? message.content.filter((part: any) => part?.type === "toolCall")
+            : [];
           for (const [index, call] of calls.entries()) {
             const args = toolArgsText(call.arguments);
             const toolName = typeof call.name === "string" ? call.name.slice(0, 128) : "unknown";
             const text = `Tool call: ${toolName}\n${args.text}`;
-            const toolCallId = typeof call.id === "string" && /^[a-zA-Z0-9._:|\-]{1,128}$/.test(call.id) ? call.id : undefined;
-            const safeArguments = toolCallId ? extractToolPresentationArguments(toolName, call.arguments) : undefined;
-            const toolMessage: TaskMessage = { id: `${id}:tool:${String(call.id ?? index)}`, role: "tool", toolName, text,
-              ...(toolCallId ? { toolCallId, toolPhase: "call", status: "unknown", ...(safeArguments ? { arguments: safeArguments } : {}) } : {}),
-              ...(args.truncated ? { truncated: true } : {}), timestamp };
+            const toolCallId =
+              typeof call.id === "string" && /^[a-zA-Z0-9._:|\-]{1,128}$/.test(call.id)
+                ? call.id
+                : undefined;
+            const safeArguments = toolCallId
+              ? extractToolPresentationArguments(toolName, call.arguments)
+              : undefined;
+            const toolMessage: TaskMessage = {
+              id: `${id}:tool:${String(call.id ?? index)}`,
+              role: "tool",
+              toolName,
+              text,
+              ...(toolCallId
+                ? {
+                    toolCallId,
+                    toolPhase: "call",
+                    status: "unknown",
+                    ...(safeArguments ? { arguments: safeArguments } : {}),
+                  }
+                : {}),
+              ...(args.truncated ? { truncated: true } : {}),
+              timestamp,
+            };
             messages.push(toolMessage);
             if (toolCallId) {
-              if (callsById.has(toolCallId)) { duplicateCalls.add(toolCallId); callsById.delete(toolCallId); }
-              else if (!duplicateCalls.has(toolCallId)) callsById.set(toolCallId, toolMessage);
+              if (callsById.has(toolCallId)) {
+                duplicateCalls.add(toolCallId);
+                callsById.delete(toolCallId);
+              } else if (!duplicateCalls.has(toolCallId)) callsById.set(toolCallId, toolMessage);
             }
             if (args.truncated) truncated = true;
           }
-          if (!text && calls.length === 0 && Array.isArray(message.content) && message.content.some((part: any) => !["text", "toolCall"].includes(part?.type))) {
-            messages.push({ id: `${id}:nontext`, role: "assistant", text: "[Assistant message contains non-text content]", timestamp });
+          if (
+            !text &&
+            calls.length === 0 &&
+            Array.isArray(message.content) &&
+            message.content.some((part: any) => !["text", "toolCall"].includes(part?.type))
+          ) {
+            messages.push({
+              id: `${id}:nontext`,
+              role: "assistant",
+              text: "[Assistant message contains non-text content]",
+              timestamp,
+            });
           }
           continue;
         }
         const raw = stripControls(contentText(message));
-        const hasNonText = Array.isArray(message.content) && message.content.some((part: any) => part?.type !== "text");
+        const hasNonText =
+          Array.isArray(message.content) &&
+          message.content.some((part: any) => part?.type !== "text");
         const wasTruncated = Buffer.byteLength(raw) > MAX_MESSAGE_TEXT;
-        const text = boundedUtf8(raw, MAX_MESSAGE_TEXT) || (message.role === "toolResult"
-          ? hasNonText ? "[Tool result contains image or non-text content]" : "[Tool returned no text content]"
-          : "[User message contains image or non-text content]");
+        const text =
+          boundedUtf8(raw, MAX_MESSAGE_TEXT) ||
+          (message.role === "toolResult"
+            ? hasNonText
+              ? "[Tool result contains image or non-text content]"
+              : "[Tool returned no text content]"
+            : "[User message contains image or non-text content]");
         if (wasTruncated) truncated = true;
         let toolMetadata: Partial<TaskMessage> = {};
         if (message.role === "toolResult") {
           const toolName = String(message.toolName ?? "tool").slice(0, 128);
-          const toolCallId = typeof message.toolCallId === "string" && /^[a-zA-Z0-9._:|\-]{1,128}$/.test(message.toolCallId) ? message.toolCallId : undefined;
+          const toolCallId =
+            typeof message.toolCallId === "string" &&
+            /^[a-zA-Z0-9._:|\-]{1,128}$/.test(message.toolCallId)
+              ? message.toolCallId
+              : undefined;
           const call = toolCallId ? callsById.get(toolCallId) : undefined;
           const paired = call?.toolName === toolName ? call : undefined;
-          const status = message.isError === true ? "failed" as const : "completed" as const;
+          const status = message.isError === true ? ("failed" as const) : ("completed" as const);
           const toolPresentation = extractRetainedToolPresentation(toolName, message);
           if (paired) paired.status = status;
-          toolMetadata = { toolName, ...(toolCallId ? { toolCallId, toolPhase: "result", status, resultFormat: "text",
-            ...(paired?.arguments ? { arguments: paired.arguments } : {}), ...(toolPresentation ? { toolPresentation } : {}) } : {}) };
+          toolMetadata = {
+            toolName,
+            ...(toolCallId
+              ? {
+                  toolCallId,
+                  toolPhase: "result",
+                  status,
+                  resultFormat: "text",
+                  ...(paired?.arguments ? { arguments: paired.arguments } : {}),
+                  ...(toolPresentation ? { toolPresentation } : {}),
+                }
+              : {}),
+          };
         }
-        messages.push({ id, role: message.role === "toolResult" ? "tool" : "user",
+        messages.push({
+          id,
+          role: message.role === "toolResult" ? "tool" : "user",
           ...toolMetadata,
-          text, ...(wasTruncated ? { truncated: true } : {}), timestamp });
+          text,
+          ...(wasTruncated ? { truncated: true } : {}),
+          timestamp,
+        });
       }
-    } catch { truncated = true; }
+    } catch {
+      truncated = true;
+    }
     try {
       const allEvents = new TuiWorkerStore(child.directory).readTimeline();
       if (allEvents.length > MAX_HISTORY_MESSAGES * 3) truncated = true;
@@ -898,39 +2034,72 @@ export class HeadlessForegroundManager {
         if (event.kind === "running") text = "Assistant turn started";
         else if (event.kind === "settled") text = "Assistant turn settled";
         else if (event.kind === "cancelled") text = "Worker turn cancelled";
-        else if (event.kind === "interaction_pending") text = (event.data as any)?.kind === "permission" ? "Waiting for your permission decision in Paseo" : "Waiting for your answer in Paseo";
-        else if (event.kind === "interaction_resolved") text = (event.data as any)?.cancelled ? "You cancelled the interaction" : "You resolved the interaction";
+        else if (event.kind === "interaction_pending")
+          text =
+            (event.data as any)?.kind === "permission"
+              ? "Waiting for your permission decision in Paseo"
+              : "Waiting for your answer in Paseo";
+        else if (event.kind === "interaction_resolved")
+          text = (event.data as any)?.cancelled
+            ? "You cancelled the interaction"
+            : "You resolved the interaction";
         else if (event.kind === "interaction_cancelled") text = "Interaction cancelled";
         else if (event.kind === "notification" || event.kind === "outcome") {
           const path = this.artifactPath(child, (event.data as any)?.artifact, event.kind);
           if (path) {
             const artifact = readPrivateJson(path) as any;
-            text = event.kind === "notification" ? `Parent notification: ${String(artifact.message ?? "").slice(0, 1000)}`
-              : `Task outcome: ${String(artifact.summary ?? artifact.state ?? "reported").slice(0, 1000)}`;
+            text =
+              event.kind === "notification"
+                ? `Parent notification: ${String(artifact.message ?? "").slice(0, 1000)}`
+                : `Task outcome: ${String(artifact.summary ?? artifact.state ?? "reported").slice(0, 1000)}`;
           }
         }
-        if (text) messages.push({ id: `event:${event.workerEpoch}:${event.sequence}`, role: "system", text: stripControls(text), timestamp: event.timestamp });
+        if (text)
+          messages.push({
+            id: `event:${event.workerEpoch}:${event.sequence}`,
+            role: "system",
+            text: stripControls(text),
+            timestamp: event.timestamp,
+          });
       }
-    } catch { truncated = true; }
+    } catch {
+      truncated = true;
+    }
     messages.sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp));
-    if (!messages.some(message => message.role === "assistant") && child.report) {
+    if (!messages.some((message) => message.role === "assistant") && child.report) {
       const reportPath = this.artifactPath(child, child.report, "report");
       if (reportPath) {
         try {
-          const report = readPrivateJson(reportPath) as any, raw = stripControls(contentText(report.assistant));
+          const report = readPrivateJson(reportPath) as any,
+            raw = stripControls(contentText(report.assistant));
           const wasTruncated = Buffer.byteLength(raw) > MAX_MESSAGE_TEXT;
           const text = boundedUtf8(raw, MAX_MESSAGE_TEXT);
           if (wasTruncated) truncated = true;
-          if (text) messages.push({ id: `report:${reportPath.slice(reportPath.lastIndexOf("/") + 1)}`, role: "assistant", text,
-            ...(wasTruncated ? { truncated: true } : {}), timestamp: String(report.timestamp ?? child.updatedAt) });
-        } catch { truncated = true; }
+          if (text)
+            messages.push({
+              id: `report:${reportPath.slice(reportPath.lastIndexOf("/") + 1)}`,
+              role: "assistant",
+              text,
+              ...(wasTruncated ? { truncated: true } : {}),
+              timestamp: String(report.timestamp ?? child.updatedAt),
+            });
+        } catch {
+          truncated = true;
+        }
       }
     }
     if (messages.length > MAX_HISTORY_MESSAGES) truncated = true;
     return { messages: messages.slice(-MAX_HISTORY_MESSAGES), truncated };
   }
-  private readMessages(child: Child, _live: boolean): TaskMessage[] { return this.readHistory(child).messages; }
-  private async view(group: Group, child: Child, manifest: HeadlessWorkerManifest, cursor?: string): Promise<TaskView> {
+  private readMessages(child: Child, _live: boolean): TaskMessage[] {
+    return this.readHistory(child).messages;
+  }
+  private async view(
+    group: Group,
+    child: Child,
+    manifest: HeadlessWorkerManifest,
+    cursor?: string,
+  ): Promise<TaskView> {
     let snapshot: any;
     try {
       const result = await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 2000 });
@@ -939,19 +2108,39 @@ export class HeadlessForegroundManager {
     } catch (error) {
       const runtimeState = await this.runtimeState(manifest);
       if (runtimeState === "alive") throw error;
-      if (runtimeState === "unknown") throw new Error("Actual Pi runtime identity is unverified; refusing to treat an unavailable socket as worker death");
+      if (runtimeState === "unknown")
+        throw new Error(
+          "Actual Pi runtime identity is unverified; refusing to treat an unavailable socket as worker death",
+        );
       const state = new TuiWorkerStore(child.directory).readState(false);
       const reportPath = this.artifactPath(child, state.lastReport, "report");
       if (reportPath) child.report = reportPath;
       snapshot = { active: false, liveText: "", interactions: [], lastReport: reportPath };
     }
-    const history = this.readHistory(child), page = pageHeadlessHistory(history.messages, manifest.workerEpoch, cursor, history.truncated);
+    const history = this.readHistory(child),
+      page = pageHeadlessHistory(history.messages, manifest.workerEpoch, cursor, history.truncated);
     const messages = page.messages;
-    const rawInteractions = (snapshot.interactions ?? []).filter((item: any) => !item.answer && !item.cancelledAt).slice(0, 1);
-    const interactions = rawInteractions.map((item: any) => ({ id: item.id, workerEpoch: item.workerEpoch, createdAt: item.createdAt, request: item.request }));
-    const liveText = snapshot.active && typeof snapshot.liveText === "string" ? boundedUtf8(stripControls(snapshot.liveText), 4096) : undefined;
-    return { task: this.task(group, child), messages, interactions, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-      ...(liveText ? { liveText } : {}), truncated: page.truncated };
+    const rawInteractions = (snapshot.interactions ?? [])
+      .filter((item: any) => !item.answer && !item.cancelledAt)
+      .slice(0, 1);
+    const interactions = rawInteractions.map((item: any) => ({
+      id: item.id,
+      workerEpoch: item.workerEpoch,
+      createdAt: item.createdAt,
+      request: item.request,
+    }));
+    const liveText =
+      snapshot.active && typeof snapshot.liveText === "string"
+        ? boundedUtf8(stripControls(snapshot.liveText), 4096)
+        : undefined;
+    return {
+      task: this.task(group, child),
+      messages,
+      interactions,
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+      ...(liveText ? { liveText } : {}),
+      truncated: page.truncated,
+    };
   }
   execute(request: ForegroundTaskRequest): Promise<ForegroundTaskResponse> {
     const flight = this.executeImpl(request);
@@ -959,85 +2148,215 @@ export class HeadlessForegroundManager {
     return flight.finally(() => this.inFlight.delete(flight));
   }
   private async executeImpl(request: ForegroundTaskRequest): Promise<ForegroundTaskResponse> {
-    const base = { protocol: FOREGROUND_TASKS_PROTOCOL, sessionId: this.owner ?? "", epoch: this.epoch } as const;
-    if (this.closed || this.reapReserved || request.sessionId !== this.owner || request.epoch !== this.epoch) return { ...base, state: "unavailable", message: "Foreground task session or epoch is stale" };
+    const base = {
+      protocol: FOREGROUND_TASKS_PROTOCOL,
+      sessionId: this.owner ?? "",
+      epoch: this.epoch,
+    } as const;
+    if (
+      this.closed ||
+      this.reapReserved ||
+      request.sessionId !== this.owner ||
+      request.epoch !== this.epoch
+    )
+      return {
+        ...base,
+        state: "unavailable",
+        message: "Foreground task session or epoch is stale",
+      };
     if (request.operation === "list") {
-      for (const group of this.groups.values()) if (group.owner === request.sessionId) await Promise.all(group.children.map(child => this.observe(group, child)));
-      return { ...base, state: "available", tasks: [...this.groups.values()].filter(g => g.owner === request.sessionId).flatMap(g => g.children.map(c => this.task(g, c))).slice(-100) };
+      for (const group of this.groups.values())
+        if (group.owner === request.sessionId)
+          await Promise.all(group.children.map((child) => this.observe(group, child)));
+      return {
+        ...base,
+        state: "available",
+        tasks: [...this.groups.values()]
+          .filter((g) => g.owner === request.sessionId)
+          .flatMap((g) => g.children.map((c) => this.task(g, c)))
+          .slice(-100),
+      };
     }
     try {
       const { group, child, manifest } = this.owned(request.sessionId, request.target);
-      if (request.operation === "view") { await this.observe(group, child); return { ...base, state: "available", view: await this.view(group, child, manifest, request.cursor) }; }
+      if (request.operation === "view") {
+        await this.observe(group, child);
+        return {
+          ...base,
+          state: "available",
+          view: await this.view(group, child, manifest, request.cursor),
+        };
+      }
       if (request.operation === "prompt") {
-        if (manifest.foregroundOwner?.token !== this.ownerToken) throw new Error("Foreground worker belongs to the previous parent owner; stop/reap it before resuming under this process");
-        if (!child.started) throw new Error("Foreground worker is still starting; user input is not accepted until the initial prompt is confirmed");
+        if (manifest.foregroundOwner?.token !== this.ownerToken)
+          throw new Error(
+            "Foreground worker belongs to the previous parent owner; stop/reap it before resuming under this process",
+          );
+        if (!child.started)
+          throw new Error(
+            "Foreground worker is still starting; user input is not accepted until the initial prompt is confirmed",
+          );
         this.bumpGeneration(child);
-        const answer = await callTuiWorker(manifest, { operation: "user_prompt", message: request.message }, { requestId: `user:${createHash("sha256").update(request.requestId).digest("hex").slice(0, 48)}` });
+        const answer = await callTuiWorker(
+          manifest,
+          { operation: "user_prompt", message: request.message },
+          {
+            requestId: `user:${createHash("sha256").update(request.requestId).digest("hex").slice(0, 48)}`,
+          },
+        );
         if (!answer.ok) throw new Error(`Prompt rejected: ${answer.code}`);
-        group.cancelled = false; child.status = "running"; child.updatedAt = new Date().toISOString(); this.persist(group);
+        group.cancelled = false;
+        child.status = "running";
+        child.updatedAt = new Date().toISOString();
+        this.persist(group);
         return { ...base, state: "available", accepted: true };
       }
       if (request.operation === "respond") {
-        if (manifest.foregroundOwner?.token !== this.ownerToken) throw new Error("Foreground worker belongs to the previous parent owner; its pending request cannot be answered by this process");
-        if (!child.started) throw new Error("Foreground worker is still starting; no user interaction can be resolved yet");
+        if (manifest.foregroundOwner?.token !== this.ownerToken)
+          throw new Error(
+            "Foreground worker belongs to the previous parent owner; its pending request cannot be answered by this process",
+          );
+        if (!child.started)
+          throw new Error(
+            "Foreground worker is still starting; no user interaction can be resolved yet",
+          );
         this.bumpGeneration(child);
-        const answer = await callTuiWorker(manifest, { operation: "respond_interaction", interactionId: request.interactionId, answer: request.answer }, { requestId: `user:${createHash("sha256").update(request.requestId).digest("hex").slice(0, 48)}` });
+        const answer = await callTuiWorker(
+          manifest,
+          {
+            operation: "respond_interaction",
+            interactionId: request.interactionId,
+            answer: request.answer,
+          },
+          {
+            requestId: `user:${createHash("sha256").update(request.requestId).digest("hex").slice(0, 48)}`,
+          },
+        );
         if (!answer.ok) throw new Error(`Interaction response rejected: ${answer.code}`);
         return { ...base, state: "available", accepted: true };
       }
-        if (request.operation === "stop") {
-        if (child.workerAlive !== true) throw new Error("Foreground worker is not ready for Stop yet");
-        if (!child.workerAlive) throw new Error("Foreground worker startup is not ready for Stop yet");
+      if (request.operation === "stop") {
+        if (child.workerAlive !== true)
+          throw new Error("Foreground worker is not ready for Stop yet");
+        if (!child.workerAlive)
+          throw new Error("Foreground worker startup is not ready for Stop yet");
         if (!child.started) {
-          if (child.initialPromptDispatching) throw new Error("Initial prompt dispatch is being confirmed; retry Stop after launch settles");
+          if (child.initialPromptDispatching)
+            throw new Error(
+              "Initial prompt dispatch is being confirmed; retry Stop after launch settles",
+            );
           this.bumpGeneration(child);
-          child.stopRequested = true; child.status = "cancelled"; child.updatedAt = new Date().toISOString(); this.persist(group);
+          child.stopRequested = true;
+          child.status = "cancelled";
+          child.updatedAt = new Date().toISOString();
+          this.persist(group);
           return { ...base, state: "available", accepted: true };
         }
         await this.stopGroup(group, false, child, request.requestId);
         return { ...base, state: "available", accepted: true };
       }
       return { ...base, state: "unsupported", message: "Unsupported foreground operation" };
-    } catch (error) { return { ...base, state: "unavailable", message: error instanceof Error ? error.message : String(error) }; }
+    } catch (error) {
+      return {
+        ...base,
+        state: "unavailable",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
   service(): ForegroundTasksService {
-    const service: ForegroundTasksService = { protocol: FOREGROUND_TASKS_PROTOCOL, sessionId: this.owner!, epoch: this.epoch, execute: request => this.execute(request) };
+    const service: ForegroundTasksService = {
+      protocol: FOREGROUND_TASKS_PROTOCOL,
+      sessionId: this.owner!,
+      epoch: this.epoch,
+      execute: (request) => this.execute(request),
+    };
     return service;
   }
-  private async sealAndReap(group: Group, child: Child, initial: HeadlessWorkerManifest, options: { force?: true; reason?: string } = {}): Promise<void> {
+  private async sealAndReap(
+    group: Group,
+    child: Child,
+    initial: HeadlessWorkerManifest,
+    options: { force?: true; reason?: string } = {},
+  ): Promise<void> {
     const manifest = await this.ensureRuntimeIdentity(initial);
-    if (await this.runtimeState(manifest) === "alive") {
-      const response = await callTuiWorker(manifest, { operation: "prepare_reap", ...(options.force ? { force: true, reason: options.reason! } : {}) }, { requestId: `reap:${manifest.workerEpoch}:${options.force ? createHash("sha256").update(options.reason!).digest("hex").slice(0, 12) : "verify"}`, timeoutMs: 30_000 });
-      if (!response.ok) throw new Error(`Headless worker reap refused: ${response.code}: ${response.message}`);
+    if ((await this.runtimeState(manifest)) === "alive") {
+      const response = await callTuiWorker(
+        manifest,
+        {
+          operation: "prepare_reap",
+          ...(options.force ? { force: true, reason: options.reason! } : {}),
+        },
+        {
+          requestId: `reap:${manifest.workerEpoch}:${options.force ? createHash("sha256").update(options.reason!).digest("hex").slice(0, 12) : "verify"}`,
+          timeoutMs: 30_000,
+        },
+      );
+      if (!response.ok)
+        throw new Error(`Headless worker reap refused: ${response.code}: ${response.message}`);
       const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline && await this.runtimeState(manifest) === "alive") await pause(100);
-      if (await this.runtimeState(manifest) === "alive") throw new Error("Headless Pi runtime did not exit after sealed cleanup");
+      while (Date.now() < deadline && (await this.runtimeState(manifest)) === "alive")
+        await pause(100);
+      if ((await this.runtimeState(manifest)) === "alive")
+        throw new Error("Headless Pi runtime did not exit after sealed cleanup");
     }
     this.verifyCleanupProof(child, manifest);
-    if (child.spec.cleanupWorktreesOnReap === true || child.cleanupWorktreeRequested === true) await this.reconcileWorktrees(group, child, options);
-    atomicPrivateJson(new TuiWorkerStore(child.directory).path("reaped.json"), { workerEpoch: manifest.workerEpoch,
-      processPid: manifest.processPid, processToken: manifest.processToken, runtimePid: manifest.runtimePid,
-      runtimeProcessToken: manifest.runtimeProcessToken, reapedAt: new Date().toISOString() });
+    if (child.spec.cleanupWorktreesOnReap === true || child.cleanupWorktreeRequested === true)
+      await this.reconcileWorktrees(group, child, options);
+    atomicPrivateJson(new TuiWorkerStore(child.directory).path("reaped.json"), {
+      workerEpoch: manifest.workerEpoch,
+      processPid: manifest.processPid,
+      processToken: manifest.processToken,
+      runtimePid: manifest.runtimePid,
+      runtimeProcessToken: manifest.runtimeProcessToken,
+      reapedAt: new Date().toISOString(),
+    });
     child.status = child.stopRequested ? "cancelled" : "reaped";
     child.reaped = true;
-    child.workerAlive = false; child.updatedAt = new Date().toISOString(); this.persist(group);
+    child.workerAlive = false;
+    child.updatedAt = new Date().toISOString();
+    this.persist(group);
     // Release only the worker's ownership lease; retain the Git worktree.
     if (child.spec.worktree) await releaseWorktree(group.owner, child.taskId, child.childId);
   }
-  private async reconcileWorktrees(group: Group, child: Child, options: { force?: true; reason?: string }) {
+  private async reconcileWorktrees(
+    group: Group,
+    child: Child,
+    options: { force?: true; reason?: string },
+  ) {
     // Headless delegation is runtime-forbidden, so there are no descendant owners.
     try {
-      const report = await reapOwnedWorktrees({ actorSessionId: group.owner, cleanupBorrowedRoot: child.cleanupWorktreeRequested === true,
-        root: { ownerSessionId: group.owner, taskId: child.taskId, childId: child.childId }, descendants: [], ownedSessionIds: [],
-        context: { cwd: process.cwd(), isIdle: () => !active(child), hasPendingMessages: () => false,
-          managedWorktreeActivity: path => this.worktreeReapActivity(group.owner, path, { ownerSessionId: group.owner, taskId: child.taskId, childId: child.childId, attempt: child.attempt }) }, ...options });
-      child.worktreeCleanup = report; this.persist(group);
+      const report = await reapOwnedWorktrees({
+        actorSessionId: group.owner,
+        cleanupBorrowedRoot: child.cleanupWorktreeRequested === true,
+        root: { ownerSessionId: group.owner, taskId: child.taskId, childId: child.childId },
+        descendants: [],
+        ownedSessionIds: [],
+        context: {
+          cwd: process.cwd(),
+          isIdle: () => !active(child),
+          hasPendingMessages: () => false,
+          managedWorktreeActivity: (path) =>
+            this.worktreeReapActivity(group.owner, path, {
+              ownerSessionId: group.owner,
+              taskId: child.taskId,
+              childId: child.childId,
+              attempt: child.attempt,
+            }),
+        },
+        ...options,
+      });
+      child.worktreeCleanup = report;
+      this.persist(group);
       return report;
     } catch (error) {
       try {
         const artifact = new TuiWorkerStore(child.directory).retainWorktreeReapFailure(error);
-        if (error instanceof Error) error.message += ` Full worktree cleanup failure report: ${artifact}`;
-      } catch { /* Retain the original refusal even when evidence storage fails. */ }
+        if (error instanceof Error)
+          error.message += ` Full worktree cleanup failure report: ${artifact}`;
+      } catch {
+        /* Retain the original refusal even when evidence storage fails. */
+      }
       throw error;
     }
   }
@@ -1045,20 +2364,38 @@ export class HeadlessForegroundManager {
     const store = new TuiWorkerStore(child.directory);
     const state = store.readState(false);
     const artifact = state.jobCleanup?.artifact;
-    if (!state.sealed || !state.reapReservation || state.jobCleanup?.workerEpoch !== manifest.workerEpoch
-      || !this.artifactPath(child, artifact, "job-cleanup")) throw new Error("Headless worker lacks a verified child-local job cleanup seal; refusing reap");
+    if (
+      !state.sealed ||
+      !state.reapReservation ||
+      state.jobCleanup?.workerEpoch !== manifest.workerEpoch ||
+      !this.artifactPath(child, artifact, "job-cleanup")
+    )
+      throw new Error(
+        "Headless worker lacks a verified child-local job cleanup seal; refusing reap",
+      );
     const report = readPrivateJson(artifact!) as any;
-    if (report?.workerEpoch !== manifest.workerEpoch || typeof report.retainedAt !== "string" || report.report === undefined) throw new Error("Headless cleanup receipt identity is invalid; refusing reap");
+    if (
+      report?.workerEpoch !== manifest.workerEpoch ||
+      typeof report.retainedAt !== "string" ||
+      report.report === undefined
+    )
+      throw new Error("Headless cleanup receipt identity is invalid; refusing reap");
   }
   /** Normalize execution outcome from durable manager/state/report data, never reap lifecycle alone. */
-  private readonlyExecutionStatus(child: Child, state: ReturnType<TuiWorkerStore["readState"]>): "running" | "completed" | "failed" | "cancelled" | "lost" {
-    if (["pending", "running", "waiting-input", "waiting-permission"].includes(child.status)) return "running";
+  private readonlyExecutionStatus(
+    child: Child,
+    state: ReturnType<TuiWorkerStore["readState"]>,
+  ): "running" | "completed" | "failed" | "cancelled" | "lost" {
+    if (["pending", "running", "waiting-input", "waiting-permission"].includes(child.status))
+      return "running";
     if (child.status === "failed" || child.error) return "failed";
     if (child.status === "cancelled") return "cancelled";
     if (child.status === "lost") return "lost";
     const reportPath = this.artifactPath(child, state.lastReport ?? child.report, "report");
     let report: any;
-    try { if (reportPath) report = readPrivateJson(reportPath); } catch {}
+    try {
+      if (reportPath) report = readPrivateJson(reportPath);
+    } catch {}
     if (report?.assistant?.stopReason === "error") return "failed";
     if (report?.assistant?.stopReason === "aborted") return "cancelled";
     if (report?.assistant) return "completed";
@@ -1067,158 +2404,398 @@ export class HeadlessForegroundManager {
   }
   /** Pure retained snapshots for the read-only Paseo dashboard; never contacts workers or writes state. */
   readonlyTaskList(owner: string, limit = 50): any[] {
-    if (this.owner !== owner) throw new Error("Headless task snapshots belong to another Pi session");
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error("Invalid read-only task limit");
-    return [...this.groups.values()].filter(group => group.owner === owner).flatMap(group => group.children.map(child => {
-      const manifest = this.manifest(child);
-      const state = new TuiWorkerStore(child.directory).readState(false);
-      const outcomePath = this.artifactPath(child, state.lastOutcome, "outcome");
-      const outcome = outcomePath ? readPrivateJson(outcomePath) as any : child.outcome as any;
-      const status = this.readonlyExecutionStatus(child, state);
-      return { taskId: child.taskId, childId: child.childId, groupId: group.id, runtimeId: manifest?.runtimeId ?? null,
-        attempt: child.attempt, status, title: this.canonicalTitle(child),
-        kind: "foreground", needsAttention: child.status === "waiting-input" || child.status === "waiting-permission",
-        ...(typeof outcome?.summary === "string" ? { summary: outcome.summary.slice(0, 2000) } : {}),
-        lastUpdated: child.updatedAt, stale: true };
-    })).slice(-limit);
+    if (this.owner !== owner)
+      throw new Error("Headless task snapshots belong to another Pi session");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50)
+      throw new Error("Invalid read-only task limit");
+    return [...this.groups.values()]
+      .filter((group) => group.owner === owner)
+      .flatMap((group) =>
+        group.children.map((child) => {
+          const manifest = this.manifest(child);
+          const state = new TuiWorkerStore(child.directory).readState(false);
+          const outcomePath = this.artifactPath(child, state.lastOutcome, "outcome");
+          const outcome = outcomePath
+            ? (readPrivateJson(outcomePath) as any)
+            : (child.outcome as any);
+          const status = this.readonlyExecutionStatus(child, state);
+          return {
+            taskId: child.taskId,
+            childId: child.childId,
+            groupId: group.id,
+            runtimeId: manifest?.runtimeId ?? null,
+            attempt: child.attempt,
+            status,
+            title: this.canonicalTitle(child),
+            kind: "foreground",
+            needsAttention:
+              child.status === "waiting-input" || child.status === "waiting-permission",
+            ...(typeof outcome?.summary === "string"
+              ? { summary: outcome.summary.slice(0, 2000) }
+              : {}),
+            lastUpdated: child.updatedAt,
+            stale: true,
+          };
+        }),
+      )
+      .slice(-limit);
   }
-  readonlyHasTask(owner: string, input: { taskId: string; childId: string; attempt: number }): boolean {
-    return this.owner === owner && [...this.groups.values()].some(group => group.owner === owner && group.children.some(child =>
-      child.taskId === input.taskId && child.childId === input.childId && child.attempt === input.attempt));
+  readonlyHasTask(
+    owner: string,
+    input: { taskId: string; childId: string; attempt: number },
+  ): boolean {
+    return (
+      this.owner === owner &&
+      [...this.groups.values()].some(
+        (group) =>
+          group.owner === owner &&
+          group.children.some(
+            (child) =>
+              child.taskId === input.taskId &&
+              child.childId === input.childId &&
+              child.attempt === input.attempt,
+          ),
+      )
+    );
   }
-  readonlyTaskConversation(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId: string | null; cursor?: number }): any {
+  readonlyTaskConversation(
+    owner: string,
+    input: {
+      taskId: string;
+      childId: string;
+      attempt: number;
+      runtimeId: string | null;
+      cursor?: number;
+    },
+  ): any {
     const source = this.readonlyTaskSessionSource(owner, input);
     if (source.runtimeId !== input.runtimeId) throw new Error("Conversation runtime changed");
-    return { taskId: source.taskId, childId: source.childId, groupId: source.groupId, attempt: source.attempt,
-      runtimeId: source.runtimeId, stale: true, ...readRetainedConversation(source.sessionFile, input.cursor) };
+    return {
+      taskId: source.taskId,
+      childId: source.childId,
+      groupId: source.groupId,
+      attempt: source.attempt,
+      runtimeId: source.runtimeId,
+      stale: true,
+      ...readRetainedConversation(source.sessionFile, input.cursor),
+    };
   }
-  readonlyTaskSessionSource(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId?: string | null }): any {
+  readonlyTaskSessionSource(
+    owner: string,
+    input: { taskId: string; childId: string; attempt: number; runtimeId?: string | null },
+  ): any {
     if (this.owner !== owner) throw new Error("Session source belongs to another Pi session");
-    const found = [...this.groups.values()].filter(group => group.owner === owner)
-      .flatMap(group => group.children.map(child => ({ group, child })))
-      .find(entry => entry.child.childId === input.childId);
-    if (!found || found.child.taskId !== input.taskId || found.child.attempt !== input.attempt) throw new Error("Session source identity changed");
-    const { group, child } = found, manifest = this.manifest(child);
-    if (!manifest || manifest.ownerSessionId !== owner || manifest.groupId !== group.id || manifest.taskId !== child.taskId
-      || manifest.childId !== child.childId || manifest.attempt !== child.attempt
-      || (input.runtimeId !== undefined && manifest.runtimeId !== input.runtimeId)) throw new Error("Session source manifest identity changed");
+    const found = [...this.groups.values()]
+      .filter((group) => group.owner === owner)
+      .flatMap((group) => group.children.map((child) => ({ group, child })))
+      .find((entry) => entry.child.childId === input.childId);
+    if (!found || found.child.taskId !== input.taskId || found.child.attempt !== input.attempt)
+      throw new Error("Session source identity changed");
+    const { group, child } = found,
+      manifest = this.manifest(child);
+    if (
+      !manifest ||
+      manifest.ownerSessionId !== owner ||
+      manifest.groupId !== group.id ||
+      manifest.taskId !== child.taskId ||
+      manifest.childId !== child.childId ||
+      manifest.attempt !== child.attempt ||
+      (input.runtimeId !== undefined && manifest.runtimeId !== input.runtimeId)
+    )
+      throw new Error("Session source manifest identity changed");
     const path = join(child.directory, "session.jsonl");
     if (manifest.sessionFile !== path) throw new Error("Invalid session source path");
     // A missing/unsafe transcript must not suppress the authoritative task status.
     // Only publish the reference after the retained reader's strict file checks.
     let retainedSessionFile: string | undefined;
-    try { validateRetainedConversationFile(path); retainedSessionFile = path; } catch { /* Status-only source. */ }
+    try {
+      validateRetainedConversationFile(path);
+      retainedSessionFile = path;
+    } catch {
+      /* Status-only source. */
+    }
     const state = new TuiWorkerStore(child.directory).readState(false);
-    const childActive = ["running", "waiting-input", "waiting-permission", "pending"].includes(child.status);
-    if (state.active !== childActive && child.status !== "pending") throw new Error("Active session state identity is inconsistent");
+    const childActive = ["running", "waiting-input", "waiting-permission", "pending"].includes(
+      child.status,
+    );
+    if (state.active !== childActive && child.status !== "pending")
+      throw new Error("Active session state identity is inconsistent");
     const status = this.readonlyExecutionStatus(child, state);
-    return { taskId: child.taskId, childId: child.childId, groupId: group.id, attempt: child.attempt,
-      runtimeId: manifest.runtimeId, reaped: child.reaped === true, ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}), status, title: this.canonicalTitle(child), cwd: child.spec.cwd };
+    return {
+      taskId: child.taskId,
+      childId: child.childId,
+      groupId: group.id,
+      attempt: child.attempt,
+      runtimeId: manifest.runtimeId,
+      reaped: child.reaped === true,
+      ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}),
+      status,
+      title: this.canonicalTitle(child),
+      cwd: child.spec.cwd,
+    };
   }
   readonlyTaskReport(owner: string, taskId: string, maxBytes = 48 * 1024): any | undefined {
     if (this.owner !== owner) throw new Error("Headless task reports belong to another Pi session");
-    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 48 * 1024) throw new Error("Invalid report byte limit");
-    const found = [...this.groups.values()].reverse().filter(group => group.owner === owner)
-      .flatMap(group => group.children.map(child => ({ group, child }))).find(entry => entry.child.taskId === taskId);
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 48 * 1024)
+      throw new Error("Invalid report byte limit");
+    const found = [...this.groups.values()]
+      .reverse()
+      .filter((group) => group.owner === owner)
+      .flatMap((group) => group.children.map((child) => ({ group, child })))
+      .find((entry) => entry.child.taskId === taskId);
     if (!found) return;
-    const { group, child } = found, manifest = this.manifest(child), state = new TuiWorkerStore(child.directory).readState(false);
+    const { group, child } = found,
+      manifest = this.manifest(child),
+      state = new TuiWorkerStore(child.directory).readState(false);
     const reportPath = this.artifactPath(child, child.report ?? state.lastReport, "report");
-    let text = "", lastUpdated: string | null = null;
+    let text = "",
+      lastUpdated: string | null = null;
     if (reportPath) {
       try {
         const report = readPrivateJson(reportPath) as any;
-        if (typeof report.timestamp === "string" && Number.isFinite(Date.parse(report.timestamp))) lastUpdated = report.timestamp;
+        if (typeof report.timestamp === "string" && Number.isFinite(Date.parse(report.timestamp)))
+          lastUpdated = report.timestamp;
         text = stripControls(contentText(report.assistant));
       } catch {}
     }
     const bounded = boundedUtf8(text, maxBytes);
-    return { taskId, childId: child.childId, groupId: group.id, runtimeId: manifest?.runtimeId ?? null,
-      attempt: child.attempt, text: bounded, truncated: Buffer.byteLength(text) > maxBytes, lastUpdated, stale: true };
+    return {
+      taskId,
+      childId: child.childId,
+      groupId: group.id,
+      runtimeId: manifest?.runtimeId ?? null,
+      attempt: child.attempt,
+      text: bounded,
+      truncated: Buffer.byteLength(text) > maxBytes,
+      lastUpdated,
+      stale: true,
+    };
   }
-  hasActive(owner: string): boolean { return [...this.groups.values()].some(group => group.owner === owner && group.children.some(active)); }
+  hasActive(owner: string): boolean {
+    return [...this.groups.values()].some(
+      (group) => group.owner === owner && group.children.some(active),
+    );
+  }
   async waitGroups(owner: string): Promise<any[]> {
-    const groups = [...this.groups.values()].filter(group => group.owner === owner);
-    for (const group of groups) await Promise.all(group.children.map(child => this.observe(group, child)));
-    return groups.map(group => ({ job_id: group.id, background: false, execution: "rpc-headless",
-      status: group.children.some(active) ? "running" : group.cancelled || group.children.some(child => child.status === "cancelled") ? "cancelled"
-        : group.children.some(child => ["failed", "lost"].includes(child.status)) ? "failed" : "completed",
-      children: group.children.map((child, index) => ({ child: index + 1, child_id: child.childId, task_id: child.taskId, status: child.status })) }));
+    const groups = [...this.groups.values()].filter((group) => group.owner === owner);
+    for (const group of groups)
+      await Promise.all(group.children.map((child) => this.observe(group, child)));
+    return groups.map((group) => ({
+      job_id: group.id,
+      background: false,
+      execution: "rpc-headless",
+      status: group.children.some(active)
+        ? "running"
+        : group.cancelled || group.children.some((child) => child.status === "cancelled")
+          ? "cancelled"
+          : group.children.some((child) => ["failed", "lost"].includes(child.status))
+            ? "failed"
+            : "completed",
+      children: group.children.map((child, index) => ({
+        child: index + 1,
+        child_id: child.childId,
+        task_id: child.taskId,
+        status: child.status,
+      })),
+    }));
   }
   worktreeReapTargets(owner: string, verifiedOwners: string[] = [owner]) {
-    if (this.owner !== owner || !this.reapReserved) throw new Error("Worktree cleanup requires the owning foreground reservation");
+    if (this.owner !== owner || !this.reapReserved)
+      throw new Error("Worktree cleanup requires the owning foreground reservation");
     return this.retainedWorktreeReapTargets([owner, ...verifiedOwners]);
   }
   /** Observe any known managed task whose effective checkout is the path being reaped. */
-  async worktreeReapActivity(owner: string, path: string, justReaped?: { ownerSessionId: string; taskId: string; childId: string; attempt: number }): Promise<boolean> {
-    if (!isAbsolute(path) || (!justReaped && this.owner !== owner) || (!this.reapReserved && !justReaped)) throw new Error("Worktree cleanup requires the owning foreground reservation");
+  async worktreeReapActivity(
+    owner: string,
+    path: string,
+    justReaped?: { ownerSessionId: string; taskId: string; childId: string; attempt: number },
+  ): Promise<boolean> {
+    if (
+      !isAbsolute(path) ||
+      (!justReaped && this.owner !== owner) ||
+      (!this.reapReserved && !justReaped)
+    )
+      throw new Error("Worktree cleanup requires the owning foreground reservation");
     return this.worktreeReuseActivity(path, justReaped ? [justReaped] : []);
   }
   /** Read-only provisioning gate; callers supply verified supervisor attachments only. */
-  async worktreeReuseActivity(path: string, supervisors: (WorktreeIdentity & { attempt?: number })[]): Promise<boolean> {
-    const inventory = new HeadlessForegroundManager(this.root, this.disposition, () => false, this.groupLimit);
-    if (inventory.inventoryErrors.length) throw new Error("Managed foreground activity inventory is unavailable");
+  async worktreeReuseActivity(
+    path: string,
+    supervisors: (WorktreeIdentity & { attempt?: number })[],
+  ): Promise<boolean> {
+    const inventory = new HeadlessForegroundManager(
+      this.root,
+      this.disposition,
+      () => false,
+      this.groupLimit,
+    );
+    if (inventory.inventoryErrors.length)
+      throw new Error("Managed foreground activity inventory is unavailable");
     let targetPath: string;
-    try { targetPath = physicalPath(path).path; }
-    catch { throw new Error("Managed foreground target physical identity is unavailable"); }
-    for (const group of inventory.groups.values()) for (const child of group.children) {
-      if (supervisors.some(self => group.owner === self.ownerSessionId && child.taskId === self.taskId && child.childId === self.childId && (self.attempt === undefined || child.attempt === self.attempt))) continue;
-      if (child.status === "reaped" && child.workerAlive === false && !active(child)) continue;
-      let manifest: HeadlessWorkerManifest | undefined;
-      try { manifest = inventory.manifest(child); }
-      catch { throw new Error(`Managed foreground launch identity is unavailable for ${group.owner}/${group.id}/${child.childId}`); }
-      // Legacy flat helpers could settle without being reaped. They cannot
-      // create supervised jobs/agents, and a freshly authenticated dead runtime
-      // is not activity. Do not infer death from cached workerAlive alone.
-      if (!child.activityCwd && manifest && !manifest.activityCwd && !active(child) && child.workerAlive === false
-        && Array.isArray(manifest.tools) && manifest.tools.every(tool => ["read", "bash", "edit", "write"].includes(tool))
-        && await inventory.runtimeState(manifest) === "dead") continue;
-      if (child.activityCwd !== undefined && manifest && manifest.activityCwd !== child.activityCwd)
-        throw new Error(`Managed foreground launch-time checkout identity changed for ${group.owner}/${group.id}/${child.childId}`);
-      const activityCwd = child.activityCwd ?? manifest?.activityCwd;
-      if (!activityCwd || !isAbsolute(activityCwd))
-        throw new Error(`Managed foreground launch-time checkout identity unavailable for ${group.owner}/${group.id}/${child.childId}`);
-      if (child.activityCwd === undefined && manifest?.activityCwd) { child.activityCwd = activityCwd; inventory.persist(group); }
-      let physicalCwd: { path: string; exists: boolean };
-      try { physicalCwd = physicalPath(activityCwd); }
-      catch { throw new Error(`Managed foreground physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`); }
-      if (!physicalCwd.exists || physicalCwd.path !== activityCwd)
-        throw new Error(`Managed foreground physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
-      if (!pathWithin(targetPath, activityCwd)) continue;
-      await inventory.observe(group, child);
-      if (child.error?.includes("unavailable") || child.workerAlive === undefined && child.status !== "reaped")
-        throw new Error(`Managed foreground worker activity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
-      if (child.reaped !== true || child.status !== "reaped" || child.workerAlive !== false || active(child)) return true;
+    try {
+      targetPath = physicalPath(path).path;
+    } catch {
+      throw new Error("Managed foreground target physical identity is unavailable");
     }
+    for (const group of inventory.groups.values())
+      for (const child of group.children) {
+        if (
+          supervisors.some(
+            (self) =>
+              group.owner === self.ownerSessionId &&
+              child.taskId === self.taskId &&
+              child.childId === self.childId &&
+              (self.attempt === undefined || child.attempt === self.attempt),
+          )
+        )
+          continue;
+        if (child.status === "reaped" && child.workerAlive === false && !active(child)) continue;
+        let manifest: HeadlessWorkerManifest | undefined;
+        try {
+          manifest = inventory.manifest(child);
+        } catch {
+          throw new Error(
+            `Managed foreground launch identity is unavailable for ${group.owner}/${group.id}/${child.childId}`,
+          );
+        }
+        // Legacy flat helpers could settle without being reaped. They cannot
+        // create supervised jobs/agents, and a freshly authenticated dead runtime
+        // is not activity. Do not infer death from cached workerAlive alone.
+        if (
+          !child.activityCwd &&
+          manifest &&
+          !manifest.activityCwd &&
+          !active(child) &&
+          child.workerAlive === false &&
+          Array.isArray(manifest.tools) &&
+          manifest.tools.every((tool) => ["read", "bash", "edit", "write"].includes(tool)) &&
+          (await inventory.runtimeState(manifest)) === "dead"
+        )
+          continue;
+        if (
+          child.activityCwd !== undefined &&
+          manifest &&
+          manifest.activityCwd !== child.activityCwd
+        )
+          throw new Error(
+            `Managed foreground launch-time checkout identity changed for ${group.owner}/${group.id}/${child.childId}`,
+          );
+        const activityCwd = child.activityCwd ?? manifest?.activityCwd;
+        if (!activityCwd || !isAbsolute(activityCwd))
+          throw new Error(
+            `Managed foreground launch-time checkout identity unavailable for ${group.owner}/${group.id}/${child.childId}`,
+          );
+        if (child.activityCwd === undefined && manifest?.activityCwd) {
+          child.activityCwd = activityCwd;
+          inventory.persist(group);
+        }
+        let physicalCwd: { path: string; exists: boolean };
+        try {
+          physicalCwd = physicalPath(activityCwd);
+        } catch {
+          throw new Error(
+            `Managed foreground physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`,
+          );
+        }
+        if (!physicalCwd.exists || physicalCwd.path !== activityCwd)
+          throw new Error(
+            `Managed foreground physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`,
+          );
+        if (!pathWithin(targetPath, activityCwd)) continue;
+        await inventory.observe(group, child);
+        if (
+          child.error?.includes("unavailable") ||
+          (child.workerAlive === undefined && child.status !== "reaped")
+        )
+          throw new Error(
+            `Managed foreground worker activity is unavailable for ${group.owner}/${group.id}/${child.childId}`,
+          );
+        if (
+          child.reaped !== true ||
+          child.status !== "reaped" ||
+          child.workerAlive !== false ||
+          active(child)
+        )
+          return true;
+      }
     return false;
   }
   /** Internal ancestry reader: owners must come from validated manifest/session traversal. */
   retainedWorktreeReapTargets(verifiedOwners: string[]) {
-    const inventory = new HeadlessForegroundManager(this.root, this.disposition, () => false, this.groupLimit);
-    if (inventory.inventoryErrors.length) throw new Error("Foreground worktree ancestry inventory is unverifiable");
+    const inventory = new HeadlessForegroundManager(
+      this.root,
+      this.disposition,
+      () => false,
+      this.groupLimit,
+    );
+    if (inventory.inventoryErrors.length)
+      throw new Error("Foreground worktree ancestry inventory is unverifiable");
     const owners = new Set(verifiedOwners);
-    const latest = new Map<string, { ownerSessionId: string; taskId: string; childId: string; reaped: boolean; attempt: number }>();
-    for (const g of inventory.groups.values()) if (owners.has(g.owner)) for (const c of g.children) {
-      const key = `${g.owner}\0${c.taskId}`, prior = latest.get(key);
-      if (!prior || prior.attempt < c.attempt) latest.set(key, { ownerSessionId: g.owner, taskId: c.taskId,
-        childId: c.childId, reaped: (c.reaped === true || c.status === "reaped") && !active(c), attempt: c.attempt });
-    }
+    const latest = new Map<
+      string,
+      { ownerSessionId: string; taskId: string; childId: string; reaped: boolean; attempt: number }
+    >();
+    for (const g of inventory.groups.values())
+      if (owners.has(g.owner))
+        for (const c of g.children) {
+          const key = `${g.owner}\0${c.taskId}`,
+            prior = latest.get(key);
+          if (!prior || prior.attempt < c.attempt)
+            latest.set(key, {
+              ownerSessionId: g.owner,
+              taskId: c.taskId,
+              childId: c.childId,
+              reaped: (c.reaped === true || c.status === "reaped") && !active(c),
+              attempt: c.attempt,
+            });
+        }
     return [...latest.values()];
   }
-  async prepareReap(owner: string, preserve: (report: unknown) => Promise<void>, options: { force?: true; reason?: string } = {}): Promise<() => void> {
-    if (this.owner !== owner || this.closed || this.reapReserved) throw new Error("Foreground cleanup authority unavailable");
+  async prepareReap(
+    owner: string,
+    preserve: (report: unknown) => Promise<void>,
+    options: { force?: true; reason?: string } = {},
+  ): Promise<() => void> {
+    if (this.owner !== owner || this.closed || this.reapReserved)
+      throw new Error("Foreground cleanup authority unavailable");
     this.reapReserved = true;
     try {
-      if (this.activeLaunches.size || this.inFlight.size || this.resuming.size) throw new Error("In-flight foreground subagent operations block reap");
-      const inventory = new HeadlessForegroundManager(this.root, this.disposition, () => false, this.groupLimit);
-      if (inventory.inventoryErrors.length) throw new Error(`Foreground subagent inventory is unverifiable: ${inventory.inventoryErrors.slice(0, 16).join(", ")}`);
-      const groups = [...this.groups.values()].filter(group => group.owner === owner);
-      for (const group of groups) for (const child of group.children) await this.observe(group, child);
-      const blockers = groups.flatMap(group => group.children.filter(active).map(child => `${group.id}/${child.childId} ${child.status}`));
-      if (blockers.length) throw new Error(`Active foreground descendants block reap: ${blockers.slice(0, 32).join(", ")}`);
-      await preserve({ groups: groups.map(group => ({ job_id: group.id, children: group.children.map(child => ({
-        child_id: child.childId, task_id: child.taskId, status: child.status, outcome: child.outcome,
-        report: child.report ? readPrivateJson(child.report) : undefined,
-      })) })) });
+      if (this.activeLaunches.size || this.inFlight.size || this.resuming.size)
+        throw new Error("In-flight foreground subagent operations block reap");
+      const inventory = new HeadlessForegroundManager(
+        this.root,
+        this.disposition,
+        () => false,
+        this.groupLimit,
+      );
+      if (inventory.inventoryErrors.length)
+        throw new Error(
+          `Foreground subagent inventory is unverifiable: ${inventory.inventoryErrors.slice(0, 16).join(", ")}`,
+        );
+      const groups = [...this.groups.values()].filter((group) => group.owner === owner);
+      for (const group of groups)
+        for (const child of group.children) await this.observe(group, child);
+      const blockers = groups.flatMap((group) =>
+        group.children
+          .filter(active)
+          .map((child) => `${group.id}/${child.childId} ${child.status}`),
+      );
+      if (blockers.length)
+        throw new Error(
+          `Active foreground descendants block reap: ${blockers.slice(0, 32).join(", ")}`,
+        );
+      await preserve({
+        groups: groups.map((group) => ({
+          job_id: group.id,
+          children: group.children.map((child) => ({
+            child_id: child.childId,
+            task_id: child.taskId,
+            status: child.status,
+            outcome: child.outcome,
+            report: child.report ? readPrivateJson(child.report) : undefined,
+          })),
+        })),
+      });
       for (const group of groups) {
         for (const child of group.children) {
           if (child.reaped) continue;
@@ -1228,23 +2805,45 @@ export class HeadlessForegroundManager {
             // Require both untouched launch metadata and an absent worker
             // directory: a missing manifest after any launch attempt is unsafe.
             let untouched = false;
-            if (child.status === "cancelled" && !child.started && !child.launching && !child.initialPromptDispatching
-              && !child.workerAlive && child.launcherPid === undefined && child.launcherToken === undefined) {
-              try { lstatSync(child.directory); }
-              catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") untouched = true; else throw error; }
+            if (
+              child.status === "cancelled" &&
+              !child.started &&
+              !child.launching &&
+              !child.initialPromptDispatching &&
+              !child.workerAlive &&
+              child.launcherPid === undefined &&
+              child.launcherToken === undefined
+            ) {
+              try {
+                lstatSync(child.directory);
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code === "ENOENT") untouched = true;
+                else throw error;
+              }
             }
             if (untouched) {
-              if (child.spec.cleanupWorktreesOnReap === true) await this.reconcileWorktrees(group, child, options);
-              child.reaped = true; if (child.spec.worktree) await releaseWorktree(group.owner, child.taskId, child.childId); continue;
+              if (child.spec.cleanupWorktreesOnReap === true)
+                await this.reconcileWorktrees(group, child, options);
+              child.reaped = true;
+              if (child.spec.worktree)
+                await releaseWorktree(group.owner, child.taskId, child.childId);
+              continue;
             }
-            throw new Error(`Foreground descendant manifest unavailable: ${group.id}/${child.childId}`);
+            throw new Error(
+              `Foreground descendant manifest unavailable: ${group.id}/${child.childId}`,
+            );
           }
           await this.sealAndReap(group, child, manifest, options);
         }
         this.persist(group);
       }
-      return () => { this.reapReserved = false; };
-    } catch (error) { this.reapReserved = false; throw error; }
+      return () => {
+        this.reapReserved = false;
+      };
+    } catch (error) {
+      this.reapReserved = false;
+      throw error;
+    }
   }
   async operation(params: any, owner: string, signal?: AbortSignal): Promise<any | undefined> {
     if (!params.operation) return undefined;
@@ -1252,133 +2851,316 @@ export class HeadlessForegroundManager {
     if (this.owner !== owner) return undefined;
     const op = params.operation;
     if (op === "list" || op === "tasks") {
-      for (const group of this.groups.values()) if (group.owner === owner) await Promise.all(group.children.map(child => this.observe(group, child)));
-      const tasks = [...this.groups.values()].filter(group => group.owner === owner).flatMap(group => group.children.map(child => this.task(group, child)));
-      return { content: [{ type: "text", text: tasks.map(task => `${task.taskId} ${task.status === "waiting-input" || task.status === "waiting-permission" ? `${task.status} (open the Foreground panel in Paseo)` : task.status}: ${task.title}`).join("\n") || "No foreground helper tasks." }], details: { tui_subagent: true, operation: op, tasks } };
+      for (const group of this.groups.values())
+        if (group.owner === owner)
+          await Promise.all(group.children.map((child) => this.observe(group, child)));
+      const tasks = [...this.groups.values()]
+        .filter((group) => group.owner === owner)
+        .flatMap((group) => group.children.map((child) => this.task(group, child)));
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              tasks
+                .map(
+                  (task) =>
+                    `${task.taskId} ${task.status === "waiting-input" || task.status === "waiting-permission" ? `${task.status} (open the Foreground panel in Paseo)` : task.status}: ${task.title}`,
+                )
+                .join("\n") || "No foreground helper tasks.",
+          },
+        ],
+        details: { tui_subagent: true, operation: op, tasks },
+      };
     }
     const groups = [...this.groups.values()];
-    let group = typeof params.job_id === "string" ? groups.find(item => item.id === params.job_id) : undefined;
-    if (!group && typeof params.job_id === "string" && groups.some(item => item.id === params.job_id)) throw new Error("Subagent belongs to a different Pi session");
-    if (group && group.owner !== owner) throw new Error("Subagent belongs to a different Pi session");
+    let group =
+      typeof params.job_id === "string"
+        ? groups.find((item) => item.id === params.job_id)
+        : undefined;
+    if (
+      !group &&
+      typeof params.job_id === "string" &&
+      groups.some((item) => item.id === params.job_id)
+    )
+      throw new Error("Subagent belongs to a different Pi session");
+    if (group && group.owner !== owner)
+      throw new Error("Subagent belongs to a different Pi session");
     let child: Child | undefined;
     const explicitChildId = typeof params.child_id === "string" ? params.child_id : undefined;
     if (explicitChildId) {
-      const found = groups.flatMap(item => item.children.map(target => ({ group: item, child: target }))).find(item => item.child.childId === explicitChildId);
-      if (!found) { if (group) throw new Error("child_id does not belong to the requested headless job_id"); return undefined; }
-      if (found.group.owner !== owner) throw new Error("Subagent belongs to a different Pi session");
-      if (group && group !== found.group) throw new Error("Child does not belong to the requested group");
-      group = found.group; child = found.child;
-      if (typeof params.job_id === "string" && group.id !== params.job_id) throw new Error("Child does not belong to the requested group");
+      const found = groups
+        .flatMap((item) => item.children.map((target) => ({ group: item, child: target })))
+        .find((item) => item.child.childId === explicitChildId);
+      if (!found) {
+        if (group) throw new Error("child_id does not belong to the requested headless job_id");
+        return undefined;
+      }
+      if (found.group.owner !== owner)
+        throw new Error("Subagent belongs to a different Pi session");
+      if (group && group !== found.group)
+        throw new Error("Child does not belong to the requested group");
+      group = found.group;
+      child = found.child;
+      if (typeof params.job_id === "string" && group.id !== params.job_id)
+        throw new Error("Child does not belong to the requested group");
     }
     if (typeof params.task_id === "string") {
-      const found = groups.flatMap(item => item.children.map(target => ({ group: item, child: target }))).reverse().find(item => item.child.taskId === params.task_id);
-      if (!found) { if (group) throw new Error("task_id does not belong to the requested headless job_id"); return undefined; }
-      if (found.group.owner !== owner) throw new Error("Subagent belongs to a different Pi session");
-      if (group && group !== found.group) throw new Error("Task does not belong to the requested group");
+      const found = groups
+        .flatMap((item) => item.children.map((target) => ({ group: item, child: target })))
+        .reverse()
+        .find((item) => item.child.taskId === params.task_id);
+      if (!found) {
+        if (group) throw new Error("task_id does not belong to the requested headless job_id");
+        return undefined;
+      }
+      if (found.group.owner !== owner)
+        throw new Error("Subagent belongs to a different Pi session");
+      if (group && group !== found.group)
+        throw new Error("Task does not belong to the requested group");
       group = found.group;
-      if (typeof params.job_id === "string" && group.id !== params.job_id) throw new Error("Task does not belong to the requested group");
-      if (child && child !== found.child) throw new Error("task_id and child_id identify different attempts");
+      if (typeof params.job_id === "string" && group.id !== params.job_id)
+        throw new Error("Task does not belong to the requested group");
+      if (child && child !== found.child)
+        throw new Error("task_id and child_id identify different attempts");
       child = found.child;
     }
     if (params.child !== undefined) {
-      if (!Number.isSafeInteger(params.child) || params.child < 1) throw new Error("Invalid child index");
+      if (!Number.isSafeInteger(params.child) || params.child < 1)
+        throw new Error("Invalid child index");
       if (!group) return undefined;
       const indexed = group.children[params.child - 1];
       if (!indexed) throw new Error("Unknown child index");
-      if (child && child !== indexed) throw new Error("child index and child_id identify different children");
+      if (child && child !== indexed)
+        throw new Error("child index and child_id identify different children");
       child = indexed;
     }
     if (group && !child) {
-      if (!["cancel", "reap", "wait", "wait_group", "result", "output", "prompt", "resume", "jobs", "promote", "verify"].includes(op)) return undefined;
+      if (
+        ![
+          "cancel",
+          "reap",
+          "wait",
+          "wait_group",
+          "result",
+          "output",
+          "prompt",
+          "resume",
+          "jobs",
+          "promote",
+          "verify",
+        ].includes(op)
+      )
+        return undefined;
       child = group.children[(params.child ?? 1) - 1];
     }
     if (!group || !child) return undefined;
-    if (op === "promote") throw new Error("Headless foreground workers cannot be promoted without restarting or replaying; promotion is unsupported");
+    if (op === "promote")
+      throw new Error(
+        "Headless foreground workers cannot be promoted without restarting or replaying; promotion is unsupported",
+      );
     if (op === "verify") {
-      const targets = params.child_id ? [child] : group.children.filter(target => target.spec.verification?.length);
+      const targets = params.child_id
+        ? [child]
+        : group.children.filter((target) => target.spec.verification?.length);
       const results = [];
       for (const target of targets) {
         const targetManifest = this.manifest(target);
-        if (!targetManifest || target.reaped) throw new Error(`Verification unavailable for closed headless worker ${target.childId}`);
+        if (!targetManifest || target.reaped)
+          throw new Error(`Verification unavailable for closed headless worker ${target.childId}`);
         const requestId = `parent-verify:${targetManifest.workerEpoch}:${randomBytes(12).toString("hex")}`;
-        const checked = await awaitTuiWorkerVerification(targetManifest, requestId, verificationBudget(targetManifest), signal);
-        if (!checked.response.ok) throw new Error(`Headless verification failed: ${checked.response.code}: ${checked.response.message}`);
+        const checked = await awaitTuiWorkerVerification(
+          targetManifest,
+          requestId,
+          verificationBudget(targetManifest),
+          signal,
+        );
+        if (!checked.response.ok)
+          throw new Error(
+            `Headless verification failed: ${checked.response.code}: ${checked.response.message}`,
+          );
         const verification = (checked.response.data as any)?.verification;
-        if (!verification?.status) throw new Error("Headless verification returned no structured status");
-        results.push({ child_id: target.childId, verification, accepted_delivery: false, ...(checked.timedOut ? { timed_out: true } : {}) });
+        if (!verification?.status)
+          throw new Error("Headless verification returned no structured status");
+        results.push({
+          child_id: target.childId,
+          verification,
+          accepted_delivery: false,
+          ...(checked.timedOut ? { timed_out: true } : {}),
+        });
       }
-      if (!results.length) throw new Error("No verification gates are configured for this worker group");
-      const pending = results.some(result => result.verification?.status === "checking");
-      const timedOut = results.some(result => result.timed_out === true);
-      const failed = results.some(result => !["passed", "checking"].includes(result.verification?.status));
-      return { content: [{ type: "text", text: results.map(result => `${result.child_id}: ${result.verification?.status ?? "unavailable"}${result.timed_out ? " (verification wait timed out)" : ""}`).join("\n") }], details: { operation: op, backend: "native", results, accepted_delivery: false, pending, timed_out: timedOut, failed }, isError: failed || timedOut };
+      if (!results.length)
+        throw new Error("No verification gates are configured for this worker group");
+      const pending = results.some((result) => result.verification?.status === "checking");
+      const timedOut = results.some((result) => result.timed_out === true);
+      const failed = results.some(
+        (result) => !["passed", "checking"].includes(result.verification?.status),
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: results
+              .map(
+                (result) =>
+                  `${result.child_id}: ${result.verification?.status ?? "unavailable"}${result.timed_out ? " (verification wait timed out)" : ""}`,
+              )
+              .join("\n"),
+          },
+        ],
+        details: {
+          operation: op,
+          backend: "native",
+          results,
+          accepted_delivery: false,
+          pending,
+          timed_out: timedOut,
+          failed,
+        },
+        isError: failed || timedOut,
+      };
     }
-    if (op === "jobs") throw new Error("Child-local tmux job control is unavailable for headless workers; no pane was created");
+    if (op === "jobs")
+      throw new Error(
+        "Child-local tmux job control is unavailable for headless workers; no pane was created",
+      );
     let manifest = this.manifest(child);
-    if (op === "cancel") { await this.stopGroup(group); return this.result(group); }
+    if (op === "cancel") {
+      await this.stopGroup(group);
+      return this.result(group);
+    }
     if (op === "reap") {
-      if (group.children.some(active)) throw new Error("Headless worker group is busy; reap never cancels active work");
+      if (group.children.some(active))
+        throw new Error("Headless worker group is busy; reap never cancels active work");
       for (const targetChild of group.children) {
-        if (params.cleanup_worktree === true && !targetChild.cleanupWorktreeRequested) { targetChild.cleanupWorktreeRequested = true; this.persist(group); }
+        if (params.cleanup_worktree === true && !targetChild.cleanupWorktreeRequested) {
+          targetChild.cleanupWorktreeRequested = true;
+          this.persist(group);
+        }
         this.bumpGeneration(targetChild);
         const targetManifest = this.manifest(targetChild);
         if (!targetManifest) {
-          let absent = false; try { lstatSync(targetChild.directory); } catch (error: any) { if (error.code === "ENOENT") absent = true; else throw error; }
-          if (absent && !targetChild.started && !targetChild.workerAlive && !targetChild.launcherPid && !targetChild.launching && !targetChild.initialPromptDispatching) {
-            if (targetChild.spec.cleanupWorktreesOnReap === true || targetChild.cleanupWorktreeRequested === true) await this.reconcileWorktrees(group, targetChild, params.force === true ? { force: true, reason: params.reason } : {});
+          let absent = false;
+          try {
+            lstatSync(targetChild.directory);
+          } catch (error: any) {
+            if (error.code === "ENOENT") absent = true;
+            else throw error;
+          }
+          if (
+            absent &&
+            !targetChild.started &&
+            !targetChild.workerAlive &&
+            !targetChild.launcherPid &&
+            !targetChild.launching &&
+            !targetChild.initialPromptDispatching
+          ) {
+            if (
+              targetChild.spec.cleanupWorktreesOnReap === true ||
+              targetChild.cleanupWorktreeRequested === true
+            )
+              await this.reconcileWorktrees(
+                group,
+                targetChild,
+                params.force === true ? { force: true, reason: params.reason } : {},
+              );
             targetChild.reaped = true;
-            if (targetChild.spec.worktree) await releaseWorktree(group.owner, targetChild.taskId, targetChild.childId);
+            if (targetChild.spec.worktree)
+              await releaseWorktree(group.owner, targetChild.taskId, targetChild.childId);
             continue;
           }
-          throw new Error("Headless worker manifest is missing; process death and job cleanup cannot be verified");
+          throw new Error(
+            "Headless worker manifest is missing; process death and job cleanup cannot be verified",
+          );
         }
-        await this.sealAndReap(group, targetChild, targetManifest, params.force === true ? { force: true, reason: params.reason } : {});
+        await this.sealAndReap(
+          group,
+          targetChild,
+          targetManifest,
+          params.force === true ? { force: true, reason: params.reason } : {},
+        );
         if (params.force === true && targetChild.spec.verification?.length) {
           targetChild.verificationBypasses ??= [];
-          targetChild.verificationBypasses.push({ attempt: targetChild.attempt, workerEpoch: targetManifest.workerEpoch, reason: params.reason, at: new Date().toISOString() });
+          targetChild.verificationBypasses.push({
+            attempt: targetChild.attempt,
+            workerEpoch: targetManifest.workerEpoch,
+            reason: params.reason,
+            at: new Date().toISOString(),
+          });
           this.persist(group);
         }
       }
       this.persist(group);
       const result = this.result(group);
-      const cleanup = group.children.filter(child => child.worktreeCleanup).map(child => ({ child_id: child.childId, ...child.worktreeCleanup! }));
-      const retained = cleanup.flatMap(report => report.retainedParentWorktrees ?? []);
+      const cleanup = group.children
+        .filter((child) => child.worktreeCleanup)
+        .map((child) => ({ child_id: child.childId, ...child.worktreeCleanup! }));
+      const retained = cleanup.flatMap((report) => report.retainedParentWorktrees ?? []);
       if (cleanup.length) result.details.worktree_cleanup = cleanup;
-      if (retained.length) result.content[0].text += `\nRetained parent-owned worktrees (borrower detached; original owner remains responsible): ${retained.map(row => row.path).join(", ")}`;
+      if (retained.length)
+        result.content[0].text += `\nRetained parent-owned worktrees (borrower detached; original owner remains responsible): ${retained.map((row) => row.path).join(", ")}`;
       return result;
     }
     if (op === "result" || op === "output") {
-      let retained = false, unavailable = false;
+      let retained = false,
+        unavailable = false;
       if (child.status !== "reaped") {
         try {
-          const status = await callTuiWorker(manifest!, { operation: "status" }, { timeoutMs: 1000, signal });
-          if (!status.ok) { retained = Boolean(child.report); unavailable = !child.report; }
-          else if ((status.data as any).active || !(status.data as any).lastReport) return this.result(group, child, { operation: op });
+          const status = await callTuiWorker(
+            manifest!,
+            { operation: "status" },
+            { timeoutMs: 1000, signal },
+          );
+          if (!status.ok) {
+            retained = Boolean(child.report);
+            unavailable = !child.report;
+          } else if ((status.data as any).active || !(status.data as any).lastReport)
+            return this.result(group, child, { operation: op });
           else {
             const snapshot = status.data as any;
             const report = this.artifactPath(child, snapshot.lastReport, "report");
             if (!report) throw new Error("Worker returned an invalid report artifact");
             child.report = report;
-            if (typeof snapshot.lastOutcome === "string") child.outcome = this.artifactPath(child, snapshot.lastOutcome, "outcome")
-              ? readPrivateJson(this.artifactPath(child, snapshot.lastOutcome, "outcome")!) : undefined;
+            if (typeof snapshot.lastOutcome === "string")
+              child.outcome = this.artifactPath(child, snapshot.lastOutcome, "outcome")
+                ? readPrivateJson(this.artifactPath(child, snapshot.lastOutcome, "outcome")!)
+                : undefined;
           }
         } catch (error) {
           if (signal?.aborted) throw error;
-          retained = Boolean(child.report); unavailable = !child.report;
+          retained = Boolean(child.report);
+          unavailable = !child.report;
         }
       } else retained = true;
       await this.observe(group, child);
-      if (unavailable && !child.report) return { content: [{ type: "text", text: "Worker status unavailable; no retained result." }],
-        details: { tui_subagent: true, backend: "native", operation: op, job_id: group.id, child_id: child.childId, unavailable: true } };
-      return this.result(group, child, { operation: op, offset: params.offset, limit: params.limit, diagnostics: params.diagnostics === true, retained });
+      if (unavailable && !child.report)
+        return {
+          content: [{ type: "text", text: "Worker status unavailable; no retained result." }],
+          details: {
+            tui_subagent: true,
+            backend: "native",
+            operation: op,
+            job_id: group.id,
+            child_id: child.childId,
+            unavailable: true,
+          },
+        };
+      return this.result(group, child, {
+        operation: op,
+        offset: params.offset,
+        limit: params.limit,
+        diagnostics: params.diagnostics === true,
+        retained,
+      });
     }
     if (op === "wait" || op === "wait_group" || op === "wait_any" || op === "wait_all") {
       const waitMs = params.wait_ms ?? 1000;
-      if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 86_400_000) throw new Error("Invalid wait_ms: expected 0–86400000 milliseconds");
+      if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 86_400_000)
+        throw new Error("Invalid wait_ms: expected 0–86400000 milliseconds");
       const deadline = Date.now() + waitMs;
       while (group.children.some(active) && Date.now() < deadline) {
         if (signal?.aborted) throw new Error("Wait cancelled; worker continues");
-        await Promise.all(group.children.map(item => this.observe(group!, item)));
+        await Promise.all(group.children.map((item) => this.observe(group!, item)));
         if (signal?.aborted) throw new Error("Wait cancelled; worker continues");
         if (!group.children.some(active)) break;
         await pause(Math.min(100, Math.max(0, deadline - Date.now())));
@@ -1387,54 +3169,133 @@ export class HeadlessForegroundManager {
       return this.result(group);
     }
     if (op === "prompt" || op === "resume") {
-      if (op === "prompt" && !child.started) throw new Error("Foreground worker is still starting; controls are unavailable until initial prompt acceptance");
+      if (op === "prompt" && !child.started)
+        throw new Error(
+          "Foreground worker is still starting; controls are unavailable until initial prompt acceptance",
+        );
       const acquireResume = op === "resume";
       if (acquireResume) {
-        const latest = [...this.groups.values()].flatMap(item => item.children).filter(item => item.taskId === child!.taskId)
+        const latest = [...this.groups.values()]
+          .flatMap((item) => item.children)
+          .filter((item) => item.taskId === child!.taskId)
           .sort((left, right) => right.attempt - left.attempt)[0];
-        if (latest !== child) throw new Error("A newer task attempt already exists; resume the latest child only");
-        if (this.resuming.has(child.taskId)) throw new Error("A resume is already in progress for this task");
-        if ([...this.groups.values()].some(item => item.children.some(other => other.taskId === child!.taskId && other !== child && active(other)))) {
-          throw new Error("Another attempt for this task is still active; duplicate resume refused");
+        if (latest !== child)
+          throw new Error("A newer task attempt already exists; resume the latest child only");
+        if (this.resuming.has(child.taskId))
+          throw new Error("A resume is already in progress for this task");
+        if (
+          [...this.groups.values()].some((item) =>
+            item.children.some(
+              (other) => other.taskId === child!.taskId && other !== child && active(other),
+            ),
+          )
+        ) {
+          throw new Error(
+            "Another attempt for this task is still active; duplicate resume refused",
+          );
         }
         this.resuming.add(child.taskId);
       }
       try {
-        if (!child.started) throw new Error("Foreground worker is still starting; resume is unavailable until initial prompt acceptance");
-        if (!manifest) throw new Error("Worker has no committed endpoint; use explicit resume to start a new attempt");
-        if (manifest.runtimePid === undefined) manifest = await this.ensureRuntimeIdentity(manifest);
+        if (!child.started)
+          throw new Error(
+            "Foreground worker is still starting; resume is unavailable until initial prompt acceptance",
+          );
+        if (!manifest)
+          throw new Error(
+            "Worker has no committed endpoint; use explicit resume to start a new attempt",
+          );
+        if (manifest.runtimePid === undefined)
+          manifest = await this.ensureRuntimeIdentity(manifest);
         const runtimeState = await this.runtimeState(manifest);
         if (manifest.foregroundOwner?.token !== this.ownerToken && runtimeState !== "dead") {
-          throw new Error("Foreground worker is still owned by the previous parent; wait for verified worker exit before a new attempt");
+          throw new Error(
+            "Foreground worker is still owned by the previous parent; wait for verified worker exit before a new attempt",
+          );
         }
         const requiresCompaction = child.requiresCompaction === true;
-        if (op === "resume" && requiresCompaction && params.compact === false) throw new Error("High-context continuation requires compaction");
+        if (op === "resume" && requiresCompaction && params.compact === false)
+          throw new Error("High-context continuation requires compaction");
         const live = runtimeState === "alive";
-        if (runtimeState === "unknown") throw new Error("Actual Pi process death is unverified; refusing duplicate resume");
+        if (runtimeState === "unknown")
+          throw new Error("Actual Pi process death is unverified; refusing duplicate resume");
         if (!live) {
           await this.observe(group, child);
-          if (op !== "resume") throw new Error("Headless worker is closed; use explicit operation=resume after reviewing the retained session");
-          if (await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 500 }).then(() => true, () => false)) throw new Error("Prior worker endpoint is still live; new attempt refused");
-          atomicPrivateJson(new TuiWorkerStore(child.directory).path("dead-verified.json"), { workerEpoch: manifest.workerEpoch,
-            processPid: manifest.processPid, processToken: manifest.processToken, verifiedAt: new Date().toISOString() });
-          return await this.launch({ task: child.spec.task }, owner, child.spec.cwd, signal, undefined,
-            { taskId: child.taskId, sessionFile: manifest.sessionFile, attempt: child.attempt + 1, spec: child.spec, previousChildId: child.childId,
-              message: typeof params.message === "string" ? params.message : "Continue from the saved task context.", compact: params.compact === true || requiresCompaction });
+          if (op !== "resume")
+            throw new Error(
+              "Headless worker is closed; use explicit operation=resume after reviewing the retained session",
+            );
+          if (
+            await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 500 }).then(
+              () => true,
+              () => false,
+            )
+          )
+            throw new Error("Prior worker endpoint is still live; new attempt refused");
+          atomicPrivateJson(new TuiWorkerStore(child.directory).path("dead-verified.json"), {
+            workerEpoch: manifest.workerEpoch,
+            processPid: manifest.processPid,
+            processToken: manifest.processToken,
+            verifiedAt: new Date().toISOString(),
+          });
+          return await this.launch(
+            { task: child.spec.task },
+            owner,
+            child.spec.cwd,
+            signal,
+            undefined,
+            {
+              taskId: child.taskId,
+              sessionFile: manifest.sessionFile,
+              attempt: child.attempt + 1,
+              spec: child.spec,
+              previousChildId: child.childId,
+              message:
+                typeof params.message === "string"
+                  ? params.message
+                  : "Continue from the saved task context.",
+              compact: params.compact === true || requiresCompaction,
+            },
+          );
         }
         if (op === "resume" && (params.compact === true || requiresCompaction)) {
           this.bumpGeneration(child);
-          const compacted = await callTuiWorker(manifest, { operation: "compact" }, { timeoutMs: 300_000, signal });
-          if (!compacted.ok) throw new Error(`Resume compaction failed: ${compacted.code}: ${compacted.message}`);
+          const compacted = await callTuiWorker(
+            manifest,
+            { operation: "compact" },
+            { timeoutMs: 300_000, signal },
+          );
+          if (!compacted.ok)
+            throw new Error(`Resume compaction failed: ${compacted.code}: ${compacted.message}`);
         }
         this.bumpGeneration(child);
-        const sent = await callTuiWorker(manifest, { operation: "prompt", mode: params.control_mode ?? "follow_up", message: params.message ?? "Continue from the saved task context." }, { requestId: `model:${params.request_id ?? randomBytes(8).toString("hex")}` });
-        if (!sent.ok) throw new Error(`Headless worker prompt rejected: ${sent.code}: ${sent.message}`);
-        group.cancelled = false; child.status = "running"; child.workerAlive = true; child.updatedAt = new Date().toISOString(); this.persist(group);
-        if (params.wait_for_response) while (active(child)) { if (signal?.aborted) throw new Error("Prompt observation cancelled; worker continues"); await this.observe(group, child); await pause(100); }
+        const sent = await callTuiWorker(
+          manifest,
+          {
+            operation: "prompt",
+            mode: params.control_mode ?? "follow_up",
+            message: params.message ?? "Continue from the saved task context.",
+          },
+          { requestId: `model:${params.request_id ?? randomBytes(8).toString("hex")}` },
+        );
+        if (!sent.ok)
+          throw new Error(`Headless worker prompt rejected: ${sent.code}: ${sent.message}`);
+        group.cancelled = false;
+        child.status = "running";
+        child.workerAlive = true;
+        child.updatedAt = new Date().toISOString();
+        this.persist(group);
+        if (params.wait_for_response)
+          while (active(child)) {
+            if (signal?.aborted) throw new Error("Prompt observation cancelled; worker continues");
+            await this.observe(group, child);
+            await pause(100);
+          }
         return this.result(group, child);
-      } finally { if (acquireResume) this.resuming.delete(child.taskId); }
+      } finally {
+        if (acquireResume) this.resuming.delete(child.taskId);
+      }
     }
     return undefined;
   }
 }
-

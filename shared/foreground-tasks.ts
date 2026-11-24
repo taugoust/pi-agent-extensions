@@ -26,7 +26,16 @@ export const WORKER_INTERACTIONS_KEY = "__paeWorkerInteractionsV1";
 export const FOREGROUND_TASKS_PROTOCOL = 1 as const;
 
 export type TaskTarget = { taskId: string; childId: string; workerEpoch: string };
-export type TaskStatus = "pending" | "running" | "waiting-input" | "waiting-permission" | "completed" | "failed" | "cancelled" | "lost" | "reaped";
+export type TaskStatus =
+  | "pending"
+  | "running"
+  | "waiting-input"
+  | "waiting-permission"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "lost"
+  | "reaped";
 export type ForegroundTask = TaskTarget & {
   groupId: string;
   attempt: number;
@@ -55,7 +64,11 @@ export type TaskInteractionInput =
   | { kind: "questionnaire"; questions: TaskQuestion[] };
 export type TaskInteractionAnswer =
   | { kind: "permission"; cancelled: boolean; value?: string }
-  | { kind: "questionnaire"; cancelled: boolean; answers: Array<{ id: string; value: string; wasCustom: boolean }> };
+  | {
+      kind: "questionnaire";
+      cancelled: boolean;
+      answers: Array<{ id: string; value: string; wasCustom: boolean }>;
+    };
 export type TaskInteraction = {
   id: string;
   workerEpoch: string;
@@ -90,7 +103,13 @@ export type ForegroundTaskCommand =
   | { operation: "list" }
   | { operation: "view"; target: TaskTarget; cursor?: string }
   | { operation: "prompt"; target: TaskTarget; requestId: string; message: string }
-  | { operation: "respond"; target: TaskTarget; requestId: string; interactionId: string; answer: TaskInteractionAnswer }
+  | {
+      operation: "respond";
+      target: TaskTarget;
+      requestId: string;
+      interactionId: string;
+      answer: TaskInteractionAnswer;
+    }
   | { operation: "stop"; target: TaskTarget; requestId: string };
 export type ForegroundTaskRequest = ForegroundTaskCommand & { sessionId: string; epoch: string };
 export type ForegroundTaskResponse = {
@@ -120,17 +139,39 @@ export type WorkerInteractionsService = {
 };
 export function foregroundTasksService(): ForegroundTasksService | undefined {
   const value = (globalThis as any)[FOREGROUND_TASKS_KEY];
-  return value?.protocol === 1 && typeof value.sessionId === "string" && typeof value.epoch === "string" && typeof value.execute === "function" ? value : undefined;
+  return value?.protocol === 1 &&
+    typeof value.sessionId === "string" &&
+    typeof value.epoch === "string" &&
+    typeof value.execute === "function"
+    ? value
+    : undefined;
 }
-export function workerInteractionsService(kind?: TaskInteractionInput["kind"]): WorkerInteractionsService | undefined {
+export function workerInteractionsService(
+  kind?: TaskInteractionInput["kind"],
+): WorkerInteractionsService | undefined {
   // Separate coordinator-owned human escalation. Never intercept permissions or
   // root/nonworker questionnaires; the capability checks its exact live session.
   const guidance = (globalThis as any).__paeGuidanceHumanV1;
-  if (kind === "questionnaire" && process.env.PI_SUBAGENT_GUIDANCE_V1 && guidance?.protocol === 1
-    && guidance.mode === "headless" && typeof guidance.workerEpoch === "string" && typeof guidance.request === "function"
-    && typeof guidance.isCurrentWorker === "function" && guidance.isCurrentWorker() === true) return guidance;
-  if (kind === "questionnaire" && process.env.PI_SUBAGENT_GUIDANCE_V1) throw new Error("Owning guidance worker unavailable; refusing direct child-to-human fallback");
+  if (
+    kind === "questionnaire" &&
+    process.env.PI_SUBAGENT_GUIDANCE_V1 &&
+    guidance?.protocol === 1 &&
+    guidance.mode === "headless" &&
+    typeof guidance.workerEpoch === "string" &&
+    typeof guidance.request === "function" &&
+    typeof guidance.isCurrentWorker === "function" &&
+    guidance.isCurrentWorker() === true
+  )
+    return guidance;
+  if (kind === "questionnaire" && process.env.PI_SUBAGENT_GUIDANCE_V1)
+    throw new Error("Owning guidance worker unavailable; refusing direct child-to-human fallback");
   const value = (globalThis as any)[WORKER_INTERACTIONS_KEY];
-  if (kind && Array.isArray(value?.supportedKinds) && !value.supportedKinds.includes(kind)) return undefined;
-  return value?.protocol === 1 && value.mode === "headless" && typeof value.workerEpoch === "string" && typeof value.request === "function" ? value : undefined;
+  if (kind && Array.isArray(value?.supportedKinds) && !value.supportedKinds.includes(kind))
+    return undefined;
+  return value?.protocol === 1 &&
+    value.mode === "headless" &&
+    typeof value.workerEpoch === "string" &&
+    typeof value.request === "function"
+    ? value
+    : undefined;
 }

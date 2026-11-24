@@ -11,30 +11,86 @@ import { TuiWorkerServer } from "./tui-worker-server.ts";
 for (const kind of ["tui", "headless"] as const) {
   test(`${kind} prompt accepts matching job_id and rejects mismatched ownership before delivery`, async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-prompt-group-"));
-    const manager: any = kind === "tui"
-      ? new TuiNativeManager(root, () => "native", () => true, 16)
-      : new HeadlessForegroundManager(root, () => "native", () => true);
+    const manager: any =
+      kind === "tui"
+        ? new TuiNativeManager(
+            root,
+            () => "native",
+            () => true,
+            16,
+          )
+        : new HeadlessForegroundManager(
+            root,
+            () => "native",
+            () => true,
+          );
     const store = new TuiWorkerStore(join(root, "worker"), true);
     const manifest: any = {
-      protocol: 1, ownerSessionId: "parent", taskId: `subagent-task-${"a".repeat(24)}`,
-      runtimeId: "runtime", groupId: `subagent-job-${"b".repeat(24)}`, childId: `subagent-child-${"c".repeat(24)}`,
-      attempt: 1, workerEpoch: "d".repeat(32), controlToken: "e".repeat(64),
-      controlSocket: store.path("control.sock"), sessionFile: store.path("session.jsonl"), launchMode: "none",
-      presentation: "background", placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1",
-        windowId: "@1", paneId: "%1", ownershipNonce: "f".repeat(64) },
+      protocol: 1,
+      ownerSessionId: "parent",
+      taskId: `subagent-task-${"a".repeat(24)}`,
+      runtimeId: "runtime",
+      groupId: `subagent-job-${"b".repeat(24)}`,
+      childId: `subagent-child-${"c".repeat(24)}`,
+      attempt: 1,
+      workerEpoch: "d".repeat(32),
+      controlToken: "e".repeat(64),
+      controlSocket: store.path("control.sock"),
+      sessionFile: store.path("session.jsonl"),
+      launchMode: "none",
+      presentation: "background",
+      placement: {
+        socketPath: "/tmp/tmux",
+        serverEpoch: "1:2",
+        sessionId: "$1",
+        windowId: "@1",
+        paneId: "%1",
+        ownershipNonce: "f".repeat(64),
+      },
     };
     store.writeManifest(manifest);
     const messages: string[] = [];
-    let idle = true, aborts = 0;
-    const server = new TuiWorkerServer(store, {
-      isIdle: () => idle, send(message) { messages.push(message); }, abort() { aborts++; }, shutdown() {},
-    }, 25);
+    let idle = true,
+      aborts = 0;
+    const server = new TuiWorkerServer(
+      store,
+      {
+        isIdle: () => idle,
+        send(message) {
+          messages.push(message);
+        },
+        abort() {
+          aborts++;
+        },
+        shutdown() {},
+      },
+      25,
+    );
     const now = new Date().toISOString();
-    const child = { childId: manifest.childId, taskId: manifest.taskId, attempt: 1, directory: store.directory,
-      spec: { task: "saved task", cwd: root }, state: "completed", status: "completed", started: true,
-      createdAt: now, updatedAt: now, notifiedSequence: 0, operatorCapability: "f".repeat(64) };
-    const group = { id: manifest.groupId, owner: "parent", background: true, mode: "single", launchMode: "none",
-      createdAt: now, caller: manifest.placement, children: [child] };
+    const child = {
+      childId: manifest.childId,
+      taskId: manifest.taskId,
+      attempt: 1,
+      directory: store.directory,
+      spec: { task: "saved task", cwd: root },
+      state: "completed",
+      status: "completed",
+      started: true,
+      createdAt: now,
+      updatedAt: now,
+      notifiedSequence: 0,
+      operatorCapability: "f".repeat(64),
+    };
+    const group = {
+      id: manifest.groupId,
+      owner: "parent",
+      background: true,
+      mode: "single",
+      launchMode: "none",
+      createdAt: now,
+      caller: manifest.placement,
+      children: [child],
+    };
     manager.owner = "parent";
     manager.groups.set(group.id, group);
     // Stub only process observation/persistence; delivery uses the authenticated
@@ -46,24 +102,38 @@ for (const kind of ["tui", "headless"] as const) {
     manager.runtimeState = async () => "alive";
     if (kind === "tui") manager.tmux.inspect = async () => ({ dead: false });
     let launches = 0;
-    manager.launch = async () => { launches++; throw new Error("unexpected relaunch"); };
+    manager.launch = async () => {
+      launches++;
+      throw new Error("unexpected relaunch");
+    };
     try {
       await server.start();
-      const request = { operation: "prompt", child_id: child.childId, job_id: group.id, message: "continue", control_mode: "steer" };
+      const request = {
+        operation: "prompt",
+        child_id: child.childId,
+        job_id: group.id,
+        message: "continue",
+        control_mode: "steer",
+      };
       await manager.operation(request, "parent");
       assert.deepEqual(messages, ["continue"]);
       server.running(false);
       await manager.operation({ ...request, job_id: undefined, message: "child only" }, "parent");
       assert.deepEqual(messages, ["continue", "child only"]);
-      await assert.rejects(manager.operation({ ...request, job_id: `subagent-job-${"1".repeat(24)}` }, "parent"), /does not belong/);
+      await assert.rejects(
+        manager.operation({ ...request, job_id: `subagent-job-${"1".repeat(24)}` }, "parent"),
+        /does not belong/,
+      );
       group.owner = "foreign";
       await assert.rejects(manager.operation(request, "parent"), /different Pi session/);
       group.owner = "parent";
       assert.equal(messages.length, 2, "failed identity assertion sent a message");
       assert.equal(launches, 0, "prompt relaunched work");
       idle = false;
-      await assert.rejects(manager.operation({ ...request, control_mode: "interrupt" }, "parent"),
-        /interrupt_incomplete:.*Cancellation was requested; replacement was not dispatched.*new request ID/);
+      await assert.rejects(
+        manager.operation({ ...request, control_mode: "interrupt" }, "parent"),
+        /interrupt_incomplete:.*Cancellation was requested; replacement was not dispatched.*new request ID/,
+      );
       assert.equal(aborts, 1);
       assert.equal(messages.length, 2, "partial interrupt dispatched the replacement");
     } finally {

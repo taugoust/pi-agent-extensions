@@ -1,5 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 
 /** Private routing metadata only. Never put credentials or provider headers here. */
@@ -12,7 +22,9 @@ export interface RoutingProfile {
 }
 export interface RoutingContext {
   model?: { provider: string; id: string; api?: string };
-  modelRegistry?: { find(provider: string, id: string): { provider: string; id: string; api?: string } | undefined };
+  modelRegistry?: {
+    find(provider: string, id: string): { provider: string; id: string; api?: string } | undefined;
+  };
   sessionManager: { getSessionId(): string };
 }
 interface Registration {
@@ -29,7 +41,11 @@ interface Registry {
 }
 const key = Symbol.for("pi-agent-extensions.session-routing.v1");
 const globals = globalThis as unknown as Record<symbol, Registry | undefined>;
-const registry = globals[key] ??= { owners: new WeakMap(), listeners: new WeakMap(), seen: new WeakMap() };
+const registry = (globals[key] ??= {
+  owners: new WeakMap(),
+  listeners: new WeakMap(),
+  seen: new WeakMap(),
+});
 registry.overrides ??= new WeakSet();
 
 /** Explicit local choice is distinct from inherited routing, including accountId=null. */
@@ -38,26 +54,55 @@ export function setSessionRoutingOverride(ctx: RoutingContext, explicit: boolean
   else registry.overrides!.delete(ctx.sessionManager);
 }
 
-export function writeInheritedSessionRoutingProfile(file: string, ownerSessionId: string, environment: Record<string, string>, revision = 0): void {
-  const parentFile = environment[SESSION_ROUTING_FILE_ENV], parentOwner = environment[SESSION_ROUTING_OWNER_ENV];
-  if (!ownerSessionId || !parentFile || !parentOwner || parentOwner === ownerSessionId || !Number.isSafeInteger(revision) || revision < 0) throw new Error("Invalid parent session routing binding");
+export function writeInheritedSessionRoutingProfile(
+  file: string,
+  ownerSessionId: string,
+  environment: Record<string, string>,
+  revision = 0,
+): void {
+  const parentFile = environment[SESSION_ROUTING_FILE_ENV],
+    parentOwner = environment[SESSION_ROUTING_OWNER_ENV];
+  if (
+    !ownerSessionId ||
+    !parentFile ||
+    !parentOwner ||
+    parentOwner === ownerSessionId ||
+    !Number.isSafeInteger(revision) ||
+    revision < 0
+  )
+    throw new Error("Invalid parent session routing binding");
   const parent = readSessionRoutingProfile(parentFile, parentOwner);
   // A branch restores its inheritance intent, never its old publication epoch.
   // Existing descendants may already have observed a later local override/clear.
   let exists = false;
-  try { readPrivateRoutingDocument(file); exists = true; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  try {
+    readPrivateRoutingDocument(file);
+    exists = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
   // Only an absent local descriptor is an initial publication. A broken existing
   // parent chain must not be mistaken for an absent local file and repaired.
   const previous = exists ? readSessionRoutingProfile(file, ownerSessionId) : undefined;
   const offset = Math.max(revision, previous ? previous.revision - parent.revision + 1 : 0);
   validateRoutingProfile({ ...parent, ownerSessionId, revision: parent.revision + offset });
-  writePrivateRoutingDocument(file, { version: 1, kind: "inherit", ownerSessionId, parentFile, parentOwner, revision: offset });
+  writePrivateRoutingDocument(file, {
+    version: 1,
+    kind: "inherit",
+    ownerSessionId,
+    parentFile,
+    parentOwner,
+    revision: offset,
+  });
 }
 
-export function inheritedSessionRoutingEnvironment(env: Environment = process.env): Record<string, string> | undefined {
+export function inheritedSessionRoutingEnvironment(
+  env: Environment = process.env,
+): Record<string, string> | undefined {
   const identity = inheritedIdentity(env);
-  return identity ? { [SESSION_ROUTING_FILE_ENV]: identity.file, [SESSION_ROUTING_OWNER_ENV]: identity.owner } : undefined;
+  return identity
+    ? { [SESSION_ROUTING_FILE_ENV]: identity.file, [SESSION_ROUTING_OWNER_ENV]: identity.owner }
+    : undefined;
 }
 export const SESSION_ROUTING_FILE_ENV = "PI_SESSION_ROUTING_FILE";
 export const SESSION_ROUTING_OWNER_ENV = "PI_SESSION_ROUTING_OWNER_SESSION";
@@ -76,20 +121,50 @@ const virtualProviders = new Set(["session-follow", "unknown"]);
 
 export function validateRoutingProfile(value: unknown, expectedOwner?: string): RoutingProfile {
   const p = value as Partial<RoutingProfile> | null;
-  if (!p || typeof p !== "object" || Array.isArray(p) || p.version !== 1 ||
-    typeof p.ownerSessionId !== "string" || !p.ownerSessionId || p.ownerSessionId.length > 512 ||
+  if (
+    !p ||
+    typeof p !== "object" ||
+    Array.isArray(p) ||
+    p.version !== 1 ||
+    typeof p.ownerSessionId !== "string" ||
+    !p.ownerSessionId ||
+    p.ownerSessionId.length > 512 ||
     (expectedOwner !== undefined && p.ownerSessionId !== expectedOwner) ||
-    typeof p.providerId !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(p.providerId) || virtualProviders.has(p.providerId) ||
-    !(p.accountId === null || (typeof p.accountId === "string" && p.accountId.length > 0 && p.accountId.length <= 256 && !/[\x00-\x1f]/.test(p.accountId))) ||
-    !Number.isSafeInteger(p.revision) || p.revision! < 0) {
-    throw new Error("Invalid or mismatched session routing profile; no provider/account fallback is allowed");
+    typeof p.providerId !== "string" ||
+    !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(p.providerId) ||
+    virtualProviders.has(p.providerId) ||
+    !(
+      p.accountId === null ||
+      (typeof p.accountId === "string" &&
+        p.accountId.length > 0 &&
+        p.accountId.length <= 256 &&
+        !/[\x00-\x1f]/.test(p.accountId))
+    ) ||
+    !Number.isSafeInteger(p.revision) ||
+    p.revision! < 0
+  ) {
+    throw new Error(
+      "Invalid or mismatched session routing profile; no provider/account fallback is allowed",
+    );
   }
-  return { version: 1, ownerSessionId: p.ownerSessionId, providerId: p.providerId, accountId: p.accountId, revision: p.revision! };
+  return {
+    version: 1,
+    ownerSessionId: p.ownerSessionId,
+    providerId: p.providerId,
+    accountId: p.accountId,
+    revision: p.revision!,
+  };
 }
 
 export function routingProfilePath(agentDir: string, sessionId: string): string {
-  if (!isAbsolute(agentDir) || !sessionId) throw new Error("Session routing requires an absolute agent directory and session identity");
-  return join(agentDir, "state", "session-routing-v1", `${createHash("sha256").update(sessionId).digest("hex")}.json`);
+  if (!isAbsolute(agentDir) || !sessionId)
+    throw new Error("Session routing requires an absolute agent directory and session identity");
+  return join(
+    agentDir,
+    "state",
+    "session-routing-v1",
+    `${createHash("sha256").update(sessionId).digest("hex")}.json`,
+  );
 }
 
 function writePrivateRoutingDocument(file: string, data: unknown): void {
@@ -100,7 +175,11 @@ function writePrivateRoutingDocument(file: string, data: unknown): void {
     writeFileSync(temporary, JSON.stringify(data), { flag: "wx", mode: 0o600 });
     renameSync(temporary, file);
   } finally {
-    try { unlinkSync(temporary); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    try {
+      unlinkSync(temporary);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
   }
 }
 
@@ -113,36 +192,73 @@ function readPrivateRoutingDocument(file: string): unknown {
   const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size > 16_384 || (typeof process.getuid === "function" && (stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0))) {
+    if (
+      !stat.isFile() ||
+      stat.size > 16_384 ||
+      (typeof process.getuid === "function" &&
+        (stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0))
+    ) {
       throw new Error("Session routing descriptor must be a private owner-controlled file");
     }
     return JSON.parse(readFileSync(fd, "utf8"));
-  } finally { closeSync(fd); }
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function readSessionRoutingProfile(file: string, expectedOwner: string): RoutingProfile {
   const seen = new Set<string>();
   const read = (path: string, owner: string): RoutingProfile => {
-    if (!owner || seen.has(path) || seen.size >= 32) throw new Error("Invalid or cyclic inherited session routing chain");
+    if (!owner || seen.has(path) || seen.size >= 32)
+      throw new Error("Invalid or cyclic inherited session routing chain");
     seen.add(path);
     const document = readPrivateRoutingDocument(path) as any;
     if (document?.kind !== "inherit") return validateRoutingProfile(document, owner);
-    if (document.version !== 1 || document.ownerSessionId !== owner || typeof document.parentFile !== "string" || !isAbsolute(document.parentFile) || typeof document.parentOwner !== "string" || !document.parentOwner || !Number.isSafeInteger(document.revision) || document.revision < 0) throw new Error("Invalid inherited session routing descriptor");
+    if (
+      document.version !== 1 ||
+      document.ownerSessionId !== owner ||
+      typeof document.parentFile !== "string" ||
+      !isAbsolute(document.parentFile) ||
+      typeof document.parentOwner !== "string" ||
+      !document.parentOwner ||
+      !Number.isSafeInteger(document.revision) ||
+      document.revision < 0
+    )
+      throw new Error("Invalid inherited session routing descriptor");
     const parent = read(document.parentFile, document.parentOwner);
-    return validateRoutingProfile({ ...parent, ownerSessionId: owner, revision: parent.revision + document.revision });
+    return validateRoutingProfile({
+      ...parent,
+      ownerSessionId: owner,
+      revision: parent.revision + document.revision,
+    });
   };
   return read(file, expectedOwner);
 }
 
 function agentSHBindingPath(agentDir: string, requestId: string): string {
-  if (!isAbsolute(agentDir) || !/^pi-route-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(requestId)) throw new Error("Invalid private AgentSH routing request identity");
-  return join(agentDir, "state", "session-routing-v1", "requests", `${createHash("sha256").update(requestId).digest("hex")}.json`);
+  if (
+    !isAbsolute(agentDir) ||
+    !/^pi-route-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(requestId)
+  )
+    throw new Error("Invalid private AgentSH routing request identity");
+  return join(
+    agentDir,
+    "state",
+    "session-routing-v1",
+    "requests",
+    `${createHash("sha256").update(requestId).digest("hex")}.json`,
+  );
 }
 
 /** AgentSH already forwards its request ID and shares the caller's agent dir.
  * Bind that existing channel privately, without new tool/wire fields or daemon changes. */
-export function publishAgentSHRoutingBinding(agentDir: string, requestId: string, environment: Record<string, string>): void {
-  const file = environment[SESSION_ROUTING_FILE_ENV], owner = environment[SESSION_ROUTING_OWNER_ENV];
+export function publishAgentSHRoutingBinding(
+  agentDir: string,
+  requestId: string,
+  environment: Record<string, string>,
+): void {
+  const file = environment[SESSION_ROUTING_FILE_ENV],
+    owner = environment[SESSION_ROUTING_OWNER_ENV];
   if (!file || !owner) throw new Error("Missing owning session binding for AgentSH delegation");
   readSessionRoutingProfile(file, owner);
   const destination = agentSHBindingPath(agentDir, requestId);
@@ -150,56 +266,100 @@ export function publishAgentSHRoutingBinding(agentDir: string, requestId: string
 }
 
 export function releaseAgentSHRoutingBinding(agentDir: string, requestId: string): void {
-  try { unlinkSync(agentSHBindingPath(agentDir, requestId)); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") process.stderr.write("[session-routing] Completed request binding cleanup failed\n");
+  try {
+    unlinkSync(agentSHBindingPath(agentDir, requestId));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+      process.stderr.write("[session-routing] Completed request binding cleanup failed\n");
   }
 }
 
 function inheritedIdentity(env: Environment): { file: string; owner: string } | undefined {
-  const file = env[SESSION_ROUTING_FILE_ENV], owner = env[SESSION_ROUTING_OWNER_ENV];
+  const file = env[SESSION_ROUTING_FILE_ENV],
+    owner = env[SESSION_ROUTING_OWNER_ENV];
   if (file === undefined && owner === undefined) {
     const requestId = env.AGENTSH_SUBAGENT_REQUEST_ID;
     if (!env.AGENTSH_SUBAGENT_ID || !requestId?.startsWith("pi-route-")) return undefined;
     const agentDir = env.PI_CODING_AGENT_DIR;
-    if (!agentDir) throw new Error("Bound AgentSH helper has no shared agent directory; refusing fallback");
-    const binding = readPrivateRoutingDocument(agentSHBindingPath(agentDir, requestId)) as { version?: number; ownerSessionId?: string; file?: string } | null;
-    if (!binding || binding.version !== 1 || typeof binding.ownerSessionId !== "string" || !binding.ownerSessionId || typeof binding.file !== "string" || !isAbsolute(binding.file)) throw new Error("Invalid AgentSH owning-session binding");
+    if (!agentDir)
+      throw new Error("Bound AgentSH helper has no shared agent directory; refusing fallback");
+    const binding = readPrivateRoutingDocument(agentSHBindingPath(agentDir, requestId)) as {
+      version?: number;
+      ownerSessionId?: string;
+      file?: string;
+    } | null;
+    if (
+      !binding ||
+      binding.version !== 1 ||
+      typeof binding.ownerSessionId !== "string" ||
+      !binding.ownerSessionId ||
+      typeof binding.file !== "string" ||
+      !isAbsolute(binding.file)
+    )
+      throw new Error("Invalid AgentSH owning-session binding");
     return { file: binding.file, owner: binding.ownerSessionId };
   }
-  if (!file || !isAbsolute(file) || !owner) throw new Error("Incomplete inherited session routing identity; refusing fallback");
+  if (!file || !isAbsolute(file) || !owner)
+    throw new Error("Incomplete inherited session routing identity; refusing fallback");
   return { file, owner };
 }
 
-export function isInheritedSessionRouting(ctx: RoutingContext, env: Environment = process.env): boolean {
+export function isInheritedSessionRouting(
+  ctx: RoutingContext,
+  env: Environment = process.env,
+): boolean {
   const identity = registry.owners.get(ctx.sessionManager)?.parent ?? inheritedIdentity(env);
   return identity !== undefined && identity.owner !== ctx.sessionManager.getSessionId();
 }
 
 /** Bypasses the local registry so an inherited owner's callback cannot recurse. */
-export function readInheritedSessionRoutingProfile(ctx: RoutingContext, env: Environment = process.env): RoutingProfile | undefined {
+export function readInheritedSessionRoutingProfile(
+  ctx: RoutingContext,
+  env: Environment = process.env,
+): RoutingProfile | undefined {
   const identity = registry.owners.get(ctx.sessionManager)?.parent ?? inheritedIdentity(env);
-  if (!identity || identity.owner === ctx.sessionManager.getSessionId() || registry.overrides!.has(ctx.sessionManager)) return undefined;
+  if (
+    !identity ||
+    identity.owner === ctx.sessionManager.getSessionId() ||
+    registry.overrides!.has(ctx.sessionManager)
+  )
+    return undefined;
   const local = registry.owners.get(ctx.sessionManager);
   const profile = local
     ? readSessionRoutingProfile(local.file, ctx.sessionManager.getSessionId())
     : readSessionRoutingProfile(identity.file, identity.owner);
   const previous = registry.seen.get(ctx.sessionManager);
-  if (previous?.ownerSessionId === profile.ownerSessionId && (profile.revision < previous.revision ||
-    (profile.revision === previous.revision && (profile.providerId !== previous.providerId || profile.accountId !== previous.accountId)))) {
-    throw new Error("Session routing revision regressed or changed without a new revision; refusing fallback");
+  if (
+    previous?.ownerSessionId === profile.ownerSessionId &&
+    (profile.revision < previous.revision ||
+      (profile.revision === previous.revision &&
+        (profile.providerId !== previous.providerId || profile.accountId !== previous.accountId)))
+  ) {
+    throw new Error(
+      "Session routing revision regressed or changed without a new revision; refusing fallback",
+    );
   }
   registry.seen.set(ctx.sessionManager, profile);
   return profile;
 }
 
-export function registerSessionRouting(ctx: RoutingContext, registration: Registration): () => void {
-  if (!isAbsolute(registration.file)) throw new Error("Session routing registration requires an absolute descriptor path");
+export function registerSessionRouting(
+  ctx: RoutingContext,
+  registration: Registration,
+): () => void {
+  if (!isAbsolute(registration.file))
+    throw new Error("Session routing registration requires an absolute descriptor path");
   registry.owners.set(ctx.sessionManager, registration);
-  return () => { if (registry.owners.get(ctx.sessionManager) === registration) registry.owners.delete(ctx.sessionManager); };
+  return () => {
+    if (registry.owners.get(ctx.sessionManager) === registration)
+      registry.owners.delete(ctx.sessionManager);
+  };
 }
 
-export function getSessionRoutingProfile(ctx: RoutingContext, env: Environment = process.env): RoutingProfile | undefined {
+export function getSessionRoutingProfile(
+  ctx: RoutingContext,
+  env: Environment = process.env,
+): RoutingProfile | undefined {
   const owner = registry.owners.get(ctx.sessionManager);
   if (owner) {
     const profile = owner.getProfile();
@@ -208,32 +368,52 @@ export function getSessionRoutingProfile(ctx: RoutingContext, env: Environment =
   return readInheritedSessionRoutingProfile(ctx, env);
 }
 
-export async function prepareSessionRoutingRequest(ctx: RoutingContext): Promise<RoutingProfile | undefined> {
+export async function prepareSessionRoutingRequest(
+  ctx: RoutingContext,
+): Promise<RoutingProfile | undefined> {
   const owner = registry.owners.get(ctx.sessionManager);
-  const profile = owner?.prepareRequest ? await owner.prepareRequest() : getSessionRoutingProfile(ctx);
-  if (owner && profile === undefined) throw new Error("Session routing is not ready or failed; request blocked without provider/account fallback");
+  const profile = owner?.prepareRequest
+    ? await owner.prepareRequest()
+    : getSessionRoutingProfile(ctx);
+  if (owner && profile === undefined)
+    throw new Error(
+      "Session routing is not ready or failed; request blocked without provider/account fallback",
+    );
   return profile === undefined ? undefined : validateRoutingProfile(profile);
 }
 
-export function sessionRoutingEnvironment(ctx: RoutingContext, env: Environment = process.env): Record<string, string> {
+export function sessionRoutingEnvironment(
+  ctx: RoutingContext,
+  env: Environment = process.env,
+): Record<string, string> {
   // Bind the immediate session, so future local overrides affect its subtree only.
   const local = registry.owners.get(ctx.sessionManager);
   if (local) {
     const profile = getSessionRoutingProfile(ctx, env);
-    if (!profile) throw new Error("Session routing is not ready; refusing an unbound helper launch");
+    if (!profile)
+      throw new Error("Session routing is not ready; refusing an unbound helper launch");
     readSessionRoutingProfile(local.file, ctx.sessionManager.getSessionId());
-    return { [SESSION_ROUTING_FILE_ENV]: local.file, [SESSION_ROUTING_OWNER_ENV]: ctx.sessionManager.getSessionId() };
+    return {
+      [SESSION_ROUTING_FILE_ENV]: local.file,
+      [SESSION_ROUTING_OWNER_ENV]: ctx.sessionManager.getSessionId(),
+    };
   }
   const inherited = inheritedIdentity(env);
   if (inherited && inherited.owner !== ctx.sessionManager.getSessionId()) {
     readSessionRoutingProfile(inherited.file, inherited.owner);
-    return { [SESSION_ROUTING_FILE_ENV]: inherited.file, [SESSION_ROUTING_OWNER_ENV]: inherited.owner };
+    return {
+      [SESSION_ROUTING_FILE_ENV]: inherited.file,
+      [SESSION_ROUTING_OWNER_ENV]: inherited.owner,
+    };
   }
   const registration = registry.owners.get(ctx.sessionManager);
   if (!registration) return {};
   const profile = getSessionRoutingProfile(ctx, env);
   if (!profile) throw new Error("Session routing is not ready; refusing an unbound helper launch");
-  return { [SESSION_ROUTING_FILE_ENV]: registration.file, [SESSION_ROUTING_OWNER_ENV]: profile.ownerSessionId };
+  return {
+    [SESSION_ROUTING_FILE_ENV]: registration.file,
+    [SESSION_ROUTING_OWNER_ENV]: profile.ownerSessionId,
+  };
 }
 
 /** The provider of the session's selected physical model, if it has one. */
@@ -249,10 +429,13 @@ export function resolveSessionProvider(ctx: RoutingContext, fallbackProvider?: s
   const physical = physicalSessionProvider(ctx);
   if (physical) return physical;
   const profile = getSessionRoutingProfile(ctx);
-  if (registry.owners.has(ctx.sessionManager) && !profile) throw new Error("Session routing is unavailable; refusing provider fallback");
+  if (registry.owners.has(ctx.sessionManager) && !profile)
+    throw new Error("Session routing is unavailable; refusing provider fallback");
   if (profile) return profile.providerId;
   if (fallbackProvider && !virtualProviders.has(fallbackProvider)) return fallbackProvider;
-  throw new Error("No effective physical session provider; select a provider/model before starting helper work");
+  throw new Error(
+    "No effective physical session provider; select a provider/model before starting helper work",
+  );
 }
 
 /** The session's selected physical model, if it has one. */
@@ -263,32 +446,49 @@ export function getConfiguredSessionModelReference(
   return provider ? { provider, id: ctx.model!.id } : undefined;
 }
 
-export function resolveSessionPhysicalModelReference(ctx: RoutingContext, snapshot?: RoutingProfile): { provider: string; id: string } {
+export function resolveSessionPhysicalModelReference(
+  ctx: RoutingContext,
+  snapshot?: RoutingProfile,
+): { provider: string; id: string } {
   const reference = getConfiguredSessionModelReference(ctx);
-  if (!reference) throw new Error("The selected virtual model has no physical session role; refusing helper fallback");
-  const provider = physicalSessionProvider(ctx) ?? (snapshot
-    ? validateRoutingProfile(snapshot).providerId
-    : resolveSessionProvider(ctx, reference.provider));
+  if (!reference)
+    throw new Error(
+      "The selected virtual model has no physical session role; refusing helper fallback",
+    );
+  const provider =
+    physicalSessionProvider(ctx) ??
+    (snapshot
+      ? validateRoutingProfile(snapshot).providerId
+      : resolveSessionProvider(ctx, reference.provider));
   return { provider, id: reference.id };
 }
 
-export function resolveSessionModelSelector(ctx: RoutingContext, selector: string, snapshot?: RoutingProfile): string {
-  if (typeof selector !== "string" || !selector || /\s/.test(selector)) throw new Error("Invalid helper model selector");
+export function resolveSessionModelSelector(
+  ctx: RoutingContext,
+  selector: string,
+  snapshot?: RoutingProfile,
+): string {
+  if (typeof selector !== "string" || !selector || /\s/.test(selector))
+    throw new Error("Invalid helper model selector");
   const slash = selector.indexOf("/");
   const legacyProvider = slash > 0 ? selector.slice(0, slash) : undefined;
   const model = slash > 0 ? selector.slice(slash + 1) : selector;
   if (!model) throw new Error("Helper model ID is required");
-  const provider = physicalSessionProvider(ctx) ?? (snapshot
-    ? validateRoutingProfile(snapshot).providerId
-    : resolveSessionProvider(ctx, legacyProvider));
+  const provider =
+    physicalSessionProvider(ctx) ??
+    (snapshot
+      ? validateRoutingProfile(snapshot).providerId
+      : resolveSessionProvider(ctx, legacyProvider));
   return `${provider}/${model}`;
 }
 
 export function onSessionRoutingChanged(ctx: RoutingContext, callback: () => void): () => void {
   let listeners = registry.listeners.get(ctx.sessionManager);
-  if (!listeners) registry.listeners.set(ctx.sessionManager, listeners = new Set());
+  if (!listeners) registry.listeners.set(ctx.sessionManager, (listeners = new Set()));
   listeners.add(callback);
-  return () => { listeners.delete(callback); };
+  return () => {
+    listeners.delete(callback);
+  };
 }
 
 export function notifySessionRoutingChanged(ctx: RoutingContext): void {

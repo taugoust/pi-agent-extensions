@@ -94,7 +94,9 @@ export function stampSettingsFilePath(): string {
   return join(getAgentDir(), STAMP_SETTINGS_FILE);
 }
 
-export function normalizeStampSettingsDocument(value: unknown): NormalizedStampSettings | undefined {
+export function normalizeStampSettingsDocument(
+  value: unknown,
+): NormalizedStampSettings | undefined {
   if (!isRecord(value)) return undefined;
   const settings: StampSettings = { ...DEFAULT_STAMP_SETTINGS };
   const sources = builtInSources();
@@ -143,7 +145,11 @@ export function normalizeStampSettingsDocument(value: unknown): NormalizedStampS
     sources.showOutputThroughput = "user";
   }
   if (Object.hasOwn(value, "assistantMetadata")) {
-    if (!ASSISTANT_METADATA_MODES.includes(value.assistantMetadata as StampSettings["assistantMetadata"])) {
+    if (
+      !ASSISTANT_METADATA_MODES.includes(
+        value.assistantMetadata as StampSettings["assistantMetadata"],
+      )
+    ) {
       return undefined;
     }
     settings.assistantMetadata = value.assistantMetadata as StampSettings["assistantMetadata"];
@@ -233,10 +239,15 @@ export async function loadStampSettings(
   }
 }
 
-export function createStampSettingsRuntime(options: StampSettingsRuntimeOptions = {}): StampSettingsRuntime {
+export function createStampSettingsRuntime(
+  options: StampSettingsRuntimeOptions = {},
+): StampSettingsRuntime {
   let resolvedPath: string | undefined;
   const getPath = () => {
-    resolvedPath ??= typeof options.path === "function" ? options.path() : (options.path ?? stampSettingsFilePath());
+    resolvedPath ??=
+      typeof options.path === "function"
+        ? options.path()
+        : (options.path ?? stampSettingsFilePath());
     return resolvedPath;
   };
   const operations: StampSettingsOperations = {
@@ -328,7 +339,10 @@ async function publishSettingsDocument(
     throw new Error(`settings document exceeds ${MAX_STAMP_SETTINGS_BYTES} bytes`);
   }
   await mkdir(dirname(path), { recursive: true });
-  const temporaryPath = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+  const temporaryPath = join(
+    dirname(path),
+    `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`,
+  );
   try {
     await operations.writeFile(temporaryPath, contents, {
       encoding: "utf8",
@@ -367,7 +381,10 @@ async function readSettingsDocument(path: string, signal?: AbortSignal): Promise
     const buffer = Buffer.alloc(MAX_STAMP_SETTINGS_BYTES + 1);
     let offset = 0;
     while (offset < buffer.length) {
-      const result = await abortable(handle.read(buffer, offset, buffer.length - offset, offset), signal);
+      const result = await abortable(
+        handle.read(buffer, offset, buffer.length - offset, offset),
+        signal,
+      );
       if (result.bytesRead === 0) break;
       offset += result.bytesRead;
     }

@@ -108,12 +108,12 @@ nix build "git+file://$PWD?rev=$base#checks.x86_64-linux.sandbox" \
 
 Sanitized matching base/current failure evidence:
 
-| Check | Both base and task tree |
-| --- | --- |
-| `sandbox` | `ERR_MODULE_NOT_FOUND`: `@earendil-works/pi-ai` from compiled `subagent/guidance-extension.js` |
+| Check               | Both base and task tree                                                                                        |
+| ------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `sandbox`           | `ERR_MODULE_NOT_FOUND`: `@earendil-works/pi-ai` from compiled `subagent/guidance-extension.js`                 |
 | `goal-fresh-prompt` | `MODULE_NOT_FOUND`: `../workflows/goal/runtime.ts` from the standalone `goal-progress-unification.mjs` fixture |
-| `slow-mode` | `MODULE_NOT_FOUND`: `../shared/extension-defaults.js` from compiled `slow-mode/index.js` |
-| `fetch` | Builder exits 1; retained `nix log` is empty for both base and task derivations |
+| `slow-mode`         | `MODULE_NOT_FOUND`: `../shared/extension-defaults.js` from compiled `slow-mode/index.js`                       |
+| `fetch`             | Builder exits 1; retained `nix log` is empty for both base and task derivations                                |
 
 No unrelated fixture repairs are included. This comparison is not a green full-flake result or waived acceptance.
 

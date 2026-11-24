@@ -16,7 +16,10 @@ const AFTER_MIDNIGHT_UTC = Date.UTC(2026, 6, 30, 0, 1, 2);
 const UTC_ENV = { localTimeZone: "UTC" } as const;
 
 test("formatStampLabel preserves the invariant Phase 1 default", () => {
-  assert.equal(formatStampLabel(AFTER_MIDNIGHT_UTC, undefined, DEFAULT_STAMP_SETTINGS, UTC_ENV), "00:01:02");
+  assert.equal(
+    formatStampLabel(AFTER_MIDNIGHT_UTC, undefined, DEFAULT_STAMP_SETTINGS, UTC_ENV),
+    "00:01:02",
+  );
   assert.equal(
     formatStampLabel(AFTER_MIDNIGHT_UTC, BEFORE_MIDNIGHT_UTC, DEFAULT_STAMP_SETTINGS, UTC_ENV),
     "2026-07-30 · 00:01:02",
@@ -73,7 +76,10 @@ test("day changes use the selected time zone rather than elapsed duration", () =
   const dateLineBefore = Date.UTC(2026, 6, 29, 9, 59, 58);
   const dateLineAfter = Date.UTC(2026, 6, 29, 10, 0, 2);
   const kiritimati = { ...DEFAULT_STAMP_SETTINGS, timeZone: "Pacific/Kiritimati" } as const;
-  assert.equal(formatStampLabel(dateLineAfter, dateLineBefore, kiritimati), "2026-07-30 · 00:00:02");
+  assert.equal(
+    formatStampLabel(dateLineAfter, dateLineBefore, kiritimati),
+    "2026-07-30 · 00:00:02",
+  );
 });
 
 test("system and explicit locales use Intl formatting with bounded semantic options", () => {
@@ -83,7 +89,10 @@ test("system and explicit locales use Intl formatting with bounded semantic opti
     locale: "system",
     timeZone: "UTC",
   };
-  assert.equal(formatStampLabel(AFTER_MIDNIGHT_UTC, undefined, settings, { systemLocale: "en-US" }), "12:01:02 AM");
+  assert.equal(
+    formatStampLabel(AFTER_MIDNIGHT_UTC, undefined, settings, { systemLocale: "en-US" }),
+    "12:01:02 AM",
+  );
   const localized = formatStampLabel(
     AFTER_MIDNIGHT_UTC,
     undefined,
@@ -115,7 +124,10 @@ test("date-time formatter construction stays constant across repeated formatting
       timeZone: "Indian/Chagos",
     } as const;
     for (let index = 0; index < 20; index += 1) {
-      assert.equal(formatStampLabel(AFTER_MIDNIGHT_UTC, BEFORE_MIDNIGHT_UTC, invariant), "06:01:02");
+      assert.equal(
+        formatStampLabel(AFTER_MIDNIGHT_UTC, BEFORE_MIDNIGHT_UTC, invariant),
+        "06:01:02",
+      );
     }
     assert.equal(constructions, 1);
 
@@ -167,7 +179,10 @@ test("locale and time-zone values canonicalize or reject exactly", () => {
 
 test("formatStampLabel rejects invalid timestamps", () => {
   assert.equal(formatStampLabel(Number.NaN, undefined, DEFAULT_STAMP_SETTINGS, UTC_ENV), undefined);
-  assert.equal(formatStampLabel(Number.POSITIVE_INFINITY, undefined, DEFAULT_STAMP_SETTINGS, UTC_ENV), undefined);
+  assert.equal(
+    formatStampLabel(Number.POSITIVE_INFINITY, undefined, DEFAULT_STAMP_SETTINGS, UTC_ENV),
+    undefined,
+  );
   assert.equal(formatStampLabel(10 ** 20, undefined, DEFAULT_STAMP_SETTINGS, UTC_ENV), undefined);
 });
 
@@ -179,13 +194,24 @@ test("response timing modes preserve the default and compose with date context",
     completedAt: AFTER_MIDNIGHT_UTC + 3_200,
     firstContentAt: AFTER_MIDNIGHT_UTC + 800,
   };
-  assert.equal(formatMessageStampLabel(input, DEFAULT_STAMP_SETTINGS, UTC_ENV), "2026-07-30 · 00:01:02 · 3.2s");
   assert.equal(
-    formatMessageStampLabel(input, { ...DEFAULT_STAMP_SETTINGS, responseTiming: "duration" }, UTC_ENV),
+    formatMessageStampLabel(input, DEFAULT_STAMP_SETTINGS, UTC_ENV),
     "2026-07-30 · 00:01:02 · 3.2s",
   );
   assert.equal(
-    formatMessageStampLabel(input, { ...DEFAULT_STAMP_SETTINGS, responseTiming: "detailed" }, UTC_ENV),
+    formatMessageStampLabel(
+      input,
+      { ...DEFAULT_STAMP_SETTINGS, responseTiming: "duration" },
+      UTC_ENV,
+    ),
+    "2026-07-30 · 00:01:02 · 3.2s",
+  );
+  assert.equal(
+    formatMessageStampLabel(
+      input,
+      { ...DEFAULT_STAMP_SETTINGS, responseTiming: "detailed" },
+      UTC_ENV,
+    ),
     "2026-07-30 · 00:01:02 · first 0.8s · total 3.2s",
   );
 });
@@ -200,7 +226,10 @@ test("response timing labels unavailable first content without fabricating legac
     ),
     "00:01:02 · first n/a · total 1.5s",
   );
-  assert.equal(formatMessageStampLabel({ timestamp: AFTER_MIDNIGHT_UTC }, detailed, UTC_ENV), "00:01:02");
+  assert.equal(
+    formatMessageStampLabel({ timestamp: AFTER_MIDNIGHT_UTC }, detailed, UTC_ENV),
+    "00:01:02",
+  );
   assert.equal(
     formatMessageStampLabel(
       {

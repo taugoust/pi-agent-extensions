@@ -21,13 +21,32 @@ const profile = (model = "scout-v1", thinking = "high", body = "PROFILE_SCOUT_IN
 
 const executeFile = promisify(execFile);
 async function fixtureGit(cwd, ...args) {
-  return executeFile("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd, timeout: 10000,
-    env: { PATH: process.env.PATH, HOME: cwd, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" } });
+  return executeFile("git", ["-c", "core.hooksPath=/dev/null", ...args], {
+    cwd,
+    timeout: 10000,
+    env: {
+      PATH: process.env.PATH,
+      HOME: cwd,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_TERMINAL_PROMPT: "0",
+    },
+  });
 }
-async function startParent(root, scenario, {
-  projectTrust = false, agentSH = false, startupDefault = false, gitRepo = false, persist = false,
-} = {}) {
-  const home = join(root, "home"), agentDir = join(home, "agent"), cwd = join(root, "workspace");
+async function startParent(
+  root,
+  scenario,
+  {
+    projectTrust = false,
+    agentSH = false,
+    startupDefault = false,
+    gitRepo = false,
+    persist = false,
+  } = {},
+) {
+  const home = join(root, "home"),
+    agentDir = join(home, "agent"),
+    cwd = join(root, "workspace");
   await mkdir(join(agentDir, "agents"), { recursive: true });
   await mkdir(join(agentDir, "extensions"), { recursive: true });
   await mkdir(cwd, { recursive: true });
@@ -35,14 +54,39 @@ async function startParent(root, scenario, {
     await fixtureGit(cwd, "init", "-b", "main");
     await writeFile(join(cwd, "tracked"), "offline fixture\n");
     await fixtureGit(cwd, "add", "tracked");
-    await fixtureGit(cwd, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture");
-    await writeFile(join(agentDir, "pi-worktree.json"), JSON.stringify({ worktreeRoot: join(root, "worktrees") }));
+    await fixtureGit(
+      cwd,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "-m",
+      "fixture",
+    );
+    await writeFile(
+      join(agentDir, "pi-worktree.json"),
+      JSON.stringify({ worktreeRoot: join(root, "worktrees") }),
+    );
   }
-  await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultModel: "gpt-6-astra", defaultProvider: "offline-profile-fixture", retry: { enabled: false }, compaction: { enabled: false }, defaultProjectTrust: "never", extensions: [fixture] }));
-  await writeFile(join(agentDir, "model-tiers.json"), JSON.stringify({
-    "offline-profile-fixture": { cheap: "gpt-6-luna", expensive: "gpt-6.1-sol" },
-    "offline-routing-fixture": { cheap: "gpt-6-luna", expensive: "gpt-6.1-sol" },
-  }));
+  await writeFile(
+    join(agentDir, "settings.json"),
+    JSON.stringify({
+      defaultModel: "gpt-6-astra",
+      defaultProvider: "offline-profile-fixture",
+      retry: { enabled: false },
+      compaction: { enabled: false },
+      defaultProjectTrust: "never",
+      extensions: [fixture],
+    }),
+  );
+  await writeFile(
+    join(agentDir, "model-tiers.json"),
+    JSON.stringify({
+      "offline-profile-fixture": { cheap: "gpt-6-luna", expensive: "gpt-6.1-sol" },
+      "offline-routing-fixture": { cheap: "gpt-6-luna", expensive: "gpt-6.1-sol" },
+    }),
+  );
   await writeFile(join(agentDir, "agents", "fixture-scout.md"), profile());
   const extendedProfile = [
     "---",
@@ -54,48 +98,117 @@ async function startParent(root, scenario, {
     "",
   ].join("\n");
   await writeFile(join(agentDir, "agents", "fixture-extended.md"), extendedProfile);
-  const log = join(root, "dispatch.jsonl"), stateRoot = join(root, "worker-state");
+  const log = join(root, "dispatch.jsonl"),
+    stateRoot = join(root, "worker-state");
   const launcher = process.env.PI_TUI_WORKER_LAUNCHER;
-  if (!launcher) throw new Error("Set PI_TUI_WORKER_LAUNCHER to the immutable Nix pi-tui-worker executable for native acceptance tests");
+  if (!launcher)
+    throw new Error(
+      "Set PI_TUI_WORKER_LAUNCHER to the immutable Nix pi-tui-worker executable for native acceptance tests",
+    );
   const env = {
-    PATH: process.env.PATH ?? "", HOME: home, TMPDIR: root,
+    PATH: process.env.PATH ?? "",
+    HOME: home,
+    TMPDIR: root,
     // Inherit genuine placement from this driver's fixture-owned calling pane.
     ...(process.env.TMUX ? { TMUX: process.env.TMUX, TMUX_PANE: process.env.TMUX_PANE } : {}),
-    XDG_CONFIG_HOME: join(home, "config"), XDG_CACHE_HOME: join(home, "cache"),
-    PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0",
-    PROFILE_FIXTURE_LOG: log, PROFILE_SCENARIO: JSON.stringify(scenario), PI_TUI_WORKER_LAUNCHER: launcher,
+    XDG_CONFIG_HOME: join(home, "config"),
+    XDG_CACHE_HOME: join(home, "cache"),
+    PI_CODING_AGENT_DIR: agentDir,
+    PI_OFFLINE: "1",
+    PI_SKIP_VERSION_CHECK: "1",
+    PI_TELEMETRY: "0",
+    PROFILE_FIXTURE_LOG: log,
+    PROFILE_SCENARIO: JSON.stringify(scenario),
+    PI_TUI_WORKER_LAUNCHER: launcher,
     PI_SUBAGENT_BIN: launcher, // dedicated foreground executor uses the existing raw invocation seam
-    PI_TUI_WORKER_LAUNCH_MODE: process.env.PI_TUI_WORKER_LAUNCH_MODE ?? "none", PI_TUI_WORKER_STATE_ROOT: stateRoot,
+    PI_TUI_WORKER_LAUNCH_MODE: process.env.PI_TUI_WORKER_LAUNCH_MODE ?? "none",
+    PI_TUI_WORKER_STATE_ROOT: stateRoot,
     ...(projectTrust ? { PROFILE_FIXTURE_UNTRUSTED_PROJECT: "1" } : {}),
     ...(agentSH ? { PI_AGENTSH_MOCK_SUPERVISOR: "fixture", PROFILE_FIXTURE_AGENTSH: "1" } : {}),
   };
   if (projectTrust) {
     await mkdir(join(cwd, ".pi", "agents"), { recursive: true });
-    await writeFile(join(cwd, ".pi", "settings.json"), JSON.stringify({ retry: { enabled: false } }));
-    await writeFile(join(cwd, ".pi", "agents", "fixture-project.md"), `---\nname: fixture-project\ndescription: Project trust fixture\n---\nPROJECT_PROFILE_INSTRUCTION\n`);
+    await writeFile(
+      join(cwd, ".pi", "settings.json"),
+      JSON.stringify({ retry: { enabled: false } }),
+    );
+    await writeFile(
+      join(cwd, ".pi", "agents", "fixture-project.md"),
+      `---\nname: fixture-project\ndescription: Project trust fixture\n---\nPROJECT_PROFILE_INSTRUCTION\n`,
+    );
   }
   const session = persist ? ["--session", join(root, "session.jsonl")] : ["--no-session"];
-  const args = ["--mode", "rpc", "--offline", ...session, "--no-skills",
-    "--extension", fixture, "--extension", extension,
-    ...(startupDefault ? [] : ["--provider", "offline-profile-fixture", "--model", "parent"])];
+  const args = [
+    "--mode",
+    "rpc",
+    "--offline",
+    ...session,
+    "--no-skills",
+    "--extension",
+    fixture,
+    "--extension",
+    extension,
+    ...(startupDefault ? [] : ["--provider", "offline-profile-fixture", "--model", "parent"]),
+  ];
   const child = spawn(binary, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
-  const events = [], errors = [], bus = new EventEmitter();
+  const events = [],
+    errors = [],
+    bus = new EventEmitter();
   let exited;
-  const exitPromise = new Promise((resolveExit) => child.once("exit", (code, signal) => { exited = { code, signal }; bus.emit("change"); resolveExit(exited); }));
-  const stdout = createInterface({ input: child.stdout }), stderr = createInterface({ input: child.stderr });
-  stdout.on("line", (line) => { try { events.push(JSON.parse(line)); } catch { errors.push(line); } bus.emit("change"); });
-  stderr.on("line", (line) => { errors.push(line); bus.emit("change"); });
-  const wait = (predicate, label, timeoutMs = 20_000) => new Promise((resolveWait, reject) => {
-    const timer = setTimeout(() => finish(new Error(`Timeout waiting for ${label}: ${errors.join("\n")}; events=${JSON.stringify(events.filter((event) => event.type.includes("tool") || event.type.includes("agent_") || event.message?.role === "toolResult").slice(-20))}`)), timeoutMs);
-    const check = () => { const value = predicate(); if (value) finish(undefined, value); else if (exited) finish(new Error(`Pi exited ${JSON.stringify(exited)}: ${errors.join("\n")}`)); };
-    const finish = (error, value) => { clearTimeout(timer); bus.off("change", check); error ? reject(error) : resolveWait(value); };
-    bus.on("change", check); check();
+  const exitPromise = new Promise((resolveExit) =>
+    child.once("exit", (code, signal) => {
+      exited = { code, signal };
+      bus.emit("change");
+      resolveExit(exited);
+    }),
+  );
+  const stdout = createInterface({ input: child.stdout }),
+    stderr = createInterface({ input: child.stderr });
+  stdout.on("line", (line) => {
+    try {
+      events.push(JSON.parse(line));
+    } catch {
+      errors.push(line);
+    }
+    bus.emit("change");
   });
+  stderr.on("line", (line) => {
+    errors.push(line);
+    bus.emit("change");
+  });
+  const wait = (predicate, label, timeoutMs = 20_000) =>
+    new Promise((resolveWait, reject) => {
+      const timer = setTimeout(
+        () =>
+          finish(
+            new Error(
+              `Timeout waiting for ${label}: ${errors.join("\n")}; events=${JSON.stringify(events.filter((event) => event.type.includes("tool") || event.type.includes("agent_") || event.message?.role === "toolResult").slice(-20))}`,
+            ),
+          ),
+        timeoutMs,
+      );
+      const check = () => {
+        const value = predicate();
+        if (value) finish(undefined, value);
+        else if (exited)
+          finish(new Error(`Pi exited ${JSON.stringify(exited)}: ${errors.join("\n")}`));
+      };
+      const finish = (error, value) => {
+        clearTimeout(timer);
+        bus.off("change", check);
+        error ? reject(error) : resolveWait(value);
+      };
+      bus.on("change", check);
+      check();
+    });
   let requestId = 0;
   const rpc = async (type, fields = {}) => {
     const id = `profile-${++requestId}`;
     child.stdin.write(`${JSON.stringify({ id, type, ...fields })}\n`);
-    const response = await wait(() => events.find((event) => event.type === "response" && event.id === id), `${type} response`);
+    const response = await wait(
+      () => events.find((event) => event.type === "response" && event.id === id),
+      `${type} response`,
+    );
     assert.equal(response.success, true, JSON.stringify(response));
     return response.data;
   };
@@ -105,44 +218,66 @@ async function startParent(root, scenario, {
     // Completion notifications can start another parent turn between prompts.
     // Queue safely and await this user message's settlement, not an earlier turn.
     await rpc("prompt", { message, streamingBehavior: "followUp" });
-    await wait(() => {
-      const isThisPrompt = (event, index) =>
-        index >= start
-        && event.type === "message_end"
-        && event.message?.role === "user"
-        && event.message.content?.some(part => part.type === "text" && part.text === message);
-      const user = events.findIndex(isThisPrompt);
-      return user >= 0 && events.slice(user + 1).some(event => event.type === "agent_settled");
-    }, "prompt settlement", timeoutMs);
+    await wait(
+      () => {
+        const isThisPrompt = (event, index) =>
+          index >= start &&
+          event.type === "message_end" &&
+          event.message?.role === "user" &&
+          event.message.content?.some((part) => part.type === "text" && part.text === message);
+        const user = events.findIndex(isThisPrompt);
+        return user >= 0 && events.slice(user + 1).some((event) => event.type === "agent_settled");
+      },
+      "prompt settlement",
+      timeoutMs,
+    );
   };
   const close = async () => {
     if (!exited) child.kill("SIGTERM");
     await exitPromise;
-    stdout.close(); stderr.close();
+    stdout.close();
+    stderr.close();
   };
   return { agentDir, cwd, log, stateRoot, events, errors, rpc, promptAndWait, close };
 }
 
 async function dispatches(log) {
-  try { return (await readFile(log, "utf8")).trim().split("\n").filter(Boolean).map(JSON.parse); }
-  catch (error) { if (error?.code === "ENOENT") return []; throw error; }
+  try {
+    return (await readFile(log, "utf8")).trim().split("\n").filter(Boolean).map(JSON.parse);
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
 }
 async function taskRecords(stateRoot) {
   // Ordinary foreground workers and managed Goal workers use their respective
   // real managers. Inventory both so cleanup proves no fixture group is missed.
-  const groups = (await Promise.all(["headless-groups", "groups"].map(async (directory) => {
-    const root = join(stateRoot, directory);
-    const files = await readdir(root).catch((error) => error?.code === "ENOENT" ? [] : Promise.reject(error));
-    return Promise.all(files.filter((file) => /^subagent-job-[a-f0-9]{24}\.json$/.test(file)).map(async (file) =>
-      JSON.parse(await readFile(join(root, file), "utf8"))));
-  }))).flat();
-  return groups.flatMap((group) => group.children.map((child) => ({ ...child, groupId: group.id, groupStatus: group.status })));
+  const groups = (
+    await Promise.all(
+      ["headless-groups", "groups"].map(async (directory) => {
+        const root = join(stateRoot, directory);
+        const files = await readdir(root).catch((error) =>
+          error?.code === "ENOENT" ? [] : Promise.reject(error),
+        );
+        return Promise.all(
+          files
+            .filter((file) => /^subagent-job-[a-f0-9]{24}\.json$/.test(file))
+            .map(async (file) => JSON.parse(await readFile(join(root, file), "utf8"))),
+        );
+      }),
+    )
+  ).flat();
+  return groups.flatMap((group) =>
+    group.children.map((child) => ({ ...child, groupId: group.id, groupStatus: group.status })),
+  );
 }
 async function cleanup(instance) {
   try {
     const groups = new Set((await taskRecords(instance.stateRoot)).map((task) => task.groupId));
     for (const groupId of groups) await instance.promptAndWait(`reap-group: ${groupId}`);
-  } finally { await instance.close(); }
+  } finally {
+    await instance.close();
+  }
 }
 function activeTools(request) {
   const active = new Set();
@@ -154,7 +289,11 @@ function activeTools(request) {
 }
 async function assertOffline(log) {
   const rows = await dispatches(log);
-  assert.equal(rows.some((row) => row.network !== false), false, "fixture attempted network I/O");
+  assert.equal(
+    rows.some((row) => row.network !== false),
+    false,
+    "fixture attempted network I/O",
+  );
   return rows;
 }
 
@@ -164,13 +303,19 @@ try {
   // Pi owns the top-level default. Changing a startup preference does not
   // require an extension to forcibly rewrite selected or resumed sessions.
   for (const startupDefault of [true, false]) {
-    const instance = await startParent(join(root, `top-level-${startupDefault}`), { params: { operation: "profiles" } }, { startupDefault });
+    const instance = await startParent(
+      join(root, `top-level-${startupDefault}`),
+      { params: { operation: "profiles" } },
+      { startupDefault },
+    );
     try {
       await instance.promptAndWait("inspect top-level selection");
-      const requests = (await assertOffline(instance.log)).filter(row => row.role === "parent");
+      const requests = (await assertOffline(instance.log)).filter((row) => row.role === "parent");
       assert(requests.length > 0);
-      assert(requests.every(row => row.model === (startupDefault ? "gpt-6-astra" : "parent")));
-    } finally { await cleanup(instance); }
+      assert(requests.every((row) => row.model === (startupDefault ? "gpt-6-astra" : "parent")));
+    } finally {
+      await cleanup(instance);
+    }
   }
   // Exercise the actual dedicated-goal launch/resume path, not just profile
   // overlays and executor unit seams. Its child Goal engines and state are
@@ -184,25 +329,45 @@ try {
       if (routed) await instance.rpc("prompt", { message: `/subagent-provider ${provider}` });
       await instance.promptAndWait("run dedicated coordinator probe", 60_000);
       const rows = await assertOffline(instance.log);
-      const proof = rows.find(row => row.event === "dedicated_probe");
-      const result = instance.events.findLast(event => event.type === "message_end" && event.message?.role === "toolResult" && event.message.toolName === "fixture_dedicated_probe");
-      assert(proof, `dedicated proof absent: ${JSON.stringify(result)}; errors=${instance.errors.join("\\n")}; child=${await readFile(`${instance.log}.stderr`, "utf8").catch(() => "no stderr")}`);
+      const proof = rows.find((row) => row.event === "dedicated_probe");
+      const result = instance.events.findLast(
+        (event) =>
+          event.type === "message_end" &&
+          event.message?.role === "toolResult" &&
+          event.message.toolName === "fixture_dedicated_probe",
+      );
+      assert(
+        proof,
+        `dedicated proof absent: ${JSON.stringify(result)}; errors=${instance.errors.join("\\n")}; child=${await readFile(`${instance.log}.stderr`, "utf8").catch(() => "no stderr")}`,
+      );
       assert.notEqual(result?.message?.isError, true);
       assert.equal(proof.exactChildFencing, true);
       assert.equal(proof.verifiedStopped, true);
       assert.equal(proof.sameManagedWorker, true);
       assert.equal(proof.activationChanged, true);
       for (const sample of [proof.first, proof.resumed]) {
-        const request = rows.filter(row => row.role === "child" && row.childId === sample.child.childId)[sample.dispatchIndex];
-        assert(request, `missing actual dedicated request for ${sample.child.childId} at ${sample.dispatchIndex}`);
+        const request = rows.filter(
+          (row) => row.role === "child" && row.childId === sample.child.childId,
+        )[sample.dispatchIndex];
+        assert(
+          request,
+          `missing actual dedicated request for ${sample.child.childId} at ${sample.dispatchIndex}`,
+        );
         assert.equal(request.provider, provider);
         assert.equal(request.model, "gpt-6.1-sol");
         assert.equal(request.reasoning, "high");
         assert.match(JSON.stringify(request), /single-coordinator execution controls/);
-        assert.doesNotMatch(JSON.stringify(request), /CHANGED_COORDINATOR_MUST_NOT_REPLACE_RETAINED/);
+        assert.doesNotMatch(
+          JSON.stringify(request),
+          /CHANGED_COORDINATOR_MUST_NOT_REPLACE_RETAINED/,
+        );
       }
-      console.log("PASS actual dedicated coordinator: Sol:high launch + retained managed-worker Resume after profile edit; distinct Goal activation; exact task/child/attempt fencing; both activations verified stopped");
-    } finally { await cleanup(instance); }
+      console.log(
+        "PASS actual dedicated coordinator: Sol:high launch + retained managed-worker Resume after profile edit; distinct Goal activation; exact task/child/attempt fencing; both activations verified stopped",
+      );
+    } finally {
+      await cleanup(instance);
+    }
   }
 
   // Session controls route new workers without moving the parent. Changing the
@@ -213,7 +378,7 @@ try {
     const instance = await startParent(dir, { params }, { persist: true });
     const childRows = async () => {
       const rows = await assertOffline(instance.log);
-      return rows.filter(row => row.role === "child");
+      return rows.filter((row) => row.role === "child");
     };
     try {
       await instance.rpc("prompt", { message: "/subagent-provider offline-routing-fixture" });
@@ -221,14 +386,14 @@ try {
 
       const sessionText = await readFile(join(dir, "session.jsonl"), "utf8");
       const saved = sessionText.trim().split("\n").map(JSON.parse);
-      const setting = saved.findLast(entry => entry.customType === "pi-subagent-routing-v1");
+      const setting = saved.findLast((entry) => entry.customType === "pi-subagent-routing-v1");
       const expected = { providerId: "offline-routing-fixture", accountId: null };
       assert.deepEqual(setting.data.selection, expected);
 
       const rows = await assertOffline(instance.log);
-      const parentRows = rows.filter(row => row.role === "parent");
-      assert(parentRows.every(row => row.provider === "offline-profile-fixture"));
-      const child = rows.find(row => row.role === "child");
+      const parentRows = rows.filter((row) => row.role === "parent");
+      assert(parentRows.every((row) => row.provider === "offline-profile-fixture"));
+      const child = rows.find((row) => row.role === "child");
       assert.equal(child.provider, "offline-routing-fixture");
       assert.equal(child.model, "gpt-6-luna");
       const record = (await taskRecords(instance.stateRoot))[0];
@@ -246,20 +411,35 @@ try {
       assert.equal(latest.provider, "offline-profile-fixture");
       assert.equal(latest.model, "gpt-6-luna");
       console.log("PASS subagent provider setting routes new workers and keeps running ones");
-    } finally { await cleanup(instance); }
+    } finally {
+      await cleanup(instance);
+    }
   }
 
   // A narrowed launch stays inside the profile ceiling. This is a real child Pi
   // model request, not a mock of profile resolution or backend dispatch.
-  parent = await startParent(join(root, "single"), { params: { task: "inspect offline fixture", acceptance: ["inspect fixture acceptance"], agent: "fixture-scout", tools: ["read"] } });
+  parent = await startParent(join(root, "single"), {
+    params: {
+      task: "inspect offline fixture",
+      acceptance: ["inspect fixture acceptance"],
+      agent: "fixture-scout",
+      tools: ["read"],
+    },
+  });
   await parent.promptAndWait("launch fixture profile");
   let rows = await assertOffline(parent.log);
   const childRequest = rows.find((row) => row.role === "child");
-  assert(childRequest, `no actual native child provider request was recorded; rows=${JSON.stringify(rows)}; toolEvents=${JSON.stringify(parent.events.filter((event) => event.type.includes("tool") || event.message?.role === "toolResult"))}; stderr=${parent.errors.join("\\n")}`);
+  assert(
+    childRequest,
+    `no actual native child provider request was recorded; rows=${JSON.stringify(rows)}; toolEvents=${JSON.stringify(parent.events.filter((event) => event.type.includes("tool") || event.message?.role === "toolResult"))}; stderr=${parent.errors.join("\\n")}`,
+  );
   assert.equal(childRequest.provider, "offline-profile-fixture");
   assert.equal(childRequest.model, "scout-v1");
   assert.equal(childRequest.reasoning, "high");
-  assert.deepEqual(activeTools(childRequest), ["notify_parent", "read", "request_guidance", "task_outcome"].sort());
+  assert.deepEqual(
+    activeTools(childRequest),
+    ["notify_parent", "read", "request_guidance", "task_outcome"].sort(),
+  );
   const requestText = JSON.stringify(childRequest);
   assert.match(requestText, /PROFILE_SCOUT_INSTRUCTION_V1/);
   assert.match(requestText, /inspect fixture acceptance/);
@@ -273,7 +453,10 @@ try {
 
   // Editing the profile after completion must not change the retained spec or
   // actual resumed request. The same parent RPC session owns both attempts.
-  await writeFile(join(parent.agentDir, "agents", "fixture-scout.md"), profile("offline-profile-fixture/changed-v2", "low", "PROFILE_SCOUT_INSTRUCTION_V2"));
+  await writeFile(
+    join(parent.agentDir, "agents", "fixture-scout.md"),
+    profile("offline-profile-fixture/changed-v2", "low", "PROFILE_SCOUT_INSTRUCTION_V2"),
+  );
   await parent.promptAndWait(`resume-task: ${record.taskId}`);
   rows = await assertOffline(parent.log);
   const childRequests = rows.filter((row) => row.role === "child");
@@ -281,7 +464,10 @@ try {
   const resumed = childRequests[1];
   assert.equal(resumed.model, "scout-v1");
   assert.equal(resumed.reasoning, "high");
-  assert.deepEqual(activeTools(resumed), ["notify_parent", "read", "request_guidance", "task_outcome"].sort());
+  assert.deepEqual(
+    activeTools(resumed),
+    ["notify_parent", "read", "request_guidance", "task_outcome"].sort(),
+  );
   assert.match(JSON.stringify(resumed), /PROFILE_SCOUT_INSTRUCTION_V1/);
   assert.doesNotMatch(JSON.stringify(resumed), /PROFILE_SCOUT_INSTRUCTION_V2/);
   const resumedRecord = (await taskRecords(parent.stateRoot))[0];
@@ -290,29 +476,68 @@ try {
   assert.equal(resumedRecord.spec.systemPrompt, record.spec.systemPrompt);
   assert.deepEqual(resumedRecord.spec.tools, record.spec.tools);
   assert.equal(resumedRecord.spec.cleanupWorktreesOnReap, false);
-  await cleanup(parent); parent = undefined;
+  await cleanup(parent);
+  parent = undefined;
 
   // Native dispatch supports named profiles for single, parallel, and chain items.
   for (const [label, params, count] of [
-    ["zero-tools", { task: "report without business tools", acceptance: ["report fixture completion"], agent: "fixture-scout", tools: [] }, 1],
-    ["parallel", { tasks: [
-      { task: "parallel scout A", acceptance: ["A acceptance"], agent: "fixture-scout" },
-      { task: "parallel scout B", acceptance: ["B acceptance"], agent: "fixture-scout" },
-    ] }, 2],
-    ["chain", { chain: [
-      { task: "chain scout A", acceptance: ["chain A acceptance"], agent: "fixture-scout" },
-      { task: "chain scout B {previous}", acceptance: ["chain B acceptance"], agent: "fixture-scout" },
-    ] }, 2],
+    [
+      "zero-tools",
+      {
+        task: "report without business tools",
+        acceptance: ["report fixture completion"],
+        agent: "fixture-scout",
+        tools: [],
+      },
+      1,
+    ],
+    [
+      "parallel",
+      {
+        tasks: [
+          { task: "parallel scout A", acceptance: ["A acceptance"], agent: "fixture-scout" },
+          { task: "parallel scout B", acceptance: ["B acceptance"], agent: "fixture-scout" },
+        ],
+      },
+      2,
+    ],
+    [
+      "chain",
+      {
+        chain: [
+          { task: "chain scout A", acceptance: ["chain A acceptance"], agent: "fixture-scout" },
+          {
+            task: "chain scout B {previous}",
+            acceptance: ["chain B acceptance"],
+            agent: "fixture-scout",
+          },
+        ],
+      },
+      2,
+    ],
   ]) {
     const instance = await startParent(join(root, label), { params });
     try {
       await instance.promptAndWait(`launch ${label}`);
       const actual = (await assertOffline(instance.log)).filter((row) => row.role === "child");
       assert.equal(actual.length, count, `${label} did not dispatch every named-profile child`);
-      assert(actual.every((row) => row.model === "scout-v1" && row.reasoning === "high"), `${label} child model/thinking differs`);
-      assert(actual.every((row) => /PROFILE_SCOUT_INSTRUCTION_V1/.test(JSON.stringify(row))), `${label} missed profile instruction`);
-      if (label === "zero-tools") assert.deepEqual(activeTools(actual[0]), ["notify_parent", "request_guidance", "task_outcome"].sort(), "empty native profile allowlist must not inherit business tools");
-    } finally { await cleanup(instance); }
+      assert(
+        actual.every((row) => row.model === "scout-v1" && row.reasoning === "high"),
+        `${label} child model/thinking differs`,
+      );
+      assert(
+        actual.every((row) => /PROFILE_SCOUT_INSTRUCTION_V1/.test(JSON.stringify(row))),
+        `${label} missed profile instruction`,
+      );
+      if (label === "zero-tools")
+        assert.deepEqual(
+          activeTools(actual[0]),
+          ["notify_parent", "request_guidance", "task_outcome"].sort(),
+          "empty native profile allowlist must not inherit business tools",
+        );
+    } finally {
+      await cleanup(instance);
+    }
   }
 
   // Loaded extension tools survive profile resolution and actual worker
@@ -321,21 +546,25 @@ try {
     ["extension-defaults", undefined, ["read", "fetch"]],
     ["extension-narrowed", ["fetch"], ["fetch"]],
   ]) {
-    const instance = await startParent(join(root, label), { params: {
-      task: "inspect extension tools",
-      acceptance: ["record active extension tools"],
-      agent: "fixture-extended",
-      ...(tools ? { tools } : {}),
-    } });
+    const instance = await startParent(join(root, label), {
+      params: {
+        task: "inspect extension tools",
+        acceptance: ["record active extension tools"],
+        agent: "fixture-extended",
+        ...(tools ? { tools } : {}),
+      },
+    });
     try {
       await instance.promptAndWait(`launch ${label}`);
-      const actual = (await assertOffline(instance.log)).filter(row => row.role === "child");
+      const actual = (await assertOffline(instance.log)).filter((row) => row.role === "child");
       assert.equal(actual.length, 1);
       const reporting = ["notify_parent", "request_guidance", "task_outcome"];
       assert.deepEqual(activeTools(actual[0]), [...expected, ...reporting].sort());
       const [retained] = await taskRecords(instance.stateRoot);
       assert.deepEqual(retained.spec.tools, expected);
-    } finally { await cleanup(instance); }
+    } finally {
+      await cleanup(instance);
+    }
   }
 
   // Actual bundled role defaults travel through native dispatch, without
@@ -344,12 +573,19 @@ try {
     ["default-implementer", {}, "gpt-6-luna", "low"],
     ["named-implementer", { agent: "worker" }, "gpt-6-luna", "high"],
     ["named-coordinator", { agent: "coordinator" }, "gpt-6.1-sol", "high"],
-    ["explicit-role-override", { agent: "coordinator", model: "gpt-6-astra:low" }, "gpt-6-astra", "low"],
+    [
+      "explicit-role-override",
+      { agent: "coordinator", model: "gpt-6-astra:low" },
+      "gpt-6-astra",
+      "low",
+    ],
   ]) {
-    const instance = await startParent(join(root, label), { params: { task: "offline role dispatch", acceptance: ["record selected role"], ...params } });
+    const instance = await startParent(join(root, label), {
+      params: { task: "offline role dispatch", acceptance: ["record selected role"], ...params },
+    });
     try {
       await instance.promptAndWait(`launch ${label}`);
-      const actual = (await assertOffline(instance.log)).filter(row => row.role === "child");
+      const actual = (await assertOffline(instance.log)).filter((row) => row.role === "child");
       assert.equal(actual.length, 1, `${label} must dispatch exactly one worker`);
       assert.equal(actual[0].provider, "offline-profile-fixture");
       assert.equal(actual[0].model, model);
@@ -361,73 +597,173 @@ try {
         assert.ok(!activeTools(actual[0]).includes("background_job"));
         assert.ok(!activeTools(actual[0]).includes("subagent"));
       }
-    } finally { await cleanup(instance); }
+    } finally {
+      await cleanup(instance);
+    }
   }
 
   // Actual isolated coordinator Pi must evacuate only its own reserved cwd,
   // remove its registered root before reap, and preserve its branch/source.
   {
-    const instance = await startParent(join(root, "isolated-coordinator"), { params: {
-      task: "offline isolated coordinator", acceptance: ["record isolated role"], agent: "coordinator", worktree: {},
-    } }, { gitRepo: true });
+    const instance = await startParent(
+      join(root, "isolated-coordinator"),
+      {
+        params: {
+          task: "offline isolated coordinator",
+          acceptance: ["record isolated role"],
+          agent: "coordinator",
+          worktree: {},
+        },
+      },
+      { gitRepo: true },
+    );
     let closed = false;
     try {
       await instance.promptAndWait("launch isolated coordinator");
       const [record] = await taskRecords(instance.stateRoot);
-      assert(record?.spec.worktreeInfo, `isolated coordinator absent: ${JSON.stringify(instance.events)}`);
+      assert(
+        record?.spec.worktreeInfo,
+        `isolated coordinator absent: ${JSON.stringify(instance.events)}`,
+      );
       const { path, branch } = record.spec.worktreeInfo;
       assert.equal(record.spec.cleanupWorktreesOnReap, true);
       assert.ok(await stat(path));
-      await cleanup(instance); closed = true;
-      const audits = instance.events.filter(event => event.type === "message_end" && event.message?.role === "toolResult" && event.message.toolName === "subagent");
+      await cleanup(instance);
+      closed = true;
+      const audits = instance.events.filter(
+        (event) =>
+          event.type === "message_end" &&
+          event.message?.role === "toolResult" &&
+          event.message.toolName === "subagent",
+      );
       assert.notEqual(audits.at(-1).message.isError, true, JSON.stringify(audits.at(-1)));
       await assert.rejects(stat(path), { code: "ENOENT" });
       const sourceOid = (await fixtureGit(instance.cwd, "rev-parse", "HEAD")).stdout.trim();
-      assert.equal((await fixtureGit(instance.cwd, "show-ref", "--verify", `refs/heads/${branch}`)).stdout.trim(), `${sourceOid} refs/heads/${branch}`);
+      assert.equal(
+        (
+          await fixtureGit(instance.cwd, "show-ref", "--verify", `refs/heads/${branch}`)
+        ).stdout.trim(),
+        `${sourceOid} refs/heads/${branch}`,
+      );
       assert.equal(await readFile(join(instance.cwd, "tracked"), "utf8"), "offline fixture\n");
-      console.log("PASS actual isolated coordinator: guarded root removal before reap; source and branch preserved");
-    } finally { if (!closed) await cleanup(instance); }
+      console.log(
+        "PASS actual isolated coordinator: guarded root removal before reap; source and branch preserved",
+      );
+    } finally {
+      if (!closed) await cleanup(instance);
+    }
   }
 
   // Profile-only arguments are removed before the AgentSH adapter boundary,
   // after profiles are resolved and expanded. The stub adapter logs received
   // params; a child provider request would indicate an unsafe native fallback.
   {
-    const instance = await startParent(join(root, "adapter"), { params: { agentScope: "user", tasks: [
-      { task: "adapter scout A", acceptance: ["adapter A acceptance"], agent: "fixture-scout", tools: ["read"] },
-      { task: "adapter scout B", acceptance: ["adapter B acceptance"], agent: "fixture-scout", tools: ["read"] },
-    ] } }, { agentSH: true });
+    const instance = await startParent(
+      join(root, "adapter"),
+      {
+        params: {
+          agentScope: "user",
+          tasks: [
+            {
+              task: "adapter scout A",
+              acceptance: ["adapter A acceptance"],
+              agent: "fixture-scout",
+              tools: ["read"],
+            },
+            {
+              task: "adapter scout B",
+              acceptance: ["adapter B acceptance"],
+              agent: "fixture-scout",
+              tools: ["read"],
+            },
+          ],
+        },
+      },
+      { agentSH: true },
+    );
     try {
       await instance.promptAndWait("dispatch through AgentSH adapter");
       const rows = await assertOffline(instance.log);
       const adapterCall = rows.find((row) => row.event === "adapter_call");
-      assert(adapterCall, `selected AgentSH backend did not invoke the adapter; toolResults=${JSON.stringify(instance.events.filter(event => event.type === "message_end" && event.message?.role === "toolResult"))}; errors=${instance.errors.join("\\n")}`);
+      assert(
+        adapterCall,
+        `selected AgentSH backend did not invoke the adapter; toolResults=${JSON.stringify(instance.events.filter((event) => event.type === "message_end" && event.message?.role === "toolResult"))}; errors=${instance.errors.join("\\n")}`,
+      );
       assert.equal(Object.hasOwn(adapterCall.args, "agent"), false);
       assert.equal(Object.hasOwn(adapterCall.args, "agentScope"), false);
-      assert(adapterCall.args.tasks.every((task) => !Object.hasOwn(task, "agent") && !Object.hasOwn(task, "agentScope")));
-      assert(adapterCall.args.tasks.every((task) => task.model === "offline-profile-fixture/scout-v1:high" && task.tools[0] === "read"));
-      assert.equal(rows.filter((row) => row.role === "child").length, 0, "AgentSH adapter test launched native workers");
-    } finally { await cleanup(instance); }
+      assert(
+        adapterCall.args.tasks.every(
+          (task) => !Object.hasOwn(task, "agent") && !Object.hasOwn(task, "agentScope"),
+        ),
+      );
+      assert(
+        adapterCall.args.tasks.every(
+          (task) =>
+            task.model === "offline-profile-fixture/scout-v1:high" && task.tools[0] === "read",
+        ),
+      );
+      assert.equal(
+        rows.filter((row) => row.role === "child").length,
+        0,
+        "AgentSH adapter test launched native workers",
+      );
+    } finally {
+      await cleanup(instance);
+    }
   }
 
   // Profiles catalogue operation is local and returns profile metadata without launching a worker.
   {
-    const instance = await startParent(join(root, "catalogue"), { params: { operation: "profiles", agentScope: "user" } });
+    const instance = await startParent(join(root, "catalogue"), {
+      params: { operation: "profiles", agentScope: "user" },
+    });
     try {
       await instance.promptAndWait("list profiles");
-      assert.equal((await assertOffline(instance.log)).filter((row) => row.role === "child").length, 0);
-      const toolResult = instance.events.find((event) => event.type === "message_end" && event.message?.role === "toolResult" && event.message?.toolName === "subagent");
+      assert.equal(
+        (await assertOffline(instance.log)).filter((row) => row.role === "child").length,
+        0,
+      );
+      const toolResult = instance.events.find(
+        (event) =>
+          event.type === "message_end" &&
+          event.message?.role === "toolResult" &&
+          event.message?.toolName === "subagent",
+      );
       assert(toolResult, "profiles operation produced no subagent tool result");
       assert.match(JSON.stringify(toolResult.message.content), /fixture-scout/);
-    } finally { await cleanup(instance); }
+    } finally {
+      await cleanup(instance);
+    }
   }
 
   // Invalid profile selection, malformed catalogue input, trust failures, and
   // attempts to widen the declared profile tool ceiling all fail before launch.
   const rejectedCases = [
-    { name: "unavailable-model", params: { task: "must not launch", acceptance: ["no fallback"], agent: "coordinator", model: "nonexistent-role-model" }, reason: /not found|unavailable|Unknown model/i },
-    { name: "unknown", params: { task: "must not launch", acceptance: ["required"], agent: "missing-profile" }, reason: /Unknown agent profile 'missing-profile'/ },
-    { name: "widen", params: { task: "must not launch", acceptance: ["required"], agent: "fixture-scout", tools: ["write"] }, reason: /cannot widen profile 'fixture-scout' allowlist/ },
+    {
+      name: "unavailable-model",
+      params: {
+        task: "must not launch",
+        acceptance: ["no fallback"],
+        agent: "coordinator",
+        model: "nonexistent-role-model",
+      },
+      reason: /not found|unavailable|Unknown model/i,
+    },
+    {
+      name: "unknown",
+      params: { task: "must not launch", acceptance: ["required"], agent: "missing-profile" },
+      reason: /Unknown agent profile 'missing-profile'/,
+    },
+    {
+      name: "widen",
+      params: {
+        task: "must not launch",
+        acceptance: ["required"],
+        agent: "fixture-scout",
+        tools: ["write"],
+      },
+      reason: /cannot widen profile 'fixture-scout' allowlist/,
+    },
     // Explicitly asking a headless worker for pane-only tools fails before launch.
     ...[
       ["explicit-job", { agent: "worker", tools: ["background_job"] }],
@@ -437,43 +773,130 @@ try {
       name,
       params: { task: "must not launch", acceptance: ["no headless pane tools"], ...launch },
     })),
-    { name: "malformed", params: { task: "must not launch", acceptance: ["required"], agent: "fixture-scout" }, malformed: true, reason: /unsupported field 'unsupported'/ },
-    { name: "missing-acceptance", params: { task: "must not launch", agent: "fixture-scout" }, reason: /New delegation requires acceptance: supply 1–16 explicit, task-specific, verifiable completion criteria\. No worker was launched\./ },
-    { name: "agentsh-empty-tools", agentSH: true, params: { task: "must not inherit defaults", acceptance: ["no dispatch"], agent: "fixture-scout", tools: [] }, reason: /AgentSH cannot enforce an empty profile tool allowlist; no work was started/ },
-    { name: "trust", params: { task: "must not launch", acceptance: ["required"], agent: "fixture-project", agentScope: "project" }, projectTrust: true, reason: /agentScope: "project" requires project trust/ },
+    {
+      name: "malformed",
+      params: { task: "must not launch", acceptance: ["required"], agent: "fixture-scout" },
+      malformed: true,
+      reason: /unsupported field 'unsupported'/,
+    },
+    {
+      name: "missing-acceptance",
+      params: { task: "must not launch", agent: "fixture-scout" },
+      reason:
+        /New delegation requires acceptance: supply 1–16 explicit, task-specific, verifiable completion criteria\. No worker was launched\./,
+    },
+    {
+      name: "agentsh-empty-tools",
+      agentSH: true,
+      params: {
+        task: "must not inherit defaults",
+        acceptance: ["no dispatch"],
+        agent: "fixture-scout",
+        tools: [],
+      },
+      reason: /AgentSH cannot enforce an empty profile tool allowlist; no work was started/,
+    },
+    {
+      name: "trust",
+      params: {
+        task: "must not launch",
+        acceptance: ["required"],
+        agent: "fixture-project",
+        agentScope: "project",
+      },
+      projectTrust: true,
+      reason: /agentScope: "project" requires project trust/,
+    },
   ];
   for (const scenario of rejectedCases) {
-    const instance = await startParent(join(root, scenario.name), { params: scenario.params }, { projectTrust: scenario.projectTrust, agentSH: scenario.agentSH });
+    const instance = await startParent(
+      join(root, scenario.name),
+      { params: scenario.params },
+      { projectTrust: scenario.projectTrust, agentSH: scenario.agentSH },
+    );
     try {
-      if (scenario.malformed) await writeFile(join(instance.agentDir, "agents", "fixture-scout.md"), "---\nname: fixture-scout\ndescription: broken\nunsupported: true\n---\nBROKEN\n");
+      if (scenario.malformed)
+        await writeFile(
+          join(instance.agentDir, "agents", "fixture-scout.md"),
+          "---\nname: fixture-scout\ndescription: broken\nunsupported: true\n---\nBROKEN\n",
+        );
       await instance.promptAndWait(`rejected ${scenario.name}`);
-      const invocation = instance.events.find((event) => event.type === "tool_execution_start" && event.toolName === "subagent");
-      assert.deepEqual(invocation?.args, scenario.params, `${scenario.name} did not reach the extension with the requested parameters`);
+      const invocation = instance.events.find(
+        (event) => event.type === "tool_execution_start" && event.toolName === "subagent",
+      );
+      assert.deepEqual(
+        invocation?.args,
+        scenario.params,
+        `${scenario.name} did not reach the extension with the requested parameters`,
+      );
       const rejectedRows = await assertOffline(instance.log);
-      assert.equal(rejectedRows.filter((row) => row.role === "child").length, 0, `${scenario.name} launched a worker`);
-      assert.equal(rejectedRows.filter((row) => row.event === "adapter_call").length, 0, `${scenario.name} reached an adapter despite failed validation`);
-      const toolResult = instance.events.findLast((event) => event.type === "message_end" && event.message?.role === "toolResult" && event.message?.toolName === "subagent");
-      assert(toolResult?.message?.isError, `${scenario.name} did not produce a failed subagent tool result`);
+      assert.equal(
+        rejectedRows.filter((row) => row.role === "child").length,
+        0,
+        `${scenario.name} launched a worker`,
+      );
+      assert.equal(
+        rejectedRows.filter((row) => row.event === "adapter_call").length,
+        0,
+        `${scenario.name} reached an adapter despite failed validation`,
+      );
+      const toolResult = instance.events.findLast(
+        (event) =>
+          event.type === "message_end" &&
+          event.message?.role === "toolResult" &&
+          event.message?.toolName === "subagent",
+      );
+      assert(
+        toolResult?.message?.isError,
+        `${scenario.name} did not produce a failed subagent tool result`,
+      );
       const callRow = (await dispatches(instance.log)).find((row) => row.event === "subagent_call");
       if (scenario.name === "trust") {
         const rows = await dispatches(instance.log);
-        assert.equal(callRow?.cwd, instance.cwd, `project trust checked against unexpected cwd: ${JSON.stringify(rows)}`);
-        assert.equal(callRow?.processCwd, instance.cwd, `Pi process cwd mismatch: ${JSON.stringify(rows)}`);
-        assert.equal(callRow?.projectTrusted, false, `test project unexpectedly trusted: ${JSON.stringify(rows)}`);
-        assert(rows.some((row) => row.event === "project_trust" && row.cwd === instance.cwd && row.processCwd === instance.cwd && row.decision === "no"), `personal project_trust handler was not observed: ${JSON.stringify(rows)}`);
+        assert.equal(
+          callRow?.cwd,
+          instance.cwd,
+          `project trust checked against unexpected cwd: ${JSON.stringify(rows)}`,
+        );
+        assert.equal(
+          callRow?.processCwd,
+          instance.cwd,
+          `Pi process cwd mismatch: ${JSON.stringify(rows)}`,
+        );
+        assert.equal(
+          callRow?.projectTrusted,
+          false,
+          `test project unexpectedly trusted: ${JSON.stringify(rows)}`,
+        );
+        assert(
+          rows.some(
+            (row) =>
+              row.event === "project_trust" &&
+              row.cwd === instance.cwd &&
+              row.processCwd === instance.cwd &&
+              row.decision === "no",
+          ),
+          `personal project_trust handler was not observed: ${JSON.stringify(rows)}`,
+        );
       }
       const toolText = Array.isArray(toolResult.message.content)
-        ? toolResult.message.content.map((part) => typeof part?.text === "string" ? part.text : "").join("\n")
+        ? toolResult.message.content
+            .map((part) => (typeof part?.text === "string" ? part.text : ""))
+            .join("\n")
         : String(toolResult.message.content);
       if (scenario.reason) {
         const call = JSON.stringify(callRow);
         const why = `${scenario.name} rejected for an unexpected reason; call=${call}`;
         assert.match(toolText, scenario.reason, why);
       }
-    } finally { await cleanup(instance); }
+    } finally {
+      await cleanup(instance);
+    }
   }
 
-  console.log("PASS native Pi named-profile acceptance: actual offline child requests, saved/resumed contract, single/parallel/chain dispatch, and fail-before-launch boundaries");
+  console.log(
+    "PASS native Pi named-profile acceptance: actual offline child requests, saved/resumed contract, single/parallel/chain dispatch, and fail-before-launch boundaries",
+  );
 } finally {
   if (parent) await parent.close();
   await rm(root, { recursive: true, force: true });

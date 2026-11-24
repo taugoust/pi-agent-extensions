@@ -13,10 +13,14 @@ export function decode(value) {
       assert.ok(Number.isSafeInteger(number), "ITF integer exceeds JavaScript precision");
       return number;
     }
-    return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "#meta").map(([key, item]) => {
-      assert.ok(!key.startsWith("#"), `Unsupported ITF value ${key}`);
-      return [key, decode(item)];
-    }));
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => key !== "#meta")
+        .map(([key, item]) => {
+          assert.ok(!key.startsWith("#"), `Unsupported ITF value ${key}`);
+          return [key, decode(item)];
+        }),
+    );
   }
   return value;
 }
@@ -32,8 +36,8 @@ export class ModelMismatch extends Error {
 
 const owner = "quint-parent";
 const taskId = `subagent-task-${"a".repeat(24)}`;
-const childId = number => `subagent-child-${number.toString(16).padStart(24, "0")}`;
-const childNumber = id => Number.parseInt(id.slice("subagent-child-".length), 16);
+const childId = (number) => `subagent-child-${number.toString(16).padStart(24, "0")}`;
+const childNumber = (id) => Number.parseInt(id.slice("subagent-child-".length), 16);
 
 export async function replay(file, NativeTaskStore) {
   const trace = decode(JSON.parse(readFileSync(file, "utf8")));
@@ -44,30 +48,52 @@ export async function replay(file, NativeTaskStore) {
   const taskRoot = join(root, "tasks");
   let store = new NativeTaskStore(taskRoot);
   const coverage = new Set();
-  const spec = { task: "Quint retained-attempt fixture", cwd: root, tools: ["read"],
-    acceptance: ["model agrees with persisted state"], cleanupWorktreesOnReap: true };
+  const spec = {
+    task: "Quint retained-attempt fixture",
+    cwd: root,
+    tools: ["read"],
+    acceptance: ["model agrees with persisted state"],
+    cleanupWorktreesOnReap: true,
+  };
   const original = await store.create(owner, taskId, structuredClone(spec), childId(1));
   const session = readFileSync(store.sessionPath(taskId), "utf8");
 
   // Rejection provenance matters: an I/O failure is not an ownership refusal.
   const reject = (operation, pattern) => assert.rejects(async () => operation(), pattern);
-  const compare = expected => {
+  const compare = (expected) => {
     const fresh = new NativeTaskStore(taskRoot);
     const actual = fresh.get(owner, taskId);
     const { nextChild: _generatorCounter, ...snapshot } = expected;
-    assert.deepEqual({
-      attempt: actual.attempt, child: childNumber(actual.childId), running: actual.state === "running",
-      history: actual.history.map(entry => ({ attempt: entry.attempt, child: childNumber(entry.childId), outcome: entry.outcome })),
-      summaryAttempt: actual.latestSummaryAttempt ?? 0,
-      summary: actual.latestSummary === undefined ? 0 : Number(actual.latestSummary.slice("summary-".length)),
-      checkpointed: actual.checkpointed ?? false,
-    }, snapshot, "persisted task state differs from Quint");
+    assert.deepEqual(
+      {
+        attempt: actual.attempt,
+        child: childNumber(actual.childId),
+        running: actual.state === "running",
+        history: actual.history.map((entry) => ({
+          attempt: entry.attempt,
+          child: childNumber(entry.childId),
+          outcome: entry.outcome,
+        })),
+        summaryAttempt: actual.latestSummaryAttempt ?? 0,
+        summary:
+          actual.latestSummary === undefined
+            ? 0
+            : Number(actual.latestSummary.slice("summary-".length)),
+        checkpointed: actual.checkpointed ?? false,
+      },
+      snapshot,
+      "persisted task state differs from Quint",
+    );
     assert.equal(actual.sessionId, original.sessionId, "resume changed session identity");
-    assert.equal(readFileSync(fresh.sessionPath(taskId), "utf8"), session, "operation modified retained session contents");
+    assert.equal(
+      readFileSync(fresh.sessionPath(taskId), "utf8"),
+      session,
+      "operation modified retained session contents",
+    );
     assert.deepEqual(actual.spec, spec, "retained task/permissions changed");
     assert.equal(actual.ownerSessionId, owner);
     assert.equal(actual.ownerPid, process.pid);
-    assert.ok(actual.history.every(entry => entry.execution === "completed"));
+    assert.ok(actual.history.every((entry) => entry.execution === "completed"));
     assert.equal(actual.requiresCompaction ?? false, false);
     const [listed] = fresh.list(owner);
     assert.ok(listed);
@@ -76,7 +102,10 @@ export async function replay(file, NativeTaskStore) {
     assert.equal(listed.state, expected.running ? "running" : "idle");
     assert.equal(listed.can_resume, !expected.running);
     assert.equal(listed.checkpointed, expected.checkpointed);
-    assert.equal(listed.summary, expected.summaryAttempt === expected.attempt ? `summary-${expected.summary}` : undefined);
+    assert.equal(
+      listed.summary,
+      expected.summaryAttempt === expected.attempt ? `summary-${expected.summary}` : undefined,
+    );
   };
 
   try {
@@ -90,16 +119,29 @@ export async function replay(file, NativeTaskStore) {
             break;
           case "finish":
             await store.finish(owner, taskId, childId(command.child), {
-              outcome: command.outcome, summary: `summary-${command.summary}`, execution: "completed",
+              outcome: command.outcome,
+              summary: `summary-${command.summary}`,
+              execution: "completed",
             });
             coverage.add(command.child === previous.child ? "current_finish" : "stale_finish");
-            if (command.child !== previous.child && previous.history.some(entry => entry.child === command.child && entry.attempt < previous.attempt)) coverage.add("previous_attempt_finish");
-            if (command.child === previous.child && !previous.running) coverage.add("repeat_finish");
-            if (command.child === previous.child && command.outcome === "checkpointed") coverage.add("checkpoint");
+            if (
+              command.child !== previous.child &&
+              previous.history.some(
+                (entry) => entry.child === command.child && entry.attempt < previous.attempt,
+              )
+            )
+              coverage.add("previous_attempt_finish");
+            if (command.child === previous.child && !previous.running)
+              coverage.add("repeat_finish");
+            if (command.child === previous.child && command.outcome === "checkpointed")
+              coverage.add("checkpoint");
             break;
           case "resume":
             if (command.result === "rejected") {
-              await reject(() => store.beginResume(owner, taskId, childId(command.child)), /still running/);
+              await reject(
+                () => store.beginResume(owner, taskId, childId(command.child)),
+                /still running/,
+              );
               coverage.add("running_resume_refused");
             } else {
               assert.equal(command.result, "ok");
@@ -115,14 +157,26 @@ export async function replay(file, NativeTaskStore) {
             assert.equal(results[0].status, "fulfilled");
             assert.equal(results[1].status, "rejected");
             assert.match(results[1].reason.message, /still running/);
-            coverage.add(command.child < command.other ? "resume_order_low_then_high" : "resume_order_high_then_low");
+            coverage.add(
+              command.child < command.other
+                ? "resume_order_low_then_high"
+                : "resume_order_high_then_low",
+            );
             break;
           }
           case "verifyStopped":
             if (command.result === "rejected") {
-              await reject(() => store.verifyStopped(owner, taskId, childId(command.child), command.attempt), /ownership changed|owner is still running/);
-              coverage.add(command.child !== previous.child ? "stop_child_refused"
-                : command.attempt !== previous.attempt ? "stop_attempt_refused" : "stop_running_refused");
+              await reject(
+                () => store.verifyStopped(owner, taskId, childId(command.child), command.attempt),
+                /ownership changed|owner is still running/,
+              );
+              coverage.add(
+                command.child !== previous.child
+                  ? "stop_child_refused"
+                  : command.attempt !== previous.attempt
+                    ? "stop_attempt_refused"
+                    : "stop_running_refused",
+              );
             } else {
               assert.equal(command.result, "ok");
               await store.verifyStopped(owner, taskId, childId(command.child), command.attempt);
@@ -133,12 +187,27 @@ export async function replay(file, NativeTaskStore) {
             const foreign = "other-parent";
             const denied = /another parent session/;
             switch (command.method) {
-              case "get": await reject(() => store.get(foreign, taskId), denied); break;
-              case "list": assert.deepEqual(store.list(foreign), []); break;
-              case "finish": await reject(() => store.finish(foreign, taskId, childId(command.child)), denied); break;
-              case "resume": await reject(() => store.beginResume(foreign, taskId, childId(99)), denied); break;
-              case "verifyStopped": await reject(() => store.verifyStopped(foreign, taskId, childId(command.child), command.attempt), denied); break;
-              default: throw new Error(`Unknown foreign operation ${command.method}`);
+              case "get":
+                await reject(() => store.get(foreign, taskId), denied);
+                break;
+              case "list":
+                assert.deepEqual(store.list(foreign), []);
+                break;
+              case "finish":
+                await reject(() => store.finish(foreign, taskId, childId(command.child)), denied);
+                break;
+              case "resume":
+                await reject(() => store.beginResume(foreign, taskId, childId(99)), denied);
+                break;
+              case "verifyStopped":
+                await reject(
+                  () =>
+                    store.verifyStopped(foreign, taskId, childId(command.child), command.attempt),
+                  denied,
+                );
+                break;
+              default:
+                throw new Error(`Unknown foreign operation ${command.method}`);
             }
             coverage.add(`foreign_${command.method}`);
             break;
@@ -147,11 +216,13 @@ export async function replay(file, NativeTaskStore) {
             store = new NativeTaskStore(taskRoot);
             coverage.add("reconstruct");
             break;
-          default: throw new Error(`Unknown model command ${command.kind}`);
+          default:
+            throw new Error(`Unknown model command ${command.kind}`);
         }
         compare(state);
       } catch (error) {
-        if (error instanceof assert.AssertionError) throw new ModelMismatch(file, step, command, error);
+        if (error instanceof assert.AssertionError)
+          throw new ModelMismatch(file, step, command, error);
         throw error;
       }
     }

@@ -39,7 +39,11 @@ type PaseoRemoteUi = {
     options: string[],
     settings?: RemoteQuestionnaireSettings,
   ): Promise<string | undefined>;
-  input?(title: string, placeholder?: string, settings?: RemoteQuestionnaireSettings): Promise<string | undefined>;
+  input?(
+    title: string,
+    placeholder?: string,
+    settings?: RemoteQuestionnaireSettings,
+  ): Promise<string | undefined>;
 };
 
 const TERMINAL_CHOICE = "Answer in terminal";
@@ -64,7 +68,11 @@ function unavailableReply(bridge: PaseoRemoteUi, signal?: AbortSignal): PaseoQue
   // Losing the daemon is not a user cancellation: the existing terminal UI
   // remains usable and must not abort the model's tool execution.
   if (!signal?.aborted) {
-    try { if (!bridge.isConnected()) return { kind: "terminal" }; } catch { /* Preserve explicit failure behavior. */ }
+    try {
+      if (!bridge.isConnected()) return { kind: "terminal" };
+    } catch {
+      /* Preserve explicit failure behavior. */
+    }
   }
   return { kind: "cancelled" };
 }
@@ -107,10 +115,25 @@ export async function answerQuestionnaireInPaseo(
     const optionChoices = question.options.map(optionChoice);
     const hasInput = typeof bridge.input === "function";
     const canInput = question.allowOther !== false && hasInput;
-    const settings: RemoteQuestionnaireSettings = { signal, ...(toolCallId ? {
-      paseoQuestionnaire: { v: 1 as const, toolCallId, index: questionIndex, input: hasInput },
-    } : {}) };
-    const choices = [...optionChoices, ...(canInput ? [OTHER_CHOICE] : []), TERMINAL_CHOICE, CANCEL_CHOICE];
+    const settings: RemoteQuestionnaireSettings = {
+      signal,
+      ...(toolCallId
+        ? {
+            paseoQuestionnaire: {
+              v: 1 as const,
+              toolCallId,
+              index: questionIndex,
+              input: hasInput,
+            },
+          }
+        : {}),
+    };
+    const choices = [
+      ...optionChoices,
+      ...(canInput ? [OTHER_CHOICE] : []),
+      TERMINAL_CHOICE,
+      CANCEL_CHOICE,
+    ];
     let choice: string | undefined;
     try {
       choice = await bridge.select(
@@ -129,7 +152,11 @@ export async function answerQuestionnaireInPaseo(
     if (choice === OTHER_CHOICE && canInput) {
       let value: string | undefined;
       try {
-        value = await bridge.input!(questionTitle(question, questionIndex, questions.length), "Type your answer", settings);
+        value = await bridge.input!(
+          questionTitle(question, questionIndex, questions.length),
+          "Type your answer",
+          settings,
+        );
       } catch {
         return { kind: "cancelled" };
       }

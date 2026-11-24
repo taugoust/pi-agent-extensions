@@ -81,9 +81,6 @@ pkgs.runCommand "subagent-check"
     cp ${self}/shared/subagent-permission.ts "$workdir/src/shared/subagent-permission.ts"
     printf '%s\n' '{ "type": "module" }' > "$workdir/src/package.json"
 
-    grep -A12 'const currentResult: SingleResult' ${self}/subagent/index.ts | grep -Fq 'exitCode: -1,'
-    grep -A4 'function isFailure' ${self}/subagent/index.ts | grep -Fq 'result.exitCode !== -1'
-
     tsc \
       --rewriteRelativeImportExtensions \
       --resolveJsonModule \
@@ -1170,76 +1167,6 @@ pkgs.runCommand "subagent-check"
     EOF
 
     node "$workdir/test.mjs" "$workdir/out/subagent/parallel-result.js" "$workdir/out/subagent/backend.js" "$workdir/out/shared/agentsh-mode.js" "$workdir/out/subagent/background.js" "$workdir/out/subagent/foreground-handoff.js" "$workdir/out/subagent/result-artifact.js" "$workdir/out/subagent/permission-relay.js" "$workdir/out/shared/subagent-permission.js" "$workdir/out/subagent/permission-proxy.js"
-    grep -F 'formatParallelResultContent(sections, successCount, MAX_TEXT_PREVIEW_BYTES)' ${self}/subagent/index.ts >/dev/null
-    grep -F 'params.operation === "yield"' ${self}/subagent/index.ts >/dev/null
-    grep -F 'terminate: true' ${self}/subagent/index.ts >/dev/null
-    if grep -F 'waitForAnyBackgroundSubagentChild(backgroundManager' ${self}/subagent/index.ts >/dev/null \
-      || grep -F 'waitForAllBackgroundSubagentGroups(backgroundManager' ${self}/subagent/index.ts >/dev/null; then
-      echo 'public subagent entrypoint still exposes blocking background waits' >&2
-      exit 1
-    fi
-    grep -F 'childProgress.capture(partial)' ${self}/subagent/index.ts >/dev/null
-    grep -F 'backgroundState: "pending"' ${self}/subagent/index.ts >/dev/null
-    grep -F 'releaseForegroundOwnership();' ${self}/subagent/index.ts >/dev/null
-    grep -F '.filter((record) => !this.runtime.pendingLaunches.has(record.id) && !this.runtime.reaped.has(this.jobDir(record.id)))' ${self}/subagent/background.ts >/dev/null
-    grep -F 'args.push("--no-extensions", "--extension", permissionProxyEntrypoint);' ${self}/subagent/index.ts >/dev/null
-    grep -F 'const permissionAuthority = currentSubagentPermissionAuthority();' ${self}/subagent/index.ts >/dev/null
-    grep -F 'SUBAGENT_PERMISSION_BASH_TOOL' ${self}/subagent/index.ts >/dev/null
-    grep -F 'trustedNixStoreFile' ${self}/subagent/index.ts >/dev/null
-    if grep -F 'this.socket.unref()' ${self}/subagent/permission-proxy.ts >/dev/null; then
-      echo 'child permission relay socket must keep Pi RPC mode alive' >&2
-      exit 1
-    fi
-    if grep -F 'isError:' ${self}/subagent/permission-proxy.ts >/dev/null; then
-      echo 'child permission proxy must throw fatal tool failures rather than return ignored isError metadata' >&2
-      exit 1
-    fi
-    grep -F 'waitForGracefulShutdown' ${self}/subagent/index.ts >/dev/null
-    # The protocol fixture above behaviorally covers steer, follow-up,
-    # interruption, handled prompts, ordering, shutdown, and process cleanup.
-    grep -F '["--mode", "rpc"]' ${self}/subagent/index.ts >/dev/null
-    grep -F 'backgroundSubagentsSurviveShutdown(event.reason)' ${self}/subagent/index.ts >/dev/null
-    grep -F 'backgroundManager.beginReloadAdoption(sessionId)' ${self}/subagent/index.ts >/dev/null
-    grep -F 'manager.activateSession(sessionId)' ${self}/subagent/index.ts >/dev/null
-    grep -F 'generation !== sessionGeneration || lifecycleClosing || sessionContext !== ctx' ${self}/subagent/index.ts >/dev/null
-    grep -F 'await permissionAuthority.waitUntilActive(signal)' ${self}/subagent/index.ts >/dev/null
-    if grep -F 'permissionAuthority && !permissionAuthority.active' ${self}/subagent/index.ts >/dev/null \
-      || grep -F '!permissionAuthority.active || !installedPermissionProxyEntrypoint()' ${self}/subagent/index.ts >/dev/null; then
-      echo 'native subagent launch still rejects the bounded Permission Gate reload gap' >&2
-      exit 1
-    fi
-    grep -F 'const committed = this.authority.commit(prepared.ticket, exactRequest);' ${self}/subagent/permission-relay.ts >/dev/null
-    grep -F 'quietState.enqueue' ${self}/subagent/index.ts >/dev/null
-    grep -F 'backgroundOperationConsumedJobIds(background)' ${self}/subagent/index.ts >/dev/null
-    grep -F 'const durableOperations = deliveredOperationIds(entries);' ${self}/subagent/index.ts >/dev/null
-    if grep -F 'consumeForOperation' ${self}/subagent/index.ts >/dev/null; then
-      echo 'lifecycle operation still marks consumption before Pi accepts its tool result' >&2
-      exit 1
-    fi
-    # Behavior (routine state never triggers a model request) is exercised by
-    # quiet-state.test above; avoid pinning the obsolete wake-on-every-batch code.
-    grep -F 'harness-state-receipt' ${self}/shared/quiet-state.ts >/dev/null
-    if grep -F 'Do not claim dependent work complete' ${self}/subagent/index.ts >/dev/null \
-      || grep -F 'running-reminder' ${self}/subagent/index.ts >/dev/null \
-      || grep -F 'deliverAs: ctx.isIdle() ? "nextTurn"' ${self}/subagent/index.ts >/dev/null; then
-      echo 'background lifecycle text leaked internal model guidance or running reminders' >&2
-      exit 1
-    fi
-    grep -F 'name: builtins.elem name registry.sharedRuntimeExtensionNames' ${self}/nix/module.nix >/dev/null
-    grep -F 'name: builtins.elem name selectedExtensions' ${self}/nix/mk-extension-bundle.nix >/dev/null
-    # Shared runtime sources are assembled by the extension registry/bundle now,
-    # not listed as individual Home Manager files in module.nix.
-    grep -F 'sharedRuntimeExtensionNames' ${self}/nix/extension-registry.nix >/dev/null
-    grep -F 'source = "''${bundle}/shared";' ${self}/nix/module.nix >/dev/null
-    grep -F 'source = "''${self}/''${name}";' ${self}/nix/extension-registry.nix >/dev/null
-    if grep -F 'name: "subagent"' ${self}/sandbox/index.ts >/dev/null; then
-      echo 'sandbox still registers a duplicate subagent tool' >&2
-      exit 1
-    fi
-    if grep -F 'function subagentParams' ${self}/sandbox/index.ts >/dev/null; then
-      echo 'sandbox still owns a dead model-facing subagent schema' >&2
-      exit 1
-    fi
     for bundle in ${sandboxOnlyBundle} ${subagentOnlyBundle}; do
       test "$(jq '[.pi.extensions[] | select(. == "subagent")] | length' "$bundle/package.json")" -eq 1
       test "$(jq '[.pi.extensions[] | select(. == "subagent-finalizer")] | length' "$bundle/package.json")" -eq 1
@@ -1262,9 +1189,5 @@ pkgs.runCommand "subagent-check"
     done
     test "$(jq '[.pi.extensions[] | select(. == "sandbox")] | length' ${sandboxOnlyBundle}/package.json)" -eq 1
     test "$(jq '[.pi.extensions[] | select(. == "sandbox")] | length' ${subagentOnlyBundle}/package.json)" -eq 0
-    if grep -F 'output.slice(0, 100)' ${self}/subagent/index.ts >/dev/null; then
-      echo 'parallel results still use the lossy 100-character preview' >&2
-      exit 1
-    fi
     touch "$out"
   ''

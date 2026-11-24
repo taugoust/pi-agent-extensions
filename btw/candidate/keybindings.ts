@@ -32,7 +32,20 @@ const SPECIAL: Record<string, number> = {
   up: 57419,
   down: 57420,
 };
-const FUNCTION_INPUTS = ["OP", "OQ", "OR", "OS", "[15~", "[17~", "[18~", "[19~", "[20~", "[21~", "[23~", "[24~"];
+const FUNCTION_INPUTS = [
+  "OP",
+  "OQ",
+  "OR",
+  "OS",
+  "[15~",
+  "[17~",
+  "[18~",
+  "[19~",
+  "[20~",
+  "[21~",
+  "[23~",
+  "[24~",
+];
 // All cross-identity legacy collisions in Pi's matchesKey(): raw Ctrl bytes,
 // ESC-prefixed bytes (including Alt+arrows), BS/DEL, Enter and Shift+Tab.
 // CSI-u, keypad, lock bits, shifted letters and modifyOtherKeys normalize to
@@ -56,7 +69,10 @@ export function normalizeBtwKey(value: unknown): string | undefined {
   if (!base) return undefined;
   if (base === "esc") base = "escape";
   if (base === "return") base = "enter";
-  if (new Set(parts).size !== parts.length || parts.some((part) => !MODIFIERS.includes(part as never)))
+  if (
+    new Set(parts).size !== parts.length ||
+    parts.some((part) => !MODIFIERS.includes(part as never))
+  )
     return undefined;
   if (
     !Object.hasOwn(SPECIAL, base) &&
@@ -65,8 +81,12 @@ export function normalizeBtwKey(value: unknown): string | undefined {
     !(base.length === 1 && (/^[a-z0-9]$/u.test(base) || SYMBOLS.includes(base)))
   )
     return undefined;
-  if ((base === "escape" || (base.startsWith("f") && base.length > 1)) && parts.length) return undefined;
-  if (base === "clear" && (parts.length > 1 || (parts.length === 1 && !["ctrl", "shift"].includes(parts[0] ?? ""))))
+  if ((base === "escape" || (base.startsWith("f") && base.length > 1)) && parts.length)
+    return undefined;
+  if (
+    base === "clear" &&
+    (parts.length > 1 || (parts.length === 1 && !["ctrl", "shift"].includes(parts[0] ?? "")))
+  )
     return undefined;
   return [...MODIFIERS.filter((part) => parts.includes(part)), base].join("+");
 }
@@ -75,15 +95,22 @@ export function normalizeBtwKey(value: unknown): string | undefined {
 function inputsFor(key: string): string[] {
   const parts = key.split("+");
   const base = parts.pop() ?? "";
-  const modifier = MODIFIERS.reduce((mask, part, bit) => mask | (parts.includes(part) ? 1 << bit : 0), 0);
+  const modifier = MODIFIERS.reduce(
+    (mask, part, bit) => mask | (parts.includes(part) ? 1 << bit : 0),
+    0,
+  );
   const code = SPECIAL[base] ?? (base.length === 1 ? base.charCodeAt(0) : undefined);
-  const inputs = code === undefined ? LEGACY_INPUTS : [...LEGACY_INPUTS, `\u001b[${code};${modifier + 1}u`];
+  const inputs =
+    code === undefined ? LEGACY_INPUTS : [...LEGACY_INPUTS, `\u001b[${code};${modifier + 1}u`];
   return inputs.filter((input) => matchesKey(input, key as KeyId));
 }
 
 export function btwKeysOverlap(first: string, second: string): boolean {
   const normalized = normalizeBtwKey(first);
-  return normalized !== undefined && inputsFor(normalized).some((input) => matchesKey(input, second as KeyId));
+  return (
+    normalized !== undefined &&
+    inputsFor(normalized).some((input) => matchesKey(input, second as KeyId))
+  );
 }
 
 export interface BtwShortcuts {
@@ -113,7 +140,9 @@ function reservedKeys(keybindings: KeybindingsManager, copyOnSelect: boolean): s
     "ctrl+j",
     "pageUp",
     "pageDown",
-    ...Object.keys(TUI_KEYBINDINGS).flatMap((id) => keybindings.getKeys(id as keyof typeof TUI_KEYBINDINGS)),
+    ...Object.keys(TUI_KEYBINDINGS).flatMap((id) =>
+      keybindings.getKeys(id as keyof typeof TUI_KEYBINDINGS),
+    ),
     ...(!copyOnSelect ? keybindings.getKeys("app.message.copy") : []),
   ];
 }
@@ -121,7 +150,10 @@ function reservedKeys(keybindings: KeybindingsManager, copyOnSelect: boolean): s
 function isTextKey(key: string): boolean {
   const parts = key.split("+");
   const base = parts.at(-1) ?? "";
-  return (base.length === 1 || base === "space") && !parts.some((part) => ["ctrl", "alt", "super"].includes(part));
+  return (
+    (base.length === 1 || base === "space") &&
+    !parts.some((part) => ["ctrl", "alt", "super"].includes(part))
+  );
 }
 
 export function resolveBtwShortcuts(
@@ -165,14 +197,21 @@ function resolveShortcutSnapshot(
     cycleThinkingLevel: keybindings.getKeys("app.thinking.cycle"),
     bringToMain: ["ctrl+r"],
   };
-  const usable = (action: BtwShortcutAction, candidate: string, inherited = false): string | undefined => {
+  const usable = (
+    action: BtwShortcutAction,
+    candidate: string,
+    inherited = false,
+  ): string | undefined => {
     const key = normalizeBtwKey(candidate);
     if (!key || (!inherited && isTextKey(key))) return undefined;
     const inputs = inputsFor(key);
     if (!inputs.length) return undefined;
     if (action === "exit" && key === "ctrl+c") return key;
     if (
-      reserved.some((other) => typeof other === "string" && inputs.some((input) => matchesKey(input, other as KeyId)))
+      reserved.some(
+        (other) =>
+          typeof other === "string" && inputs.some((input) => matchesKey(input, other as KeyId)),
+      )
     )
       return undefined;
     return key;
@@ -227,8 +266,10 @@ function resolveShortcutSnapshot(
   return {
     keys,
     warnings,
-    matches: (data, action) => !isKeyRelease(data) && keys[action].some((key) => matchesKey(data, key as KeyId)),
-    label: (action) => (keys[action].length ? formatKeyLabel(keys[action][0] ?? "") : "Unavailable"),
+    matches: (data, action) =>
+      !isKeyRelease(data) && keys[action].some((key) => matchesKey(data, key as KeyId)),
+    label: (action) =>
+      keys[action].length ? formatKeyLabel(keys[action][0] ?? "") : "Unavailable",
   };
 }
 
@@ -241,7 +282,8 @@ export function validateBtwShortcutEdit(
 ): string | undefined {
   // Reset must remain available even when several existing overrides conflict.
   if (value === undefined) return undefined;
-  if (!normalizeBtwKey(value)) return "Invalid key combination. Use a Pi key name such as ctrl+q or f6.";
+  if (!normalizeBtwKey(value))
+    return "Invalid key combination. Use a Pi key name such as ctrl+q or f6.";
   const next = { ...overrides, [action]: value };
   const resolved = resolveBtwShortcuts(next, keybindings, copyOnSelect);
   const previous = resolveBtwShortcuts(overrides, keybindings, copyOnSelect);

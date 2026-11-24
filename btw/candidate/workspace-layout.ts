@@ -124,7 +124,12 @@ export class BtwSplitPane implements BtwFullscreenLayoutComponent {
   constructor(private readonly options: BtwSplitPaneOptions) {
     this.sidePaneRatio = clampSidePaneRatio(options.sidePaneRatio ?? DEFAULT_BTW_SIDE_PANE_RATIO);
     this.persistedSidePaneRatio = this.sidePaneRatio;
-    this.mainPane = new MainThreadPane(options.mainThread, options.mainLayout, options.theme, options.terminalRows);
+    this.mainPane = new MainThreadPane(
+      options.mainThread,
+      options.mainLayout,
+      options.theme,
+      options.terminalRows,
+    );
     this.viewportRouter = new PaneViewportRouter(
       options.sideScrollView ?? findPrimaryScrollView(options.sideLayout),
       this.mainPane.getPrimaryScrollView(),
@@ -133,7 +138,9 @@ export class BtwSplitPane implements BtwFullscreenLayoutComponent {
     this.viewportRouter.activate("side");
     const separator: Component = {
       render: (width) =>
-        Array.from({ length: Math.max(1, options.terminalRows()) }, () => truncateToWidth(this.renderDivider(), width)),
+        Array.from({ length: Math.max(1, options.terminalRows()) }, () =>
+          truncateToWidth(this.renderDivider(), width),
+        ),
       handleMouse: (event) => this.handleDividerMouse(event),
       invalidate() {},
     };
@@ -184,7 +191,9 @@ export class BtwSplitPane implements BtwFullscreenLayoutComponent {
     const safeWidth = Math.max(1, width);
     this.handleViewportWidth(safeWidth);
     if (safeWidth < MIN_BTW_SPLIT_COLUMNS) {
-      return this.options.sideComponent.render(safeWidth).map((line) => truncateToWidth(line, safeWidth));
+      return this.options.sideComponent
+        .render(safeWidth)
+        .map((line) => truncateToWidth(line, safeWidth));
     }
 
     const { sideWidth, mainWidth } = paneWidths(safeWidth, this.options.layout, this.sidePaneRatio);
@@ -241,7 +250,8 @@ export class BtwSplitPane implements BtwFullscreenLayoutComponent {
     if (event.type === "release") {
       const changed = this.updateSidePaneRatio(event.screenX);
       const startRatio = this.dividerDragStartRatio;
-      const failedDuringDrag = this.failedRatioSaveGenerationDuringDrag === this.ratioSaveGeneration;
+      const failedDuringDrag =
+        this.failedRatioSaveGenerationDuringDrag === this.ratioSaveGeneration;
       this.dividerDragStartRatio = undefined;
       this.failedRatioSaveGenerationDuringDrag = undefined;
       if (failedDuringDrag && this.sidePaneRatio === this.persistedSidePaneRatio) {
@@ -317,7 +327,8 @@ export class BtwSplitPane implements BtwFullscreenLayoutComponent {
   private queuePaneFocus(pane: BtwActivePane): void {
     const generation = ++this.focusGeneration;
     queueMicrotask(() => {
-      if (this.disposed || generation !== this.focusGeneration || this.options.hasFocusedOverlay()) return;
+      if (this.disposed || generation !== this.focusGeneration || this.options.hasFocusedOverlay())
+        return;
       this.activatePane(this.terminalColumns() < MIN_BTW_SPLIT_COLUMNS ? "side" : pane);
     });
   }
@@ -415,7 +426,10 @@ class MainThreadPane {
     private readonly terminalRows: () => number,
   ) {
     this.body = {
-      render: (width) => mainThread.render(Math.max(1, width)).map((line) => truncateToWidth(line, Math.max(1, width))),
+      render: (width) =>
+        mainThread
+          .render(Math.max(1, width))
+          .map((line) => truncateToWidth(line, Math.max(1, width))),
       invalidate() {},
     };
     if (mainLayout) {
@@ -466,14 +480,16 @@ class PaneViewportRouter {
   activate(pane: BtwActivePane): void {
     if (this.disposed) return;
     const target = pane === "side" ? this.side : this.main;
-    for (const scrollView of this.originalPrimary.keys()) setScrollViewPrimary(scrollView, scrollView === target);
+    for (const scrollView of this.originalPrimary.keys())
+      setScrollViewPrimary(scrollView, scrollView === target);
     this.setViewportTarget(target);
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    for (const [scrollView, primary] of this.originalPrimary) setScrollViewPrimary(scrollView, primary);
+    for (const [scrollView, primary] of this.originalPrimary)
+      setScrollViewPrimary(scrollView, primary);
     this.setViewportTarget(undefined);
   }
 }
@@ -522,7 +538,11 @@ function paneForMouseClick(
   return clickedLeft ? "main" : "side";
 }
 
-function paneWidths(width: number, layout: Exclude<BtwLayout, "fullscreen">, sidePaneRatio: number) {
+function paneWidths(
+  width: number,
+  layout: Exclude<BtwLayout, "fullscreen">,
+  sidePaneRatio: number,
+) {
   const contentWidth = Math.max(2, width - PANE_DIVIDER_COLUMNS);
   const sideWidth = clamp(
     Math.round(contentWidth * clampSidePaneRatio(sidePaneRatio)),

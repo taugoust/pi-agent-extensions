@@ -25,13 +25,29 @@ const liveMetadata = {
 {
   const parsed = parseCommandTimeoutMetadata(liveMetadata);
   assert.deepEqual(parsed, { defaultMs: 80, maximumMs: 120, source: "policy" });
-  const budget = deriveCommandTimeoutBudget({ metadata: liveMetadata, fallback: envFallback, transportSlackMs: 30, terminalResponseMarginMs });
+  const budget = deriveCommandTimeoutBudget({
+    metadata: liveMetadata,
+    fallback: envFallback,
+    transportSlackMs: 30,
+    terminalResponseMarginMs,
+  });
   assert.equal(budget.policy.origin, "metadata");
   assert.equal(budget.executionTimeoutMs, 80);
-  assert.equal(budget.transportSlackMs, 30, "metadata without approval_extension_ms must preserve configured slack");
+  assert.equal(
+    budget.transportSlackMs,
+    30,
+    "metadata without approval_extension_ms must preserve configured slack",
+  );
   assert.equal(budget.transportTimeoutMs, 110);
-  assert.equal(budget.requestedTimeoutMs, undefined, "omitted timeout_ms must stay omitted on the wire");
-  assert.ok(budget.transportTimeoutMs > 20, "omitted command did not outlive the deliberately smaller generic-tool fixture");
+  assert.equal(
+    budget.requestedTimeoutMs,
+    undefined,
+    "omitted timeout_ms must stay omitted on the wire",
+  );
+  assert.ok(
+    budget.transportTimeoutMs > 20,
+    "omitted command did not outlive the deliberately smaller generic-tool fixture",
+  );
 }
 
 // A producer-advertised cumulative approval allowance raises the actual slack
@@ -52,9 +68,16 @@ const liveMetadata = {
     approvalExtensionMs: 70,
     source: "policy",
   });
-  assert.equal(parseCommandTimeoutMetadata({
-    command_timeout: { default_ms: 1, approval_extension_ms: MAX_AGENTSH_DURATION_MS, source: "policy" },
-  })?.approvalExtensionMs, MAX_AGENTSH_DURATION_MS);
+  assert.equal(
+    parseCommandTimeoutMetadata({
+      command_timeout: {
+        default_ms: 1,
+        approval_extension_ms: MAX_AGENTSH_DURATION_MS,
+        source: "policy",
+      },
+    })?.approvalExtensionMs,
+    MAX_AGENTSH_DURATION_MS,
+  );
 
   const raised = deriveCommandTimeoutBudget({
     metadata,
@@ -87,9 +110,24 @@ const liveMetadata = {
 
 // Attachment/workspace metadata is irrelevant to the shared REST budget.
 {
-  const direct = deriveCommandTimeoutBudget({ metadata: { ...liveMetadata, workspace_mode: "direct" }, fallback: envFallback, transportSlackMs: 30, terminalResponseMarginMs });
-  const shadow = deriveCommandTimeoutBudget({ metadata: { ...liveMetadata, workspace_mode: "shadow" }, fallback: envFallback, transportSlackMs: 30, terminalResponseMarginMs });
-  const remote = deriveCommandTimeoutBudget({ metadata: { ...liveMetadata, workspace_mode: "shadow", remote: "ssh" }, fallback: envFallback, transportSlackMs: 30, terminalResponseMarginMs });
+  const direct = deriveCommandTimeoutBudget({
+    metadata: { ...liveMetadata, workspace_mode: "direct" },
+    fallback: envFallback,
+    transportSlackMs: 30,
+    terminalResponseMarginMs,
+  });
+  const shadow = deriveCommandTimeoutBudget({
+    metadata: { ...liveMetadata, workspace_mode: "shadow" },
+    fallback: envFallback,
+    transportSlackMs: 30,
+    terminalResponseMarginMs,
+  });
+  const remote = deriveCommandTimeoutBudget({
+    metadata: { ...liveMetadata, workspace_mode: "shadow", remote: "ssh" },
+    fallback: envFallback,
+    transportSlackMs: 30,
+    terminalResponseMarginMs,
+  });
   assert.deepEqual(direct, shadow);
   assert.deepEqual(shadow, remote);
 }
@@ -98,11 +136,24 @@ const liveMetadata = {
 // is a protocol/config error rather than silently changing timeout policy.
 {
   assert.equal(parseCommandTimeoutMetadata({ session_id: "old-supervisor" }), undefined);
-  const configured = deriveCommandTimeoutBudget({ metadata: { session_id: "old-supervisor" }, fallback: envFallback, transportSlackMs: 30, terminalResponseMarginMs });
+  const configured = deriveCommandTimeoutBudget({
+    metadata: { session_id: "old-supervisor" },
+    fallback: envFallback,
+    transportSlackMs: 30,
+    terminalResponseMarginMs,
+  });
   assert.equal(configured.policy.origin, "fallback");
   assert.equal(configured.executionTimeoutMs, 250);
-  assert.equal(configured.transportSlackMs, 30, "older-server fallback must keep configured command slack");
-  assert.equal(configured.policy.maximumMs, 250, "compatibility timeout must also be the client ceiling");
+  assert.equal(
+    configured.transportSlackMs,
+    30,
+    "older-server fallback must keep configured command slack",
+  );
+  assert.equal(
+    configured.policy.maximumMs,
+    250,
+    "compatibility timeout must also be the client ceiling",
+  );
   assert.equal(configured.policy.source, "compatibility_env");
 
   const invalidMetadata = [
@@ -120,18 +171,40 @@ const liveMetadata = {
     { command_timeout: { default_ms: 80, approval_extension_ms: 1.5, source: "policy" } },
     { command_timeout: { default_ms: 80, approval_extension_ms: "1", source: "policy" } },
     { command_timeout: { default_ms: 80, approval_extension_ms: Number.NaN, source: "policy" } },
-    { command_timeout: { default_ms: 80, approval_extension_ms: Number.MAX_SAFE_INTEGER + 1, source: "policy" } },
-    { command_timeout: { default_ms: 80, approval_extension_ms: MAX_AGENTSH_DURATION_MS + 1, source: "policy" } },
+    {
+      command_timeout: {
+        default_ms: 80,
+        approval_extension_ms: Number.MAX_SAFE_INTEGER + 1,
+        source: "policy",
+      },
+    },
+    {
+      command_timeout: {
+        default_ms: 80,
+        approval_extension_ms: MAX_AGENTSH_DURATION_MS + 1,
+        source: "policy",
+      },
+    },
   ];
   for (const metadata of invalidMetadata) {
     assert.throws(
-      () => deriveCommandTimeoutBudget({ metadata, fallback: envFallback, transportSlackMs: 30, terminalResponseMarginMs }),
-      (error) => error instanceof CommandTimeoutMetadataError && error.code === "E_COMMAND_TIMEOUT_METADATA",
+      () =>
+        deriveCommandTimeoutBudget({
+          metadata,
+          fallback: envFallback,
+          transportSlackMs: 30,
+          terminalResponseMarginMs,
+        }),
+      (error) =>
+        error instanceof CommandTimeoutMetadataError && error.code === "E_COMMAND_TIMEOUT_METADATA",
     );
   }
 
   const builtin = configuredCommandExecutionTimeout(undefined);
-  assert.deepEqual(builtin, { defaultMs: BUILTIN_COMMAND_EXECUTION_TIMEOUT_MS, source: "builtin_default" });
+  assert.deepEqual(builtin, {
+    defaultMs: BUILTIN_COMMAND_EXECUTION_TIMEOUT_MS,
+    source: "builtin_default",
+  });
   assert.equal(BUILTIN_COMMAND_EXECUTION_TIMEOUT_MS, 14_400_000);
 }
 
@@ -146,7 +219,11 @@ const liveMetadata = {
     transportSlackMs: legacyDefaultSlack,
     terminalResponseMarginMs: 10,
   });
-  assert.equal(legacyBudget.transportSlackMs, 310, "compatibility fallback changed the legacy default command slack");
+  assert.equal(
+    legacyBudget.transportSlackMs,
+    310,
+    "compatibility fallback changed the legacy default command slack",
+  );
   assert.throws(() => configuredCommandTransportSlack("-1", 300, 10), /non-negative safe integer/);
   assert.throws(() => configuredCommandExecutionTimeout("0"), /positive safe integer/);
 }
@@ -188,7 +265,11 @@ const liveMetadata = {
     terminalResponseMarginMs,
     timeoutMs: 500,
   });
-  assert.equal(compatibility.requestedTimeoutMs, 500, "compatibility ceiling pre-capped the wire request");
+  assert.equal(
+    compatibility.requestedTimeoutMs,
+    500,
+    "compatibility ceiling pre-capped the wire request",
+  );
   assert.equal(compatibility.executionTimeoutMs, 250);
   assert.equal(compatibility.transportTimeoutMs, 280);
   assert.equal(compatibility.executionTimeoutSource, "policy_cap");
@@ -204,33 +285,57 @@ const liveMetadata = {
   assert.equal(maximumWireValue.executionTimeoutMs, 10);
   assert.equal(maximumWireValue.transportTimeoutMs, 11);
   assert.equal(MAX_AGENTSH_DURATION_MS, 9_223_372_036_854);
-  assert.throws(() => deriveCommandTimeoutBudget({
-    metadata: { command_timeout: { default_ms: 5, maximum_ms: 10, source: "policy" } },
-    fallback: envFallback,
-    transportSlackMs: 1,
-    terminalResponseMarginMs,
-    timeoutMs: MAX_AGENTSH_DURATION_MS + 1,
-  }), /AgentSH\/Go time\.Duration limit/);
+  assert.throws(
+    () =>
+      deriveCommandTimeoutBudget({
+        metadata: { command_timeout: { default_ms: 5, maximum_ms: 10, source: "policy" } },
+        fallback: envFallback,
+        transportSlackMs: 1,
+        terminalResponseMarginMs,
+        timeoutMs: MAX_AGENTSH_DURATION_MS + 1,
+      }),
+    /AgentSH\/Go time\.Duration limit/,
+  );
 }
 
 // Milliseconds must be exact and dispatched timer arithmetic must fit Node's limit.
 {
-  for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+  for (const value of [
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+  ]) {
     assert.throws(() => requestedCommandTimeoutMs({ timeoutMs: value }), /positive safe integer/);
   }
-  assert.throws(() => requestedCommandTimeoutMs({ timeoutMs: Number.MAX_SAFE_INTEGER }), /AgentSH\/Go time\.Duration limit/);
+  assert.throws(
+    () => requestedCommandTimeoutMs({ timeoutMs: Number.MAX_SAFE_INTEGER }),
+    /AgentSH\/Go time\.Duration limit/,
+  );
   for (const value of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
     assert.throws(() => requestedCommandTimeoutMs({ timeoutSeconds: value }), /finite positive/);
   }
-  assert.throws(() => requestedCommandTimeoutMs({ timeoutSeconds: 0.0005 }), /positive safe integer/);
-  assert.throws(() => requestedCommandTimeoutMs({ timeoutSeconds: 0, timeoutMs: 20 }), /finite positive/);
-  assert.throws(() => deriveCommandTimeoutBudget({
-    metadata: { command_timeout: { default_ms: 5, source: "fallback" } },
-    fallback: envFallback,
-    transportSlackMs: 1,
-    terminalResponseMarginMs,
-    timeoutMs: MAX_NODE_TIMER_MS,
-  }), /Node\.js timer limit/);
+  assert.throws(
+    () => requestedCommandTimeoutMs({ timeoutSeconds: 0.0005 }),
+    /positive safe integer/,
+  );
+  assert.throws(
+    () => requestedCommandTimeoutMs({ timeoutSeconds: 0, timeoutMs: 20 }),
+    /finite positive/,
+  );
+  assert.throws(
+    () =>
+      deriveCommandTimeoutBudget({
+        metadata: { command_timeout: { default_ms: 5, source: "fallback" } },
+        fallback: envFallback,
+        transportSlackMs: 1,
+        terminalResponseMarginMs,
+        timeoutMs: MAX_NODE_TIMER_MS,
+      }),
+    /Node\.js timer limit/,
+  );
 }
 
 // Structured server markers, not exit code 124, select execution-timeout semantics.
@@ -242,34 +347,65 @@ const liveMetadata = {
       exit_code: 124,
       termination_reason: "command_timeout",
       command_timeout: { effective_ms: 120, source: "policy_cap" },
-      exec_response: { result: { error: { code: "E_COMMAND_TIMEOUT", message: "server killed the command tree" } } },
+      exec_response: {
+        result: { error: { code: "E_COMMAND_TIMEOUT", message: "server killed the command tree" } },
+      },
     },
   };
-  assert.deepEqual(commandExecutionTimeoutDetails(structured, {
-    executionTimeoutMs: 500,
-    executionTimeoutSource: "explicit_request",
-  }), {
-    effectiveTimeoutMs: 120,
-    source: "policy_cap",
-    serverMessage: "server killed the command tree",
-  });
+  assert.deepEqual(
+    commandExecutionTimeoutDetails(structured, {
+      executionTimeoutMs: 500,
+      executionTimeoutSource: "explicit_request",
+    }),
+    {
+      effectiveTimeoutMs: 120,
+      source: "policy_cap",
+      serverMessage: "server killed the command tree",
+    },
+  );
 
-  assert.deepEqual(commandExecutionTimeoutDetails({
-    ok: false,
-    result: { exit_code: 124, error_code: "E_COMMAND_TIMEOUT", timeout_ms: 90, timeout_source: "explicit_request" },
-  }, {
-    executionTimeoutMs: 80,
-    executionTimeoutSource: "policy",
-  }), {}, "generic timeout_ms fabricated a server-effective timeout/source");
+  assert.deepEqual(
+    commandExecutionTimeoutDetails(
+      {
+        ok: false,
+        result: {
+          exit_code: 124,
+          error_code: "E_COMMAND_TIMEOUT",
+          timeout_ms: 90,
+          timeout_source: "explicit_request",
+        },
+      },
+      {
+        executionTimeoutMs: 80,
+        executionTimeoutSource: "policy",
+      },
+    ),
+    {},
+    "generic timeout_ms fabricated a server-effective timeout/source",
+  );
 
-  assert.deepEqual(commandExecutionTimeoutDetails({
-    result: { terminationReason: "command_timeout", effectiveTimeoutMs: 70, effectiveTimeoutSource: "explicit_request" },
-  }), { effectiveTimeoutMs: 70, source: "explicit_request" });
+  assert.deepEqual(
+    commandExecutionTimeoutDetails({
+      result: {
+        terminationReason: "command_timeout",
+        effectiveTimeoutMs: 70,
+        effectiveTimeoutSource: "explicit_request",
+      },
+    }),
+    { effectiveTimeoutMs: 70, source: "explicit_request" },
+  );
 
-  assert.equal(commandExecutionTimeoutDetails({ ok: true, result: { exit_code: 124 } }, {
-    executionTimeoutMs: 80,
-    executionTimeoutSource: "policy",
-  }), undefined, "ordinary child exit 124 was inferred to be a timeout");
+  assert.equal(
+    commandExecutionTimeoutDetails(
+      { ok: true, result: { exit_code: 124 } },
+      {
+        executionTimeoutMs: 80,
+        executionTimeoutSource: "policy",
+      },
+    ),
+    undefined,
+    "ordinary child exit 124 was inferred to be a timeout",
+  );
 }
 
 // Public error classes retain machine-readable server/client budgets and can
@@ -291,7 +427,10 @@ const liveMetadata = {
   assert.equal(execution.clientExecutionTimeoutMs, 120);
   assert.equal(execution.clientExecutionTimeoutSource, "policy_cap");
   assert.match(execution.message, /source: policy_cap, exit code 124/);
-  assert.equal(execution.withToolOutput("partial stdout\nFull output: \/remote\/artifact"), execution);
+  assert.equal(
+    execution.withToolOutput("partial stdout\nFull output: \/remote\/artifact"),
+    execution,
+  );
   assert.match(execution.message, /partial stdout/);
 
   const legacy = new CommandExecutionTimeoutError({

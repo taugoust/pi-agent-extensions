@@ -4,16 +4,27 @@ import { notifyTerminal } from "./errors.js";
 import type { ActiveGoal } from "./persistence.js";
 import { formatFooterStatus, STATUS_KEY, transitionGoal, type GoalRuntime } from "./runtime.js";
 
-import { completionSummaryRejection } from './completion-summary.ts';
-export { completionSummaryRejection, MAX_COMPLETION_SUMMARY_LENGTH } from './completion-summary.ts';
+import { completionSummaryRejection } from "./completion-summary.ts";
+export { completionSummaryRejection, MAX_COMPLETION_SUMMARY_LENGTH } from "./completion-summary.ts";
 
 /** Callers must authorize the lifecycle transition before invoking shared verification/cleanup. */
-export function completeVerifiedGoal(runtime: GoalRuntime, ctx: ExtensionContext, goal: ActiveGoal, summary: string, userOverride = false) {
+export function completeVerifiedGoal(
+  runtime: GoalRuntime,
+  ctx: ExtensionContext,
+  goal: ActiveGoal,
+  summary: string,
+  userOverride = false,
+) {
   const rejection = completionSummaryRejection(summary);
   if (rejection) throw new Error(`Goal completion rejected: ${rejection}.`);
   // The user's override from the Work tab completes the goal with tasks still open.
-  const unfinished = userOverride ? [] : readGoalTasks(ctx, goal).filter(step => step.status !== "completed");
-  if (unfinished.length) throw new Error(`Goal completion rejected: ${unfinished.length} required tasks remain unfinished: ${unfinished.map(step => step.text).join("; ")}`);
+  const unfinished = userOverride
+    ? []
+    : readGoalTasks(ctx, goal).filter((step) => step.status !== "completed");
+  if (unfinished.length)
+    throw new Error(
+      `Goal completion rejected: ${unfinished.length} required tasks remain unfinished: ${unfinished.map((step) => step.text).join("; ")}`,
+    );
 
   runtime.clearGoalWaitTimer();
   runtime.activeGoal = transitionGoal(goal, "complete");
@@ -22,7 +33,10 @@ export function completeVerifiedGoal(runtime: GoalRuntime, ctx: ExtensionContext
   if (goal.status !== "paused") runtime.recordGoalUsage(runtime.activeGoal, ctx);
   runtime.persistGoal(runtime.activeGoal);
 
-  ctx.ui.setStatus(STATUS_KEY, formatFooterStatus(runtime.activeGoal, runtime.continuationLimits.automaticTurns, ctx.ui.theme));
+  ctx.ui.setStatus(
+    STATUS_KEY,
+    formatFooterStatus(runtime.activeGoal, runtime.continuationLimits.automaticTurns, ctx.ui.theme),
+  );
   runtime.clearCompletedGoal(ctx);
   runtime.showCompletionStatus(ctx);
   notifyTerminal(ctx.ui, `Goal complete: ${goal.text}`, "info");

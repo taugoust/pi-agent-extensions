@@ -2,20 +2,22 @@
   "name": "pi-agent-extensions",
   "version": "0.1.0",
   "description": "A collection of pi coding agent extensions",
-  "type": "module",
-  "workspaces": [
-    "fetch"
+  "keywords": [
+    "pi-package"
   ],
-  "keywords": ["pi-package"],
-  "author": "rytswd",
   "license": "MIT",
+  "author": "rytswd",
   "repository": {
     "type": "git",
     "url": "https://github.com/taugoust/pi-agent-extensions.git"
   },
+  "workspaces": [
+    "fetch"
+  ],
+  "type": "module",
   "peerDependencies": {
-    "@earendil-works/pi-ai": "^1.0.0",
     "@earendil-works/pi-agent-core": "^1.0.0",
+    "@earendil-works/pi-ai": "^1.0.0",
     "@earendil-works/pi-coding-agent": "^1.0.0",
     "@earendil-works/pi-tui": "^1.0.0",
     "@sinclair/typebox": "^0.34.0"

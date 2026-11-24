@@ -99,7 +99,10 @@ else
     # Shared goal/progress projections need the state helper, not the progress
     # extension entrypoint or its autoload registration.
     ${lib.optionalString
-      ((builtins.elem "workflows" selectedExtensions || builtins.elem "subagent" selectedExtensions) && !(builtins.elem "progress" selectedExtensions))
+      (
+        (builtins.elem "workflows" selectedExtensions || builtins.elem "subagent" selectedExtensions)
+        && !(builtins.elem "progress" selectedExtensions)
+      )
       ''
         mkdir -p "$out/progress"
         cp ${self}/progress/progress-state.ts "$out/progress/progress-state.ts"

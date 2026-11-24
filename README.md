@@ -31,41 +31,41 @@ Extensions are **opt-in**. [Build a selective bundle or install without Nix →]
 
 ### Workflows and delegation
 
-| Extension | Use it for |
-| --- | --- |
-| [BTW](btw/README.md) | Ask a side question without cluttering the main conversation. |
-| [Workflows](workflows/README.md) | Manage Git worktrees and explicitly authorized Goals. |
+| Extension                             | Use it for                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [BTW](btw/README.md)                  | Ask a side question without cluttering the main conversation.                                                                                                                                                                                                                                                                                                                             |
+| [Workflows](workflows/README.md)      | Manage Git worktrees and explicitly authorized Goals.                                                                                                                                                                                                                                                                                                                                     |
 | [Subagent](docs/subagent-profiles.md) | Delegate single, parallel or chained work with named profiles, [coordinator-first guidance](subagent/GUIDANCE.md), [reliable notification delivery and recovery](docs/guidance-notifications.md), [automatic worktree creation/reuse and parent-controlled cleanup](docs/automatic-subagent-worktrees.md), and optional [supervised runtime verification](docs/subagent-verification.md). |
-| [Background jobs](background-job) | Run, monitor and clean up durable shell jobs. |
-| [Progress](OBSERVABILITY.md) | Keep multi-step work visible. |
-| [Auto](auto) | Opt into automatic continuation with `/auto`. |
+| [Background jobs](background-job)     | Run, monitor and clean up durable shell jobs.                                                                                                                                                                                                                                                                                                                                             |
+| [Progress](OBSERVABILITY.md)          | Keep multi-step work visible.                                                                                                                                                                                                                                                                                                                                                             |
+| [Auto](auto)                          | Opt into automatic continuation with `/auto`.                                                                                                                                                                                                                                                                                                                                             |
 
 ### Tools and terminal
 
-| Extension | Use it for |
-| --- | --- |
-| [Fetch](fetch) | Read web pages and call HTTP APIs. |
-| [PDF](pdf) | Work with PDF documents. |
-| [SSH](ssh) | Retarget work to a remote machine. |
-| [Questionnaire](questionnaire) | Ask structured questions instead of guessing. |
-| [Modal editor](modal-editor) | Edit longer input in a terminal dialog. |
-| [direnv](direnv) | Refresh the project's environment. |
-| [System theme](mac-system-theme) | Follow macOS appearance. |
+| Extension                            | Use it for                                             |
+| ------------------------------------ | ------------------------------------------------------ |
+| [Fetch](fetch)                       | Read web pages and call HTTP APIs.                     |
+| [PDF](pdf)                           | Work with PDF documents.                               |
+| [SSH](ssh)                           | Retarget work to a remote machine.                     |
+| [Questionnaire](questionnaire)       | Ask structured questions instead of guessing.          |
+| [Modal editor](modal-editor)         | Edit longer input in a terminal dialog.                |
+| [direnv](direnv)                     | Refresh the project's environment.                     |
+| [System theme](mac-system-theme)     | Follow macOS appearance.                               |
 | [Reload on deploy](reload-on-deploy) | Reload Pi when idle after a deploy changes its config. |
 
 ### Accounts, visibility and control
 
-| Extension | Use it for |
-| --- | --- |
-| [OpenAI accounts](openai-accounts/README.md) | Manage named OpenAI Codex accounts with `/accounts`. |
-| [OpenAI usage (legacy)](openai-usage/README.md) | Compatibility selection; credential status and official usage links now live in `/accounts`. |
-| [Stamp](OBSERVABILITY.md) | Record timestamps, response timing and usage metadata. |
-| [Cache monitor](OBSERVABILITY.md) | Inspect prompt-cache reuse. |
-| [Idle context admission](idle-context-warning) | User/parent-owned cold-context decisions, notification admission, and native cheap compaction; independent of provider routing. |
-| [Sandbox](sandbox) | Route tools through AgentSH supervision. |
-| [Permission Gate](permission-gate) | Require approvals for guarded operations. |
-| [Slow mode](slow-mode) | Review edits before applying them. |
-| [Fence](fence) | Add lightweight path restrictions—not an OS sandbox. |
+| Extension                                       | Use it for                                                                                                                      |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| [OpenAI accounts](openai-accounts/README.md)    | Manage named OpenAI Codex accounts with `/accounts`.                                                                            |
+| [OpenAI usage (legacy)](openai-usage/README.md) | Compatibility selection; credential status and official usage links now live in `/accounts`.                                    |
+| [Stamp](OBSERVABILITY.md)                       | Record timestamps, response timing and usage metadata.                                                                          |
+| [Cache monitor](OBSERVABILITY.md)               | Inspect prompt-cache reuse.                                                                                                     |
+| [Idle context admission](idle-context-warning)  | User/parent-owned cold-context decisions, notification admission, and native cheap compaction; independent of provider routing. |
+| [Sandbox](sandbox)                              | Route tools through AgentSH supervision.                                                                                        |
+| [Permission Gate](permission-gate)              | Require approvals for guarded operations.                                                                                       |
+| [Slow mode](slow-mode)                          | Review edits before applying them.                                                                                              |
+| [Fence](fence)                                  | Add lightweight path restrictions—not an OS sandbox.                                                                            |
 
 [Fast Mode and optional MCP integration →](nix/README.md#source-composition)
 
@@ -73,12 +73,12 @@ Extensions are **opt-in**. [Build a selective bundle or install without Nix →]
 
 Bundled skills: [GitHub search](skills/github-repo-search), [Apple Reminders](skills/remindctl), [draw.io](skills/drawio) and [TikZ figures](skills/tikz-figure-recreation).
 
-| Want to… | Guide |
-| --- | --- |
-| Configure Pi, models and extension defaults | [Nix API](nix/README.md) |
-| Package only selected extensions and skills | [Composition](docs/installation.md#build-a-package-manifest) |
-| Connect terminal sessions to Paseo | [paseo-bridge-pi](https://github.com/taugoust/paseo-bridge-pi) |
-| Understand dependencies and supported surfaces | [Installation guide](docs/installation.md) |
+| Want to…                                       | Guide                                                          |
+| ---------------------------------------------- | -------------------------------------------------------------- |
+| Configure Pi, models and extension defaults    | [Nix API](nix/README.md)                                       |
+| Package only selected extensions and skills    | [Composition](docs/installation.md#build-a-package-manifest)   |
+| Connect terminal sessions to Paseo             | [paseo-bridge-pi](https://github.com/taugoust/paseo-bridge-pi) |
+| Understand dependencies and supported surfaces | [Installation guide](docs/installation.md)                     |
 
 > [!IMPORTANT]
 > Extensions run with your user permissions. Full AgentSH supervision requires a working supervisor; review prompts alone are not isolation. Keep credentials out of Nix values.

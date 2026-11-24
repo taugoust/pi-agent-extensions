@@ -57,7 +57,10 @@ function assistant(
         cacheRead: (cacheRead * RATES.cacheRead) / 1_000_000,
         cacheWrite: (cacheWrite * RATES.cacheWrite) / 1_000_000,
         total:
-          (input * RATES.input + 10 * RATES.output + cacheRead * RATES.cacheRead + cacheWrite * RATES.cacheWrite) /
+          (input * RATES.input +
+            10 * RATES.output +
+            cacheRead * RATES.cacheRead +
+            cacheWrite * RATES.cacheWrite) /
           1_000_000,
       },
     },
@@ -122,7 +125,10 @@ test("requires provider cache evidence and prices a confirmed zero-read miss", (
   assert.equal(current.hitRatePercent, 0);
   assert.equal(current.estimatedSavings, 0);
   assert.ok(Math.abs((current.cacheReadUnitCost ?? 0) - 0.000_002) < 0.000_000_001);
-  assert.ok(Math.abs((compareCacheSamples(previous, current, 1)?.estimatedMissPremium ?? 0) - 0.018) < 0.000_000_1);
+  assert.ok(
+    Math.abs((compareCacheSamples(previous, current, 1)?.estimatedMissPremium ?? 0) - 0.018) <
+      0.000_000_1,
+  );
   const rendered = formatMonitorLines(createCacheMonitorView([previous, current]))
     .map(({ text }) => text)
     .join("\n");
@@ -306,13 +312,25 @@ test("does not reconstruct all-zero usage as a miss without provider evidence", 
     timestamp: 3_000,
   });
   const restored = collectCacheSamples(
-    [messageEntry(assistant(200, 800, 0)), messageEntry(supportedProviderMiss), messageEntry(unsupportedProviderUsage)],
+    [
+      messageEntry(assistant(200, 800, 0)),
+      messageEntry(supportedProviderMiss),
+      messageEntry(unsupportedProviderUsage),
+    ],
     () => MODEL,
   );
 
-  assert.equal(restored.summaryRecords.length, 1, 'unknown cache usage still contributes to aggregate costs');
+  assert.equal(
+    restored.summaryRecords.length,
+    1,
+    "unknown cache usage still contributes to aggregate costs",
+  );
   assert.equal(restored.summaryRecords[0]?.hitRatePercent, null);
-  assert.equal(createCacheMonitorView(restored.samples, undefined, {summaryRecords: restored.summaryRecords}).session.requestCount, 3);
+  assert.equal(
+    createCacheMonitorView(restored.samples, undefined, { summaryRecords: restored.summaryRecords })
+      .session.requestCount,
+    3,
+  );
   assert.deepEqual(
     restored.samples.map(({ provider, hitRatePercent }) => [provider, hitRatePercent]),
     [
@@ -347,12 +365,19 @@ test("suppresses a pre-boundary comparison until the active epoch receives usage
   assert.ok(first && second);
 
   assert.ok(createCacheMonitorView([first, second], undefined, { activeEpoch: 0 }).comparison);
-  assert.equal(createCacheMonitorView([first, second], undefined, { activeEpoch: 1 }).comparison, null);
+  assert.equal(
+    createCacheMonitorView([first, second], undefined, { activeEpoch: 1 }).comparison,
+    null,
+  );
 });
 
 test("keeps raw model identities for comparison and sanitizes only rendered labels", () => {
   const sharedPrefix = "x".repeat(70);
-  const previous = createCacheSample(assistant(200, 800, 0, { provider: `${sharedPrefix}a` }), 0, MODEL);
+  const previous = createCacheSample(
+    assistant(200, 800, 0, { provider: `${sharedPrefix}a` }),
+    0,
+    MODEL,
+  );
   const current = createCacheSample(
     assistant(200, 800, 0, { provider: `${sharedPrefix}b`, timestamp: 2_000 }),
     0,
@@ -426,19 +451,27 @@ test("applies Pi pricing tiers and one-hour cache-write rates to fallbacks", () 
   });
   assert.ok(Math.abs((current.promptCost ?? 0) - 0.0126) < 0.000_000_1);
   assert.ok(Math.abs((current.estimatedSavings ?? 0) - 0.0144) < 0.000_000_1);
-  assert.ok(Math.abs((compareCacheSamples(previous, current, 1)?.estimatedMissPremium ?? 0) - 0.0102) < 0.000_000_1);
+  assert.ok(
+    Math.abs((compareCacheSamples(previous, current, 1)?.estimatedMissPremium ?? 0) - 0.0102) <
+      0.000_000_1,
+  );
 });
 
 test("formats a detailed live report with both rate and token loss", () => {
   const previous = createCacheSample(assistant(200, 800, 0), 0, MODEL);
   const current = createCacheSample(assistant(400, 600, 100, { timestamp: 3_500 }), 0, MODEL);
   assert.ok(previous && current);
-  const lines = formatMonitorLines(createCacheMonitorView([previous], current)).map(({ text }) => text);
+  const lines = formatMonitorLines(createCacheMonitorView([previous], current)).map(
+    ({ text }) => text,
+  );
 
   assert.match(lines[0] ?? "", /Prompt cache · LIVE · request #2/);
   assert.match(lines[1] ?? "", /hit 54\.5%.*Δ -25\.5 pp.*loss 25\.5 pp.*uncached 36\.4%/);
   assert.match(lines[2] ?? "", /prompt 1\.1k.*read 600.*write 100.*uncached 400/);
-  assert.match(lines[3] ?? "", /eligible 1k.*re-billed 400 \(40\.0%\).*read Δ -200.*start gap 2\.5s/);
+  assert.match(
+    lines[3] ?? "",
+    /eligible 1k.*re-billed 400 \(40\.0%\).*read Δ -200.*start gap 2\.5s/,
+  );
   assert.match(lines[4] ?? "", /cache saved ~\$0\.0054.*miss premium ~\$0\.0044/);
   assert.match(lines[5] ?? "", /Session {2}2 req.*re-billed 400/);
   assert.match(lines[6] ?? "", /80\.0% → 54\.5%/);

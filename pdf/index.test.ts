@@ -1,14 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
 import pdfExtension from "./index.js";
@@ -53,14 +45,19 @@ async function writeExecutable(path: string, body: string) {
 async function createFakePdfTools(root: string): Promise<string> {
   const bin = join(root, "bin");
   await mkdir(bin, { recursive: true });
-  await writeExecutable(join(bin, "pdfinfo"), `
+  await writeExecutable(
+    join(bin, "pdfinfo"),
+    `
 if (process.argv[2] === "-v") {
   console.error("pdfinfo version fixture-1");
 } else {
   console.log(["Title: Supervisor Fixture", "Author: Pi", "Pages: 2", "Page size: 612 x 792 pts", "Encrypted: no", "PDF version: 1.7"].join("\\n"));
 }
-`);
-  await writeExecutable(join(bin, "pdftoppm"), `
+`,
+  );
+  await writeExecutable(
+    join(bin, "pdftoppm"),
+    `
 const { mkdirSync, writeFileSync } = require("node:fs");
 const { dirname } = require("node:path");
 if (process.argv[2] === "-v") {
@@ -70,8 +67,11 @@ if (process.argv[2] === "-v") {
   mkdirSync(dirname(outputBase), { recursive: true });
   writeFileSync(outputBase + ".png", Buffer.from([137,80,78,71,13,10,26,10,1,2,3,4,5,6,7,8]));
 }
-`);
-  await writeExecutable(join(bin, "magick"), `
+`,
+  );
+  await writeExecutable(
+    join(bin, "magick"),
+    `
 const { mkdirSync, readFileSync, writeFileSync } = require("node:fs");
 const { dirname } = require("node:path");
 const args = process.argv.slice(2);
@@ -85,8 +85,11 @@ if (args[0] === "-version") {
   mkdirSync(dirname(output), { recursive: true });
   writeFileSync(output, readFileSync(source));
 }
-`);
-  await writeExecutable(join(bin, "pdftotext"), `
+`,
+  );
+  await writeExecutable(
+    join(bin, "pdftotext"),
+    `
 const { mkdirSync, writeFileSync } = require("node:fs");
 const { dirname } = require("node:path");
 const args = process.argv.slice(2);
@@ -101,8 +104,11 @@ if (args[0] === "-v") {
     writeFileSync(output, text);
   }
 }
-`);
-  await writeExecutable(join(bin, "pdfimages"), `
+`,
+  );
+  await writeExecutable(
+    join(bin, "pdfimages"),
+    `
 const { mkdirSync, writeFileSync } = require("node:fs");
 const { dirname } = require("node:path");
 const args = process.argv.slice(2);
@@ -113,7 +119,8 @@ if (args[0] === "-v") {
   mkdirSync(dirname(prefix), { recursive: true });
   writeFileSync(prefix + "-000.png", Buffer.from([137,80,78,71,13,10,26,10,9,8,7,6]));
 }
-`);
+`,
+  );
   return bin;
 }
 
@@ -146,7 +153,8 @@ function shellExec(
           reject(abortError());
           return;
         }
-        const exitCode = error && typeof (error as any).code === "number" ? (error as any).code : error ? 1 : 0;
+        const exitCode =
+          error && typeof (error as any).code === "number" ? (error as any).code : error ? 1 : 0;
         resolvePromise({ exitCode, stdout: stdout ?? "", stderr: stderr ?? "" });
       },
     );
@@ -154,7 +162,13 @@ function shellExec(
 }
 
 class FakeAgentSHAPI implements AgentSHPiAPI {
-  readonly execCalls: Array<{ command: string; cwd?: string; timeout_ms?: number; actor?: unknown; signal?: AbortSignal }> = [];
+  readonly execCalls: Array<{
+    command: string;
+    cwd?: string;
+    timeout_ms?: number;
+    actor?: unknown;
+    signal?: AbortSignal;
+  }> = [];
   readonly readCalls: Array<{ path: string; options: AgentSHReadFileOptions }> = [];
   readonly writeCalls: Array<{ path: string; content: string; options: unknown }> = [];
   active = true;
@@ -166,7 +180,8 @@ class FakeAgentSHAPI implements AgentSHPiAPI {
 
   #realPath(path: string): string {
     if (path === "/workspace") return this.workspace;
-    if (path.startsWith("/workspace/")) return join(this.workspace, path.slice("/workspace/".length));
+    if (path.startsWith("/workspace/"))
+      return join(this.workspace, path.slice("/workspace/".length));
     return path;
   }
 
@@ -175,7 +190,8 @@ class FakeAgentSHAPI implements AgentSHPiAPI {
     const slashWorkspace = this.workspace.replace(/\\/g, "/");
     const mapAbsolute = (value: string) => {
       if (value === slashWorkspace) return "/workspace";
-      if (value.startsWith(`${slashWorkspace}/`)) return `/workspace/${value.slice(slashWorkspace.length + 1)}`;
+      if (value.startsWith(`${slashWorkspace}/`))
+        return `/workspace/${value.slice(slashWorkspace.length + 1)}`;
       return value;
     };
     if (posix.isAbsolute(slashPath)) return posix.normalize(mapAbsolute(slashPath));
@@ -187,7 +203,8 @@ class FakeAgentSHAPI implements AgentSHPiAPI {
     commandOrParams: string | { command: string; cwd?: string; timeout_ms?: number; actor?: any },
     options: AgentSHExecOptions = {},
   ): Promise<AgentSHExecResult> {
-    const params = typeof commandOrParams === "string" ? { command: commandOrParams } : commandOrParams;
+    const params =
+      typeof commandOrParams === "string" ? { command: commandOrParams } : commandOrParams;
     this.execCalls.push({ ...params, signal: options.signal });
     if (options.signal?.aborted) throw abortError();
     if (this.denyNextCommand) {
@@ -231,11 +248,24 @@ class FakeAgentSHAPI implements AgentSHPiAPI {
     return { path: virtual, bytes_written: Buffer.byteLength(content) };
   }
 
-  async editFile() { return {}; }
-  async spawnSubagent() { return {}; }
-  async resolveApproval() { return {}; }
+  async editFile() {
+    return {};
+  }
+  async spawnSubagent() {
+    return {};
+  }
+  async resolveApproval() {
+    return {};
+  }
   async refreshDirenv() {
-    return { state: "no_envrc" as const, set_count: 0, unset_count: 0, rejected_count: 0, generation: 0, duration_ms: 0 };
+    return {
+      state: "no_envrc" as const,
+      set_count: 0,
+      unset_count: 0,
+      rejected_count: 0,
+      generation: 0,
+      duration_ms: 0,
+    };
   }
   getSupervisorMetadata() {
     return {
@@ -244,7 +274,9 @@ class FakeAgentSHAPI implements AgentSHPiAPI {
       virtual_root: "/workspace",
       real_workspace: this.workspace,
       worktree: this.workspace,
-      workspace_roots: [{ name: basename(this.workspace), real: this.workspace, work: this.workspace }],
+      workspace_roots: [
+        { name: basename(this.workspace), real: this.workspace, work: this.workspace },
+      ],
     };
   }
   getSupervisorState() {
@@ -252,7 +284,7 @@ class FakeAgentSHAPI implements AgentSHPiAPI {
       configured: true,
       active: this.active,
       protocol: "rest" as const,
-      status: this.active ? "connected" as const : "error" as const,
+      status: this.active ? ("connected" as const) : ("error" as const),
       source: "agentsh-env" as const,
       socketPath: "/tmp/fake-supervisor.sock",
       sessionId: "pdf-test-session",
@@ -275,7 +307,8 @@ function clearSupervisionEnv() {
     "AGENTSH_CHILD_CAPABILITY",
     "AGENTSH_APPROVAL_UI_SOCKET",
     "AGENTSH_PERMISSION_GATE_SOCKET",
-  ]) delete process.env[name];
+  ])
+    delete process.env[name];
   delete globalThis.__AGENTSH_PI__;
 }
 
@@ -300,7 +333,10 @@ try {
   const nativeWorkspace = join(root, "native");
   await mkdir(nativeWorkspace, { recursive: true });
   await writeFile(join(nativeWorkspace, "input.pdf"), "%PDF fixture\n", "utf8");
-  await writeFile(join(nativeWorkspace, "source.png"), Buffer.from([137,80,78,71,13,10,26,10,1,2,3,4]));
+  await writeFile(
+    join(nativeWorkspace, "source.png"),
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]),
+  );
 
   clearSupervisionEnv();
   {
@@ -318,61 +354,100 @@ try {
     assert.equal(info.details.pages, 2);
     assert.equal(info.details.sourcePdf, join(nativeWorkspace, "input.pdf"));
 
-    const rendered = await execute(pi, "pdf_render_pages", {
-      pdfPath: "input.pdf",
-      pages: "1-2",
-      outputDir: "rendered",
-      attachImages: true,
-    }, nativeWorkspace);
+    const rendered = await execute(
+      pi,
+      "pdf_render_pages",
+      {
+        pdfPath: "input.pdf",
+        pages: "1-2",
+        outputDir: "rendered",
+        attachImages: true,
+      },
+      nativeWorkspace,
+    );
     assert.equal(rendered.details.rendered.length, 2);
     assert.equal(rendered.content.filter((item: any) => item.type === "image").length, 2);
     assert.ok((await stat(join(nativeWorkspace, "rendered", "input-page-001.png.json"))).isFile());
 
-    const cropped = await execute(pi, "pdf_crop_image", {
-      sourceImagePath: "source.png",
-      crop: { x: 1, y: 2, width: 20, height: 30 },
-      outputDir: "crops",
-      attachImage: true,
-    }, nativeWorkspace);
+    const cropped = await execute(
+      pi,
+      "pdf_crop_image",
+      {
+        sourceImagePath: "source.png",
+        crop: { x: 1, y: 2, width: 20, height: 30 },
+        outputDir: "crops",
+        attachImage: true,
+      },
+      nativeWorkspace,
+    );
     assert.equal(cropped.details.dimensions.width, 640);
     assert.ok(cropped.content.some((item: any) => item.type === "image"));
 
-    const inlineText = await execute(pi, "pdf_extract_text", {
-      pdfPath: "input.pdf",
-      pages: "1",
-      maxChars: 5,
-    }, nativeWorkspace);
+    const inlineText = await execute(
+      pi,
+      "pdf_extract_text",
+      {
+        pdfPath: "input.pdf",
+        pages: "1",
+        maxChars: 5,
+      },
+      nativeWorkspace,
+    );
     assert.match(inlineText.content[0].text, /alpha\n\n\[truncated to 5 chars\]/);
 
-    await execute(pi, "pdf_extract_text", {
-      pdfPath: "input.pdf",
-      outputPath: "text/output.txt",
-    }, nativeWorkspace);
-    assert.equal(await readFile(join(nativeWorkspace, "text", "output.txt"), "utf8"), "alpha beta gamma\nsecond line\n");
+    await execute(
+      pi,
+      "pdf_extract_text",
+      {
+        pdfPath: "input.pdf",
+        outputPath: "text/output.txt",
+      },
+      nativeWorkspace,
+    );
+    assert.equal(
+      await readFile(join(nativeWorkspace, "text", "output.txt"), "utf8"),
+      "alpha beta gamma\nsecond line\n",
+    );
     assert.ok((await stat(join(nativeWorkspace, "text", "output.txt.json"))).isFile());
 
-    const extracted = await execute(pi, "pdf_extract_images", {
-      pdfPath: "input.pdf",
-      outputDir: "images",
-    }, nativeWorkspace);
+    const extracted = await execute(
+      pi,
+      "pdf_extract_images",
+      {
+        pdfPath: "input.pdf",
+        outputDir: "images",
+      },
+      nativeWorkspace,
+    );
     assert.equal(extracted.details.images.length, 1);
     assert.ok((await stat(join(nativeWorkspace, "images", "input-image-000.png"))).isFile());
 
-    const limited = await execute(pi, "pdf_render_pages", {
-      pdfPath: "input.pdf",
-      pages: "1",
-      outputDir: "limited",
-      attachImages: true,
-      maxAttachBytes: 4,
-    }, nativeWorkspace);
+    const limited = await execute(
+      pi,
+      "pdf_render_pages",
+      {
+        pdfPath: "input.pdf",
+        pages: "1",
+        outputDir: "limited",
+        attachImages: true,
+        maxAttachBytes: 4,
+      },
+      nativeWorkspace,
+    );
     assert.equal(limited.details.rendered[0].attachment.attached, false);
-    assert.match(limited.details.rendered[0].attachment.skippedReason, /larger than maxAttachBytes=4/);
+    assert.match(
+      limited.details.rendered[0].attachment.skippedReason,
+      /larger than maxAttachBytes=4/,
+    );
   }
 
   const supervisedWorkspace = join(root, "supervised");
   await mkdir(supervisedWorkspace, { recursive: true });
   await writeFile(join(supervisedWorkspace, "input.pdf"), "%PDF supervised fixture\n", "utf8");
-  await writeFile(join(supervisedWorkspace, "source.png"), Buffer.from([137,80,78,71,13,10,26,10,1,2,3,4]));
+  await writeFile(
+    join(supervisedWorkspace, "source.png"),
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]),
+  );
   const api = new FakeAgentSHAPI(supervisedWorkspace);
   globalThis.__AGENTSH_PI__ = api;
   process.env.PI_AUTO = "1";
@@ -385,69 +460,124 @@ try {
     const pi = createPi();
     pdfExtension(pi as any);
 
-    const info = await execute(pi, "pdf_info", { pdfPath: "input.pdf", timeoutMs: 1234 }, supervisedWorkspace);
+    const info = await execute(
+      pi,
+      "pdf_info",
+      { pdfPath: "input.pdf", timeoutMs: 1234 },
+      supervisedWorkspace,
+    );
     assert.equal(info.details.sourcePdf, "/workspace/input.pdf");
     assert.equal(info.details.pages, 2);
 
-    const rendered = await execute(pi, "pdf_render_pages", {
-      pdfPath: supervisedWorkspace + "/input.pdf",
-      pages: "1",
-      outputDir: supervisedWorkspace + "/rendered",
-      attachImages: true,
-      timeoutMs: 2345,
-    }, supervisedWorkspace);
+    const rendered = await execute(
+      pi,
+      "pdf_render_pages",
+      {
+        pdfPath: supervisedWorkspace + "/input.pdf",
+        pages: "1",
+        outputDir: supervisedWorkspace + "/rendered",
+        attachImages: true,
+        timeoutMs: 2345,
+      },
+      supervisedWorkspace,
+    );
     assert.equal(rendered.details.outputDir, "/workspace/rendered");
     assert.equal(rendered.details.rendered[0].outputPath, "/workspace/rendered/input-page-001.png");
     assert.ok(rendered.content.some((item: any) => item.type === "image"));
     assert.ok((await stat(join(supervisedWorkspace, "rendered", "input-page-001.png"))).isFile());
 
-    const cropped = await execute(pi, "pdf_crop_image", {
-      sourceImagePath: "source.png",
-      crop: { x: 0, y: 0, width: 10, height: 10 },
-      outputPath: "crops/crop.png",
-      attachImage: true,
-    }, supervisedWorkspace);
+    const cropped = await execute(
+      pi,
+      "pdf_crop_image",
+      {
+        sourceImagePath: "source.png",
+        crop: { x: 0, y: 0, width: 10, height: 10 },
+        outputPath: "crops/crop.png",
+        attachImage: true,
+      },
+      supervisedWorkspace,
+    );
     assert.equal(cropped.details.outputPath, "/workspace/crops/crop.png");
 
-    const inlineText = await execute(pi, "pdf_extract_text", {
-      pdfPath: "input.pdf",
-      pages: "1-2",
-    }, supervisedWorkspace);
+    const inlineText = await execute(
+      pi,
+      "pdf_extract_text",
+      {
+        pdfPath: "input.pdf",
+        pages: "1-2",
+      },
+      supervisedWorkspace,
+    );
     assert.match(inlineText.content[0].text, /alpha beta gamma/);
 
-    await execute(pi, "pdf_extract_text", {
-      pdfPath: "input.pdf",
-      outputPath: "text/output.txt",
-    }, supervisedWorkspace);
-    assert.equal(await readFile(join(supervisedWorkspace, "text", "output.txt"), "utf8"), "alpha beta gamma\nsecond line\n");
+    await execute(
+      pi,
+      "pdf_extract_text",
+      {
+        pdfPath: "input.pdf",
+        outputPath: "text/output.txt",
+      },
+      supervisedWorkspace,
+    );
+    assert.equal(
+      await readFile(join(supervisedWorkspace, "text", "output.txt"), "utf8"),
+      "alpha beta gamma\nsecond line\n",
+    );
 
-    const extracted = await execute(pi, "pdf_extract_images", {
-      pdfPath: "input.pdf",
-      outputDir: "images",
-      pages: "2",
-    }, supervisedWorkspace);
+    const extracted = await execute(
+      pi,
+      "pdf_extract_images",
+      {
+        pdfPath: "input.pdf",
+        outputDir: "images",
+        pages: "2",
+      },
+      supervisedWorkspace,
+    );
     assert.equal(extracted.details.outputDir, "/workspace/images");
     assert.equal(extracted.details.images[0].imagePath, "/workspace/images/input-image-000.png");
 
     assert.ok(api.execCalls.length > 0);
     assert.ok(api.execCalls.every((call) => call.cwd === "/workspace"));
     assert.ok(api.execCalls.every((call) => !call.command.includes(supervisedWorkspace)));
-    assert.ok(api.execCalls.some((call) => call.command.startsWith("pdfinfo ") && call.timeout_ms === 1234));
-    assert.ok(api.execCalls.some((call) => call.command.startsWith("pdftoppm ") && call.timeout_ms === 2345));
+    assert.ok(
+      api.execCalls.some((call) => call.command.startsWith("pdfinfo ") && call.timeout_ms === 1234),
+    );
+    assert.ok(
+      api.execCalls.some(
+        (call) => call.command.startsWith("pdftoppm ") && call.timeout_ms === 2345,
+      ),
+    );
     assert.ok(api.execCalls.every((call) => (call.actor as any)?.kind === "extension"));
-    assert.ok(api.writeCalls.some((call) => call.path === "/workspace/rendered/input-page-001.png.json"));
-    assert.ok(api.readCalls.some((call) => call.path === "/workspace/rendered/input-page-001.png" && call.options.maxBytes === 4 * 1024 * 1024));
+    assert.ok(
+      api.writeCalls.some((call) => call.path === "/workspace/rendered/input-page-001.png.json"),
+    );
+    assert.ok(
+      api.readCalls.some(
+        (call) =>
+          call.path === "/workspace/rendered/input-page-001.png" &&
+          call.options.maxBytes === 4 * 1024 * 1024,
+      ),
+    );
     assert.ok(api.readCalls.some((call) => call.options.limit === 2_147_483_647));
 
-    const limited = await execute(pi, "pdf_render_pages", {
-      pdfPath: "input.pdf",
-      pages: "1",
-      outputDir: "limited",
-      attachImages: true,
-      maxAttachBytes: 4,
-    }, supervisedWorkspace);
+    const limited = await execute(
+      pi,
+      "pdf_render_pages",
+      {
+        pdfPath: "input.pdf",
+        pages: "1",
+        outputDir: "limited",
+        attachImages: true,
+        maxAttachBytes: 4,
+      },
+      supervisedWorkspace,
+    );
     assert.equal(limited.details.rendered[0].attachment.attached, false);
-    assert.match(limited.details.rendered[0].attachment.skippedReason, /larger than maxAttachBytes=4/);
+    assert.match(
+      limited.details.rendered[0].attachment.skippedReason,
+      /larger than maxAttachBytes=4/,
+    );
 
     api.denyNextCommand = true;
     await assertRejectsMessage(
@@ -464,7 +594,8 @@ try {
     const controller = new AbortController();
     controller.abort();
     const cancelled = await assertRejectsMessage(
-      () => execute(pi, "pdf_info", { pdfPath: "input.pdf" }, supervisedWorkspace, controller.signal),
+      () =>
+        execute(pi, "pdf_info", { pdfPath: "input.pdf" }, supervisedWorkspace, controller.signal),
       /aborted/,
     );
     assert.equal(cancelled.name, "AbortError");

@@ -26,7 +26,23 @@ The owning coordinator session can explicitly record its model judgment with `/w
 The parent can explicitly complete a **paused** delegated goal without launching or resuming its child using authenticated `goals.complete`. It requires the exact goal/revision, fresh `user_authorized:true`, and a nonempty verification summary (maximum 4,000 characters; contradictory summaries reject). Existing completed tasks are retained. For work verified directly by the parent after stopping the coordinator, `taskEvidence:[{taskId,evidence}]` can atomically reconcile existing task IDs to completed; every unfinished task needs its own explicit evidence (maximum 1,000 UTF-8 bytes each, 48 KiB total request). This does not add/remove tasks or silently complete a checklist. Open blockers/pending questions reject completion. A linked child's exact stopped execution must be authoritatively verified; cached paused metadata is insufficient. Failed validation, stop proof or persistence leaves the checklist and lifecycle unchanged. The completion summary, evidence and parent provenance are retained in history; child identity and recorded usage remain historical, not rewritten as a worker-delivery claim. Terminal goals cannot be resurrected by old child observations. This is a metadata-only action, not permission to execute, answer a human or start a model turn. The existing authenticated bridge operator transport forwards this action without changing the snapshot/capability schema or requiring a new UI control.
 
 ```json
-{"operation":"start","action":"goals.complete","sessionId":"<owner>","serviceEpoch":"<current>","requestId":"<unique>","expectedGoalId":"<goal>","expectedEntryRevision":24,"user_authorized":true,"summary":"Verified delivery with passing Nix checks and inspected live artifacts.","taskEvidence":[{"taskId":"<existing-task>","evidence":"Inspected the passing regression results and deployed live proof."}]}
+{
+  "operation": "start",
+  "action": "goals.complete",
+  "sessionId": "<owner>",
+  "serviceEpoch": "<current>",
+  "requestId": "<unique>",
+  "expectedGoalId": "<goal>",
+  "expectedEntryRevision": 24,
+  "user_authorized": true,
+  "summary": "Verified delivery with passing Nix checks and inspected live artifacts.",
+  "taskEvidence": [
+    {
+      "taskId": "<existing-task>",
+      "evidence": "Inspected the passing regression results and deployed live proof."
+    }
+  ]
+}
 ```
 
 Goal control snapshots do not wait for cold worktree ownership or repository discovery. Worktree/completion presentation uses a single-flight cache refreshed on a later I/O turn, with a two-second discovery budget and cooperative scan yields. Initial data is loading; expired or incomplete scans disclose partial/unavailable results while retaining usable cached rows. Workspace changes and disposal cancel the old scan and reject late publication. Actual worktree completion/removal still performs its existing fresh ownership, activity, file and branch checks; presentation caches never authorize mutations.
@@ -96,7 +112,19 @@ Mutations require a new user instruction, not automatic continuation. They reuse
 Use `goal_manage` with `scope:"saved", action:"update"` and the `goal_id`. This metadata-only operation works on inactive nonterminal entries, including paused unassigned drafts and paused linked children. It never starts/resumes/completes a Goal, assigns a child, changes existing task statuses or changes the policy revision. Active and terminal entries reject it. Dedicated children cannot edit their parent's saved registry.
 
 ```json
-{"scope":"saved","action":"update","goal_id":"<saved-goal-id>","task_edits":[{"id":"<existing-task>","text":"Implement and verify the requested outcome"},{"text":"Create isolated worktrees before editing","before_task_id":"<first-existing-task>"},{"id":"<existing-task-to-move>","before_task_id":null}]}
+{
+  "scope": "saved",
+  "action": "update",
+  "goal_id": "<saved-goal-id>",
+  "task_edits": [
+    { "id": "<existing-task>", "text": "Implement and verify the requested outcome" },
+    {
+      "text": "Create isolated worktrees before editing",
+      "before_task_id": "<first-existing-task>"
+    },
+    { "id": "<existing-task-to-move>", "before_task_id": null }
+  ]
+}
 ```
 
 `task_edits` are applied in order, atomically:
@@ -121,7 +149,10 @@ Fixture-only regressions: `node --experimental-transform-types --test workflows/
 When the user explicitly asks to complete a **paused** goal whose outcome is already verified, use `goal_manage action:complete` directly—do not resume it or create an active Goal contract merely to complete it. Supply a nonempty verification summary:
 
 ```json
-{"action":"complete","summary":"Verified the outcome and every required task with passing tests and inspected results."}
+{
+  "action": "complete",
+  "summary": "Verified the outcome and every required task with passing tests and inspected results."
+}
 ```
 
 Every required task must already be `completed`; missing, contradictory or oversized summaries and stale/foreign controls are rejected. This action accepts paused goals only, not active, blocked or terminal states. It archives the real summary and checklist, preserves usage recorded before pause, clears the current goal and its continuation/wait state, and terminates without starting a model turn or acquiring autonomous execution authority. Dedicated children still cannot mutate `goal_manage` lifecycle state. Active autonomous completion remains `goal_complete` with its existing active-contract/ownership safeguards.
@@ -141,13 +172,20 @@ Offline renderer/contract regression: `node --test tests/goal-presentation.mjs`.
 Create atomically, allocating the goal and task IDs in one `goal-state` append:
 
 ```json
-{"action":"create","objective":"Verified outcome","steps":[{"text":"Implement and verify","status":"pending"}]}
+{
+  "action": "create",
+  "objective": "Verified outcome",
+  "steps": [{ "text": "Implement and verify", "status": "pending" }]
+}
 ```
 
 Add `"start":false` for a draft. Updates apply to the current goal:
 
 ```json
-{"action":"update","steps":[{"id":"<task-id>","text":"Implement and verify","status":"completed"}]}
+{
+  "action": "update",
+  "steps": [{ "id": "<task-id>", "text": "Implement and verify", "status": "completed" }]
+}
 ```
 
 Omitted tasks remain unchanged, including completed tasks. Missing task IDs create new tasks; supplied IDs must belong to this goal. Use `remove_task_ids` only for an explicit user scope change (dedicated children cannot remove parent-owned scope). An empty `steps` array does not clear the checklist. The tool call ID is the request receipt in the goal-state record. An update is rejected if the goal changed since the model last saw it.

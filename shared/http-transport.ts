@@ -3,7 +3,14 @@ import http, { type IncomingHttpHeaders, type RequestOptions } from "node:http";
 export class HttpTransportError extends Error {
   constructor(
     message: string,
-    readonly kind: "abort" | "timeout" | "request" | "response-error" | "response-aborted" | "response-closed" | "response-too-large",
+    readonly kind:
+      | "abort"
+      | "timeout"
+      | "request"
+      | "response-error"
+      | "response-aborted"
+      | "response-closed"
+      | "response-too-large",
     readonly responseStarted: boolean,
     readonly cause?: unknown,
   ) {
@@ -51,14 +58,24 @@ export async function bufferedHttpRequest(options: {
       return;
     }
     options.signal?.addEventListener("abort", onAbort, { once: true });
-    timer = setTimeout(() => fail("timeout", `HTTP request timed out after ${options.timeoutMs}ms`), options.timeoutMs);
-    const requestOptions: RequestOptions = options.request instanceof URL
-      ? { method: options.method, headers: options.headers, signal: undefined }
-      : { ...options.request, method: options.method, headers: options.headers, signal: undefined };
+    timer = setTimeout(
+      () => fail("timeout", `HTTP request timed out after ${options.timeoutMs}ms`),
+      options.timeoutMs,
+    );
+    const requestOptions: RequestOptions =
+      options.request instanceof URL
+        ? { method: options.method, headers: options.headers, signal: undefined }
+        : {
+            ...options.request,
+            method: options.method,
+            headers: options.headers,
+            signal: undefined,
+          };
     try {
-      req = options.request instanceof URL
-        ? http.request(options.request, requestOptions)
-        : http.request(requestOptions);
+      req =
+        options.request instanceof URL
+          ? http.request(options.request, requestOptions)
+          : http.request(requestOptions);
     } catch (error) {
       fail("request", "HTTP request creation failed", error);
       return;
@@ -79,10 +96,21 @@ export async function bufferedHttpRequest(options: {
         chunks.push(bytes);
       });
       res.once("error", (error) => fail("response-error", "HTTP response failed", error));
-      res.once("aborted", () => fail("response-aborted", "HTTP response aborted before completion"));
-      res.once("end", () => finish(() => resolve({ statusCode: res.statusCode || 0, headers: res.headers, body: Buffer.concat(chunks) })));
+      res.once("aborted", () =>
+        fail("response-aborted", "HTTP response aborted before completion"),
+      );
+      res.once("end", () =>
+        finish(() =>
+          resolve({
+            statusCode: res.statusCode || 0,
+            headers: res.headers,
+            body: Buffer.concat(chunks),
+          }),
+        ),
+      );
       res.once("close", () => {
-        if (!settled && !res.complete) fail("response-closed", "HTTP response closed before completion");
+        if (!settled && !res.complete)
+          fail("response-closed", "HTTP response closed before completion");
       });
     });
     req.once("error", (error) => fail("request", "HTTP request failed", error));

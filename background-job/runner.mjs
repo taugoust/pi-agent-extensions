@@ -1,12 +1,29 @@
 #!/usr/bin/env node
-import { fstatSync, linkSync, openSync, closeSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import {
+  fstatSync,
+  linkSync,
+  openSync,
+  closeSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 
 const [, , jobDir, shell, maximumRaw = "1048576"] = process.argv;
 const maximum = Number(maximumRaw);
-if (!jobDir || !shell || !Number.isSafeInteger(maximum) || maximum < 65536 || maximum > 16 * 1024 * 1024) {
+if (
+  !jobDir ||
+  !shell ||
+  !Number.isSafeInteger(maximum) ||
+  maximum < 65536 ||
+  maximum > 16 * 1024 * 1024
+) {
   process.stderr.write("invalid background-job runner arguments\n");
   process.exit(125);
 }
@@ -34,14 +51,27 @@ async function waitForLaunchReady() {
   const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
   const deadline = Date.now() + 120_000;
   for (;;) {
-    try { readFileSync(launchReadyPath); return; }
-    catch (error) { if (error?.code !== "ENOENT") throw error; }
-    try { readFileSync(cancelPath); throw new Error("launch was cancelled"); }
-    catch (error) { if (error?.code !== "ENOENT") throw error; }
-    try { readFileSync(resultPath); throw new Error("launch controller published a terminal result"); }
-    catch (error) { if (error?.code !== "ENOENT") throw error; }
+    try {
+      readFileSync(launchReadyPath);
+      return;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    try {
+      readFileSync(cancelPath);
+      throw new Error("launch was cancelled");
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    try {
+      readFileSync(resultPath);
+      throw new Error("launch controller published a terminal result");
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
     if (Date.now() >= deadline) throw new Error("launch controller handshake timed out");
-    if (!controllerIsAlive(metadata.ownerPid, metadata.ownerToken)) throw new Error("launch controller exited before opening launch gate");
+    if (!controllerIsAlive(metadata.ownerPid, metadata.ownerToken))
+      throw new Error("launch controller exited before opening launch gate");
     await sleep(25);
   }
 }
@@ -49,13 +79,22 @@ async function waitForLaunchReady() {
 function controllerIsAlive(pid, expectedToken) {
   if (process.platform === "linux") {
     try {
-      const text = readFileSync(`/proc/${pid}/stat`, "utf8"), close = text.lastIndexOf(")");
-      const fields = text.slice(close + 2).trim().split(/\s+/);
+      const text = readFileSync(`/proc/${pid}/stat`, "utf8"),
+        close = text.lastIndexOf(")");
+      const fields = text
+        .slice(close + 2)
+        .trim()
+        .split(/\s+/);
       return fields[19] && `linux-proc:${fields[19]}` === expectedToken;
-    } catch { return false; }
+    } catch {
+      return false;
+    }
   }
   const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
-  return !!result.stdout?.trim() && `ps-lstart:${result.stdout.trim().replace(/\s+/g, " ")}` === expectedToken;
+  return (
+    !!result.stdout?.trim() &&
+    `ps-lstart:${result.stdout.trim().replace(/\s+/g, " ")}` === expectedToken
+  );
 }
 
 function parseEnvironment(bytes) {
@@ -73,7 +112,8 @@ function parseEnvironment(bytes) {
 
 let tail = Buffer.alloc(0);
 let outputBytes = 0;
-let stdoutTail = Buffer.alloc(0), stderrTail = Buffer.alloc(0);
+let stdoutTail = Buffer.alloc(0),
+  stderrTail = Buffer.alloc(0);
 let dirty = false;
 let flushTimer;
 let sequence = 0;
@@ -93,7 +133,11 @@ function outputTiming() {
   const finalSecondBytes = recentOutput
     .filter(([time]) => time >= finishedAt - 1000)
     .reduce((sum, [, length]) => sum + length, 0);
-  return { bytes: outputBytes, finalSecondBytes, durationMs: finishedAt - (commandStartedAt ?? finishedAt) };
+  return {
+    bytes: outputBytes,
+    finalSecondBytes,
+    durationMs: finishedAt - (commandStartedAt ?? finishedAt),
+  };
 }
 
 function flush() {
@@ -101,26 +145,41 @@ function flush() {
   dirty = false;
   const id = `${process.pid}-${++sequence}`;
   let outputInode;
-  for (const [path, data] of [[outputPath, tail], [stdoutPath, stdoutTail], [stderrPath, stderrTail]]) {
+  for (const [path, data] of [
+    [outputPath, tail],
+    [stdoutPath, stdoutTail],
+    [stderrPath, stderrTail],
+  ]) {
     const temporary = `${path}.tmp-${id}`;
     const fd = openSync(temporary, "w", 0o600);
     try {
       writeSync(fd, data);
       if (path === outputPath) outputInode = fstatSync(fd).ino;
-    } finally { closeSync(fd); }
+    } finally {
+      closeSync(fd);
+    }
     renameSync(temporary, path);
   }
   // Published after the log it describes; readers match it by inode and size.
-  const position = { schemaVersion: 1, inode: outputInode, start: outputBytes - tail.length, size: tail.length };
+  const position = {
+    schemaVersion: 1,
+    inode: outputInode,
+    start: outputBytes - tail.length,
+    size: tail.length,
+  };
   const temporary = `${outputPositionPath}.tmp-${id}`;
   writeFileSync(temporary, `${JSON.stringify(position)}\n`, { mode: 0o600 });
   renameSync(temporary, outputPositionPath);
 }
 
 function tryFlush() {
-  try { flush(); } catch (error) {
+  try {
+    flush();
+  } catch (error) {
     loggerFailed = true;
-    process.stderr.write(`background-job log flush failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(
+      `background-job log flush failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
   }
 }
 
@@ -135,7 +194,9 @@ function scheduleFlush() {
 
 function capture(chunk, descriptor) {
   const data = Buffer.from(chunk);
-  try { writeSync(descriptor, data); } catch {}
+  try {
+    writeSync(descriptor, data);
+  } catch {}
   outputBytes += data.length;
   recordOutputTime(data.length);
   tail = tail.length === 0 ? data : Buffer.concat([tail, data]);
@@ -143,7 +204,8 @@ function capture(chunk, descriptor) {
   let stream = descriptor === 1 ? stdoutTail : stderrTail;
   stream = stream.length === 0 ? data : Buffer.concat([stream, data]);
   if (stream.length > maximum) stream = stream.subarray(stream.length - maximum);
-  if (descriptor === 1) stdoutTail = stream; else stderrTail = stream;
+  if (descriptor === 1) stdoutTail = stream;
+  else stderrTail = stream;
   dirty = true;
   scheduleFlush();
 }
@@ -152,8 +214,15 @@ function processStartToken(pid) {
   if (process.platform === "linux") {
     const text = readFileSync(`/proc/${pid}/stat`, "utf8");
     const close = text.lastIndexOf(")");
-    const fields = close < 0 ? [] : text.slice(close + 2).trim().split(/\s+/);
-    if (!fields[19] || !/^[0-9]+$/.test(fields[19])) throw new Error("cannot read command process identity");
+    const fields =
+      close < 0
+        ? []
+        : text
+            .slice(close + 2)
+            .trim()
+            .split(/\s+/);
+    if (!fields[19] || !/^[0-9]+$/.test(fields[19]))
+      throw new Error("cannot read command process identity");
     return `linux-proc:${fields[19]}`;
   }
   const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
@@ -164,23 +233,38 @@ function processStartToken(pid) {
 
 function publishProcess(pid) {
   const temporary = `${processPath}.tmp-${process.pid}`;
-  writeFileSync(temporary, `${JSON.stringify({ schemaVersion: 1, pid, startToken: processStartToken(pid), startedAt: new Date().toISOString() })}\n`, { mode: 0o600, flag: "wx" });
+  writeFileSync(
+    temporary,
+    `${JSON.stringify({ schemaVersion: 1, pid, startToken: processStartToken(pid), startedAt: new Date().toISOString() })}\n`,
+    { mode: 0o600, flag: "wx" },
+  );
   renameSync(temporary, processPath);
 }
 
 function publishResult(result) {
   const temporary = `${resultPath}.candidate-${process.pid}`;
   writeFileSync(temporary, `${JSON.stringify(result)}\n`, { mode: 0o600, flag: "wx" });
-  try { linkSync(temporary, resultPath); }
-  catch (error) { if (error?.code !== "EEXIST") throw error; }
-  finally { try { unlinkSync(temporary); } catch {} }
+  try {
+    linkSync(temporary, resultPath);
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  } finally {
+    try {
+      unlinkSync(temporary);
+    } catch {}
+  }
 }
 
 let child;
 let childClosed;
 let requestedSignal;
 try {
-  const runnerIdentity = { schemaVersion: 1, pid: process.pid, startToken: processStartToken(process.pid), startedAt: new Date().toISOString() };
+  const runnerIdentity = {
+    schemaVersion: 1,
+    pid: process.pid,
+    startToken: processStartToken(process.pid),
+    startedAt: new Date().toISOString(),
+  };
   const readyTemporary = `${runnerReadyPath}.tmp-${process.pid}`;
   writeFileSync(readyTemporary, `${JSON.stringify(runnerIdentity)}\n`, { mode: 0o600, flag: "wx" });
   // Logs exist from launch, so a job can be watched before it writes anything.
@@ -188,8 +272,12 @@ try {
   tryFlush();
   renameSync(readyTemporary, runnerReadyPath);
   await waitForLaunchReady();
-  try { readFileSync(cancelPath); throw new Error("launch was cancelled"); }
-  catch (error) { if (error?.code !== "ENOENT") throw error; }
+  try {
+    readFileSync(cancelPath);
+    throw new Error("launch was cancelled");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
   const environment = parseEnvironment(readFileSync(environmentPath));
   // The actual tmux-created runner pane wins over the controller snapshot.
   if (process.env.TMUX) environment.TMUX = process.env.TMUX;
@@ -203,35 +291,63 @@ try {
   const quotedShell = `'${shell.replaceAll("'", `'\\''`)}'`;
   const quotedCommand = `'${command.replaceAll("'", `'\\''`)}'`;
   const quotedToken = `'${gateToken}'`;
-  child = spawn(shell, ["-c", `IFS= read -r gate <&3 || exit 125; exec 3<&-; [ \"$gate\" = ${quotedToken} ] || exit 125; exec ${quotedShell} -c ${quotedCommand} background-job`], {
-    cwd: process.cwd(),
-    env: environment,
-    detached: true,
-    stdio: ["inherit", "pipe", "pipe", "pipe"],
-  });
+  child = spawn(
+    shell,
+    [
+      "-c",
+      `IFS= read -r gate <&3 || exit 125; exec 3<&-; [ \"$gate\" = ${quotedToken} ] || exit 125; exec ${quotedShell} -c ${quotedCommand} background-job`,
+    ],
+    {
+      cwd: process.cwd(),
+      env: environment,
+      detached: true,
+      stdio: ["inherit", "pipe", "pipe", "pipe"],
+    },
+  );
   if (!child.pid) throw new Error("command process has no PID");
   commandStartedAt = Date.now();
-  childClosed = new Promise(resolve => child.once("close", resolve));
-  child.on("error", error => capture(Buffer.from(`background-job spawn failed: ${error.message}\\n`), 2));
+  childClosed = new Promise((resolve) => child.once("close", resolve));
+  child.on("error", (error) =>
+    capture(Buffer.from(`background-job spawn failed: ${error.message}\\n`), 2),
+  );
   child.stdout.on("data", (chunk) => capture(chunk, 1));
   child.stderr.on("data", (chunk) => capture(chunk, 2));
   publishProcess(child.pid);
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.on(signal, () => {
       requestedSignal = signal;
-      try { process.kill(-child.pid, signal); } catch {}
+      try {
+        process.kill(-child.pid, signal);
+      } catch {}
     });
   }
   process.on("SIGUSR2", () => {
     requestedSignal = "SIGKILL";
-    try { process.kill(-child.pid, "SIGKILL"); } catch {}
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {}
   });
   child.on("close", (code, signal) => {
     if (flushTimer) clearTimeout(flushTimer);
-    try { flush(); } catch { loggerFailed = true; }
-    const cancelled = (() => { try { readFileSync(cancelPath); return true; } catch { return false; } })();
+    try {
+      flush();
+    } catch {
+      loggerFailed = true;
+    }
+    const cancelled = (() => {
+      try {
+        readFileSync(cancelPath);
+        return true;
+      } catch {
+        return false;
+      }
+    })();
     const effectiveCode = loggerFailed && code === 0 ? 125 : code;
-    const status = cancelled ? "cancelled" : effectiveCode === 0 && signal === null ? "completed" : "failed";
+    const status = cancelled
+      ? "cancelled"
+      : effectiveCode === 0 && signal === null
+        ? "completed"
+        : "failed";
     publishResult({
       schemaVersion: 1,
       status,
@@ -241,7 +357,7 @@ try {
       output: outputTiming(),
       ...(loggerFailed ? { reason: "bounded output logger failed" } : {}),
     });
-    process.exit(status === "completed" ? 0 : effectiveCode ?? 128);
+    process.exit(status === "completed" ? 0 : (effectiveCode ?? 128));
   });
   await new Promise((resolve, reject) => {
     child.stdio[3].once("error", reject);
@@ -249,15 +365,33 @@ try {
   });
 } catch (error) {
   if (child?.pid) {
-    try { process.kill(-child.pid, "SIGKILL"); } catch {}
-    try { child.kill("SIGKILL"); } catch {}
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {}
+    try {
+      child.kill("SIGKILL");
+    } catch {}
     if (childClosed) await childClosed;
   }
   rmSync(environmentPath, { force: true });
   rmSync(commandPath, { force: true });
-  capture(Buffer.from(`background-job runner failed: ${error instanceof Error ? error.message : String(error)}\n`), 2);
-  try { flush(); } catch {}
-  const cancelled = (() => { try { readFileSync(cancelPath); return true; } catch { return false; } })();
+  capture(
+    Buffer.from(
+      `background-job runner failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    ),
+    2,
+  );
+  try {
+    flush();
+  } catch {}
+  const cancelled = (() => {
+    try {
+      readFileSync(cancelPath);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
   publishResult({
     schemaVersion: 1,
     status: cancelled ? "cancelled" : "failed",

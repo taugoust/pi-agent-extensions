@@ -31,9 +31,10 @@ export function selectFetchBackend(
 ): FetchBackendSelection {
   let state: AgentSHRuntimeState | undefined;
   try {
-    state = api && typeof api.getSupervisorState !== "function"
-      ? { configured: true, active: false }
-      : api?.getSupervisorState?.();
+    state =
+      api && typeof api.getSupervisorState !== "function"
+        ? { configured: true, active: false }
+        : api?.getSupervisorState?.();
   } catch {
     state = { configured: true, active: false };
   }
@@ -44,10 +45,15 @@ export function selectFetchBackend(
   }
   if (disposition.kind === "native" || disposition.kind === "guard-only") return { kind: "native" };
 
-  const detail = state?.lastError ? `: ${String(state.lastError)}` : state?.status ? ` (${String(state.status)})` : "";
-  const protocolDetail = disposition.kind === "full" && disposition.protocol === "mock-ndjson"
-    ? " (mock protocol does not provide supervised curl)"
-    : "";
+  const detail = state?.lastError
+    ? `: ${String(state.lastError)}`
+    : state?.status
+      ? ` (${String(state.status)})`
+      : "";
+  const protocolDetail =
+    disposition.kind === "full" && disposition.protocol === "mock-ndjson"
+      ? " (mock protocol does not provide supervised curl)"
+      : "";
   return {
     kind: "unavailable",
     message: `AgentSH is configured but supervised fetch is unavailable${protocolDetail}${detail}; native fallback is disabled`,
@@ -66,9 +72,15 @@ function validateHeaders(headers: Record<string, string> | undefined) {
   }
 }
 
-function parseHeaderBlocks(text: string): { status: number; statusText: string; headers: Record<string, string> } {
+function parseHeaderBlocks(text: string): {
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+} {
   const normalized = text.replace(/\r\n/g, "\n");
-  const blocks = normalized.split(/\n\n+/).filter((block) => /^HTTP\/\S+\s+\d{3}/i.test(block.trim()));
+  const blocks = normalized
+    .split(/\n\n+/)
+    .filter((block) => /^HTTP\/\S+\s+\d{3}/i.test(block.trim()));
   const block = blocks.at(-1)?.trim();
   if (!block) throw new Error("AgentSH curl returned no parseable HTTP response headers");
   const lines = block.split("\n");
@@ -103,18 +115,34 @@ export async function executeAgentSHFetch(
   validateHeaders(request.headers);
   const token = `__PI_FETCH_${randomBytes(12).toString("hex")}__`;
   const outputPath = request.outputPath ? api.toSupervisorPath(request.outputPath) : undefined;
-  const followsRedirects = request.method === "GET" || request.method === "HEAD" || request.method === "POST";
+  const followsRedirects =
+    request.method === "GET" || request.method === "HEAD" || request.method === "POST";
   const curl: string[] = [
-    "curl", "--disable", "--globoff", "--silent", "--show-error",
+    "curl",
+    "--disable",
+    "--globoff",
+    "--silent",
+    "--show-error",
     ...(followsRedirects ? ["--location", "--max-redirs", "10"] : []),
-    "--proto", shellQuote("=http,https"), "--proto-redir", shellQuote("=http,https"),
-    ...(request.method === "HEAD" ? ["--head"] : request.method === "GET" || request.method === "POST" ? [] : ["--request", shellQuote(request.method)]),
-    "--dump-header", '"$headers_file"',
-    "--write-out", '"%output{$meta_file}%{http_code}\\n%{url_effective}\\n"',
+    "--proto",
+    shellQuote("=http,https"),
+    "--proto-redir",
+    shellQuote("=http,https"),
+    ...(request.method === "HEAD"
+      ? ["--head"]
+      : request.method === "GET" || request.method === "POST"
+        ? []
+        : ["--request", shellQuote(request.method)]),
+    "--dump-header",
+    '"$headers_file"',
+    "--write-out",
+    '"%output{$meta_file}%{http_code}\\n%{url_effective}\\n"',
   ];
-  for (const [name, value] of Object.entries(request.headers || {})) curl.push("--header", shellQuote(`${name}: ${value}`));
+  for (const [name, value] of Object.entries(request.headers || {}))
+    curl.push("--header", shellQuote(`${name}: ${value}`));
   if (request.body !== undefined) {
-    if (request.body.includes("\0")) throw new Error("HTTP request body must not contain NUL bytes");
+    if (request.body.includes("\0"))
+      throw new Error("HTTP request body must not contain NUL bytes");
     curl.push("--data-raw", shellQuote(request.body));
   } else if (request.method === "POST") {
     curl.push("--data-raw", shellQuote(""));
@@ -123,9 +151,10 @@ export async function executeAgentSHFetch(
 
   const maxPlusOne = request.maxBodyBytes + 1;
   const inlineCap = Math.min(request.maxBodyBytes, 1024 * 1024);
-  const transfer = request.method === "HEAD"
-    ? `${curl.join(" ")} --output /dev/null 2>"$curl_error"\ncurl_status=$?\n: >"$body_file"`
-    : `${curl.join(" ")} 2>"$curl_error" | head -c ${maxPlusOne} >"$body_file"\npipeline_status=("\${PIPESTATUS[@]}")\ncurl_status=\${pipeline_status[0]}\nsink_status=\${pipeline_status[1]}\nif [ "$sink_status" -ne 0 ] && [ "$curl_status" -eq 0 ]; then curl_status=68; fi`;
+  const transfer =
+    request.method === "HEAD"
+      ? `${curl.join(" ")} --output /dev/null 2>"$curl_error"\ncurl_status=$?\n: >"$body_file"`
+      : `${curl.join(" ")} 2>"$curl_error" | head -c ${maxPlusOne} >"$body_file"\npipeline_status=("\${PIPESTATUS[@]}")\ncurl_status=\${pipeline_status[0]}\nsink_status=\${pipeline_status[1]}\nif [ "$sink_status" -ne 0 ] && [ "$curl_status" -eq 0 ]; then curl_status=68; fi`;
   const outputSetup = outputPath
     ? `output_path=${shellQuote(outputPath)}\noutput_tmp=${shellQuote(`${outputPath}.pi-fetch.${token}.tmp`)}`
     : "output_path=\noutput_tmp=";
@@ -168,11 +197,14 @@ printf '\\n%s%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' ${shellQuote(token)} "$curl_st
 ${publish}
 ${finalStatus}`;
 
-  const result = await api.exec({
-    command,
-    timeout_ms: request.timeoutMs,
-    actor: { kind: "extension", label: "Pi fetch tool", tool_call_id: request.toolCallId },
-  }, { signal: request.signal });
+  const result = await api.exec(
+    {
+      command,
+      timeout_ms: request.timeoutMs,
+      actor: { kind: "extension", label: "Pi fetch tool", tool_call_id: request.toolCallId },
+    },
+    { signal: request.signal },
+  );
   const stderr = String(result.stderr || "");
   const marker = stderr.lastIndexOf(token);
   if (marker < 0) throw new Error("AgentSH curl response metadata was missing or truncated");
@@ -183,23 +215,42 @@ ${finalStatus}`;
   const bodyLength = Number(fields[1]);
   const reportedStatus = Number(fields[2]);
   const headerSize = Number(fields[3]);
-  if (![curlStatus, bodyLength, reportedStatus, headerSize].every(Number.isSafeInteger) || bodyLength < 0 || headerSize < 0) throw new Error("AgentSH curl returned invalid numeric metadata");
+  if (
+    ![curlStatus, bodyLength, reportedStatus, headerSize].every(Number.isSafeInteger) ||
+    bodyLength < 0 ||
+    headerSize < 0
+  )
+    throw new Error("AgentSH curl returned invalid numeric metadata");
   if (headerSize > 65536) throw new Error("AgentSH curl response headers exceeded 64 KiB");
   const effectiveUrl = Buffer.from(fields[4], "base64").toString("utf8");
   const headerText = Buffer.from(fields[5], "base64").toString("utf8");
-  const curlError = Buffer.from(fields[6] || "", "base64").toString("utf8").trim();
+  const curlError = Buffer.from(fields[6] || "", "base64")
+    .toString("utf8")
+    .trim();
   const parsed = parseHeaderBlocks(headerText);
-  if (parsed.status !== reportedStatus) throw new Error("AgentSH curl status metadata did not match the final response headers");
+  if (parsed.status !== reportedStatus)
+    throw new Error("AgentSH curl status metadata did not match the final response headers");
   const tooLarge = bodyLength > request.maxBodyBytes;
-  if (tooLarge && outputPath) throw new Error(`Response exceeded maxBodyBytes (${request.maxBodyBytes}); output file was not replaced`);
+  if (tooLarge && outputPath)
+    throw new Error(
+      `Response exceeded maxBodyBytes (${request.maxBodyBytes}); output file was not replaced`,
+    );
   if (curlStatus !== 0 && !(curlStatus === 23 && tooLarge)) {
-    throw new Error(`AgentSH curl failed with code ${curlStatus}${curlError ? `: ${curlError.slice(0, 500)}` : ""}`);
+    throw new Error(
+      `AgentSH curl failed with code ${curlStatus}${curlError ? `: ${curlError.slice(0, 500)}` : ""}`,
+    );
   }
   const exitCode = Number(result.exitCode ?? result.exit_code ?? 0);
   const allowedHTTPExit = exitCode === 66 && (parsed.status < 200 || parsed.status >= 300);
-  if ((result as any).stderr_truncated === true || (result as any).stderrTruncated === true) throw new Error("AgentSH curl response metadata was truncated");
-  if (!outputPath && ((result as any).stdout_truncated === true || (result as any).stdoutTruncated === true)) throw new Error("AgentSH curl response body was truncated by the supervisor");
-  if (exitCode !== 0 && !allowedHTTPExit) throw new Error(`AgentSH fetch command failed with exit code ${exitCode}`);
+  if ((result as any).stderr_truncated === true || (result as any).stderrTruncated === true)
+    throw new Error("AgentSH curl response metadata was truncated");
+  if (
+    !outputPath &&
+    ((result as any).stdout_truncated === true || (result as any).stdoutTruncated === true)
+  )
+    throw new Error("AgentSH curl response body was truncated by the supervisor");
+  if (exitCode !== 0 && !allowedHTTPExit)
+    throw new Error(`AgentSH fetch command failed with exit code ${exitCode}`);
   return {
     backend: "agentsh",
     ...parsed,

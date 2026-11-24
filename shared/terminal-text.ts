@@ -27,7 +27,13 @@ export function sanitizeTerminalText(value: string): string {
       index = skipCsi(value, index + length);
       continue;
     }
-    if (codePoint === OSC || codePoint === DCS || codePoint === SOS || codePoint === PM || codePoint === APC) {
+    if (
+      codePoint === OSC ||
+      codePoint === DCS ||
+      codePoint === SOS ||
+      codePoint === PM ||
+      codePoint === APC
+    ) {
       index = skipStringSequence(value, index + length, codePoint === OSC);
       continue;
     }
@@ -72,7 +78,12 @@ function skipStringSequence(value: string, start: number, bellTerminates: boolea
   return skipSequence(value, "string", start, bellTerminates);
 }
 
-function skipSequence(value: string, initialKind: SequenceKind, start: number, initialBellTerminates: boolean): number {
+function skipSequence(
+  value: string,
+  initialKind: SequenceKind,
+  start: number,
+  initialBellTerminates: boolean,
+): number {
   let kind = initialKind;
   let index = start;
   let bellTerminates = initialBellTerminates;
@@ -90,7 +101,12 @@ function skipSequence(value: string, initialKind: SequenceKind, start: number, i
         index += 2;
         continue;
       }
-      if (introducer === 0x50 || introducer === 0x58 || introducer === 0x5e || introducer === 0x5f) {
+      if (
+        introducer === 0x50 ||
+        introducer === 0x58 ||
+        introducer === 0x5e ||
+        introducer === 0x5f
+      ) {
         kind = "string";
         bellTerminates = false;
         index += 2;
@@ -126,7 +142,13 @@ function introducedSequenceState(value: string, start: number) {
   if (introducer === CSI) {
     return { kind: "csi" as const, index: start + 1, bellTerminates: false };
   }
-  if (introducer === OSC || introducer === DCS || introducer === SOS || introducer === PM || introducer === APC) {
+  if (
+    introducer === OSC ||
+    introducer === DCS ||
+    introducer === SOS ||
+    introducer === PM ||
+    introducer === APC
+  ) {
     return { kind: "string" as const, index: start + 1, bellTerminates: introducer === OSC };
   }
   return undefined;

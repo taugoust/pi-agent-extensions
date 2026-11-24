@@ -45,7 +45,11 @@ export function createAccountActivation(
     const owner = getOwner(request.session);
     if (!owner || !isOwnerCurrent(owner)) return error("session_unavailable");
     if (request.signal?.aborted) return error("cancelled");
-    const canSwitchNow = () => owner.context.isIdle() && owner.switchReserved === 0 && owner.openAIRequestCount === 0 && !owner.pendingSyncTasks.has(providerId);
+    const canSwitchNow = () =>
+      owner.context.isIdle() &&
+      owner.switchReserved === 0 &&
+      owner.openAIRequestCount === 0 &&
+      !owner.pendingSyncTasks.has(providerId);
     if (!canSwitchNow()) return error("activation_failed");
     const initialSelectionRevision = owner.selectionRevisions.get(providerId) ?? 0;
     if (request.account !== null) {
@@ -65,7 +69,10 @@ export function createAccountActivation(
       if (request.signal?.aborted) return error("cancelled");
       if (!isRequestCurrent()) return error("activation_superseded");
     };
-    const activationSignal = AbortSignal.any([owner.signal, ...(request.signal ? [request.signal] : [])]);
+    const activationSignal = AbortSignal.any([
+      owner.signal,
+      ...(request.signal ? [request.signal] : []),
+    ]);
     await waitForActivation(owner.ready, activationSignal);
     const staleAfterStartup = unavailable();
     if (staleAfterStartup) return staleAfterStartup;
@@ -82,7 +89,11 @@ export function createAccountActivation(
         return unavailable() ?? error("store_unavailable");
       }
     }
-    if (!canSwitchNow() || (owner.selectionRevisions.get(providerId) ?? 0) !== initialSelectionRevision) return error("activation_superseded");
+    if (
+      !canSwitchNow() ||
+      (owner.selectionRevisions.get(providerId) ?? 0) !== initialSelectionRevision
+    )
+      return error("activation_superseded");
     try {
       if (!persistSelection(owner, providerId, request.account, isRequestCurrent))
         return unavailable() ?? error("session_unavailable");

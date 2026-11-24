@@ -50,7 +50,8 @@ export class GoalCommandController {
       return;
     }
 
-    const existingGoal = this.runtime.activeGoal?.status !== "complete" ? this.runtime.activeGoal : undefined;
+    const existingGoal =
+      this.runtime.activeGoal?.status !== "complete" ? this.runtime.activeGoal : undefined;
     const legacyQueueBeforeActivation = existingGoal
       ? undefined
       : this.runtime.legacyQueueState
@@ -67,7 +68,11 @@ export class GoalCommandController {
       }
       if (isRequestCurrent && !isRequestCurrent()) return;
       if (!sameGoalActivation(this.runtime.activeGoal, existingGoal)) {
-        notifyTerminal(ctx.ui, "The active goal changed while confirmation was open. Try again.", "warning");
+        notifyTerminal(
+          ctx.ui,
+          "The active goal changed while confirmation was open. Try again.",
+          "warning",
+        );
         return;
       }
     }
@@ -97,7 +102,10 @@ export class GoalCommandController {
     const startedGoal = this.runtime.activeGoal;
     onActivated?.(startedGoal);
     if (!legacyQueueBeforeActivation) this.runtime.persistGoal(startedGoal);
-    if (!sameGoalActivation(this.runtime.activeGoal, startedGoal) || !this.runtime.ownsWorkflow(startedGoal)) {
+    if (
+      !sameGoalActivation(this.runtime.activeGoal, startedGoal) ||
+      !this.runtime.ownsWorkflow(startedGoal)
+    ) {
       return;
     }
     this.runtime.updateStatus(ctx, startedGoal);
@@ -166,7 +174,10 @@ export class GoalCommandController {
       }
       return;
     }
-    if (!sameGoalActivation(this.runtime.activeGoal, startedGoal) || !this.runtime.ownsWorkflow(startedGoal)) {
+    if (
+      !sameGoalActivation(this.runtime.activeGoal, startedGoal) ||
+      !this.runtime.ownsWorkflow(startedGoal)
+    ) {
       return;
     }
     const automaticLimit = this.runtime.continuationLimits.automaticTurns;
@@ -191,7 +202,11 @@ export class GoalCommandController {
       return;
     }
     if (this.runtime.activeGoal.status !== "active") {
-      notifyTerminal(ctx.ui, `Goal is ${this.runtime.activeGoal.status}; only active goals can be paused.`, "warning");
+      notifyTerminal(
+        ctx.ui,
+        `Goal is ${this.runtime.activeGoal.status}; only active goals can be paused.`,
+        "warning",
+      );
       return;
     }
     const stoppedGoal = this.runtime.stopActiveGoal(ctx, {
@@ -222,7 +237,11 @@ export class GoalCommandController {
       this.runtime.activeGoal.tokenBudget !== undefined &&
       this.runtime.activeGoal.tokensUsed >= this.runtime.activeGoal.tokenBudget
     ) {
-      notifyTerminal(ctx.ui, `Goal token budget is still reached: ${formatBudget(this.runtime.activeGoal)}`, "warning");
+      notifyTerminal(
+        ctx.ui,
+        `Goal token budget is still reached: ${formatBudget(this.runtime.activeGoal)}`,
+        "warning",
+      );
       return;
     }
     if (!this.runtime.acquireWorkflow(ctx.sessionManager)) {
@@ -242,12 +261,18 @@ export class GoalCommandController {
     this.runtime.clearGoalRecovery();
     this.runtime.clearBudgetWrapUp();
     this.runtime.clearStaleGoalToolCallBlock();
-    this.runtime.activeGoal = queueGoalSafetyReset(transitionGoal(nextGoalInstance(this.runtime.activeGoal), "active"));
+    this.runtime.activeGoal = queueGoalSafetyReset(
+      transitionGoal(nextGoalInstance(this.runtime.activeGoal), "active"),
+    );
     this.runtime.persistGoal(this.runtime.activeGoal);
     if (this.runtime.activeGoal.status !== "active") {
       this.runtime.updateStatus(ctx, this.runtime.activeGoal);
       this.runtime.releaseWorkflow();
-      notifyTerminal(ctx.ui, `Goal token budget is still reached: ${formatBudget(this.runtime.activeGoal)}`, "warning");
+      notifyTerminal(
+        ctx.ui,
+        `Goal token budget is still reached: ${formatBudget(this.runtime.activeGoal)}`,
+        "warning",
+      );
       return;
     }
     if (!this.runtime.ownsWorkflow(this.runtime.activeGoal)) return;
@@ -259,7 +284,10 @@ export class GoalCommandController {
       buildResumePrompt(resumedGoal, stoppedStatus),
     );
     if (!sent) {
-      if (sameGoalActivation(this.runtime.activeGoal, resumedGoal) && this.runtime.activeGoal?.status === "active") {
+      if (
+        sameGoalActivation(this.runtime.activeGoal, resumedGoal) &&
+        this.runtime.activeGoal?.status === "active"
+      ) {
         this.runtime.activeGoal = stoppedGoal;
         this.runtime.persistGoal(this.runtime.activeGoal);
         this.runtime.updateStatus(ctx, this.runtime.activeGoal);
@@ -299,7 +327,12 @@ export class GoalCommandController {
     }
     if (!this.runtime.clearGoalWait(ctx, waitingGoal.id)) return;
     const resumedGoal = this.runtime.activeGoal;
-    if (!resumedGoal || !sameGoalActivation(resumedGoal, waitingGoal) || resumedGoal.status !== "active") return;
+    if (
+      !resumedGoal ||
+      !sameGoalActivation(resumedGoal, waitingGoal) ||
+      resumedGoal.status !== "active"
+    )
+      return;
     const sent = await this.runtime.sendOwnedGoalPrompt(
       ctx,
       resumedGoal.id,
@@ -405,7 +438,10 @@ export class GoalCommandController {
       },
       editedGoalStatus(previousStatus),
     );
-    const nextGoal = transitionedGoal.status === "active" ? queueGoalSafetyReset(transitionedGoal) : transitionedGoal;
+    const nextGoal =
+      transitionedGoal.status === "active"
+        ? queueGoalSafetyReset(transitionedGoal)
+        : transitionedGoal;
     this.runtime.activeGoal = nextGoal;
     this.runtime.persistGoal(this.runtime.activeGoal);
     this.runtime.updateStatus(ctx, this.runtime.activeGoal);
@@ -414,7 +450,11 @@ export class GoalCommandController {
     if (editedGoal.status === "active") {
       if (!this.runtime.ownsWorkflow(editedGoal)) return;
       this.runtime.clearStaleGoalToolCallBlock();
-      const sent = await this.runtime.sendOwnedGoalPrompt(ctx, editedGoal.id, buildObjectiveUpdatedPrompt(editedGoal));
+      const sent = await this.runtime.sendOwnedGoalPrompt(
+        ctx,
+        editedGoal.id,
+        buildObjectiveUpdatedPrompt(editedGoal),
+      );
       if (!sent) {
         if (sameGoalActivation(this.runtime.activeGoal, editedGoal)) {
           if (previousStatus === "active" && previousGoal.waiting) {

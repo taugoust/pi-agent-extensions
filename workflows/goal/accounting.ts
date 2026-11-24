@@ -19,7 +19,11 @@ interface UsageContext {
   sessionManager?: unknown;
 }
 
-export function checkpointGoalActiveTime(goal: GoalAccountingState, now: number, continueClock: boolean) {
+export function checkpointGoalActiveTime(
+  goal: GoalAccountingState,
+  now: number,
+  continueClock: boolean,
+) {
   Object.assign(goal, checkpointGoalRecordTime(goal, now, continueClock));
 }
 
@@ -28,7 +32,12 @@ export function updateGoalUsage(
   ctx: UsageContext,
   continueClock = goal.status === "active",
 ) {
-  const updated = updateGoalRecordAccounting(goal, currentTokenTotal(ctx), Date.now(), continueClock);
+  const updated = updateGoalRecordAccounting(
+    goal,
+    currentTokenTotal(ctx),
+    Date.now(),
+    continueClock,
+  );
   Object.assign(goal, updated);
 }
 

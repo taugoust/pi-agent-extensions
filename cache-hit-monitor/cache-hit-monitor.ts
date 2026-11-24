@@ -1,4 +1,4 @@
-import { registerObservation, displayText } from '../shared/observability.ts';
+import { registerObservation, displayText } from "../shared/observability.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
@@ -113,10 +113,20 @@ export default function cacheHitMonitor(pi: ExtensionAPI): void {
     },
   });
 
-  registerObservation(pi, 'cache', ctx => {
-    const restored = collectCacheSamples(ctx.sessionManager.getBranch(), (provider, model) => resolveCostModel(ctx, provider, model));
-    const view = createCacheMonitorView(restored.samples, streamingSample, { activeEpoch: restored.currentEpoch, summaryRecords: restored.summaryRecords });
-    if (view.latest) view.latest = { ...view.latest, provider: displayText(view.latest.provider), model: displayText(view.latest.model) };
+  registerObservation(pi, "cache", (ctx) => {
+    const restored = collectCacheSamples(ctx.sessionManager.getBranch(), (provider, model) =>
+      resolveCostModel(ctx, provider, model),
+    );
+    const view = createCacheMonitorView(restored.samples, streamingSample, {
+      activeEpoch: restored.currentEpoch,
+      summaryRecords: restored.summaryRecords,
+    });
+    if (view.latest)
+      view.latest = {
+        ...view.latest,
+        provider: displayText(view.latest.provider),
+        model: displayText(view.latest.model),
+      };
     return view;
   });
 

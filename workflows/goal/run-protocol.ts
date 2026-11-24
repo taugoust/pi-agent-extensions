@@ -91,7 +91,9 @@ function readPayloadProperty(
 function parseRunId(data: unknown): string | undefined {
   if (!isPayloadRecord(data)) return undefined;
   const runId = readPayloadProperty(data, "runId");
-  return runId.ok && typeof runId.value === "string" && RUN_ID_PATTERN.test(runId.value) ? runId.value : undefined;
+  return runId.ok && typeof runId.value === "string" && RUN_ID_PATTERN.test(runId.value)
+    ? runId.value
+    : undefined;
 }
 
 function currentActiveGoal(runtime: GoalRuntime) {
@@ -124,7 +126,10 @@ function parseStartPayload(data: unknown): string | Omit<GoalRunStartPayload, "r
 function parseCancelReason(data: unknown): string | undefined | { error: string } {
   if (!isPayloadRecord(data)) return { error: "cancel payload must be an object" };
   const reasonValue = readPayloadProperty(data, "reason");
-  if (!reasonValue.ok || (reasonValue.value !== undefined && typeof reasonValue.value !== "string")) {
+  if (
+    !reasonValue.ok ||
+    (reasonValue.value !== undefined && typeof reasonValue.value !== "string")
+  ) {
     return { error: "reason must be a string" };
   }
   if (reasonValue.value === undefined) return undefined;
@@ -192,7 +197,12 @@ export class GoalRunController {
       return;
     }
     if (this.session !== session || this.generation !== session.generation) {
-      this.emitError(runId, "start", "SUPERSEDED", "The pi-goal session changed while validating the request.");
+      this.emitError(
+        runId,
+        "start",
+        "SUPERSEDED",
+        "The pi-goal session changed while validating the request.",
+      );
       return;
     }
     if (this.usedRunIds.has(runId)) {
@@ -219,7 +229,10 @@ export class GoalRunController {
         parsed.tokenBudget,
         session.ctx,
         (goal) => {
-          if (this.ownsRun(run, session.generation)) { run.goalId = goal.id; run.activationId = goal.activationId ?? goal.id; }
+          if (this.ownsRun(run, session.generation)) {
+            run.goalId = goal.id;
+            run.activationId = goal.activationId ?? goal.id;
+          }
         },
         () => this.ownsRun(run, session.generation),
       );
@@ -236,7 +249,12 @@ export class GoalRunController {
     } catch (error) {
       if (this.ownsRun(run, session.generation)) {
         this.closeCurrentRun();
-        this.emitError(runId, "start", "ACTIVATION_FAILED", `Goal activation failed: ${formatError(error)}`);
+        this.emitError(
+          runId,
+          "start",
+          "ACTIVATION_FAILED",
+          `Goal activation failed: ${formatError(error)}`,
+        );
       }
       return;
     }
@@ -247,7 +265,10 @@ export class GoalRunController {
       this.emitError(runId, "start", "ACTIVATION_FAILED", "Goal activation did not create a Goal.");
       return;
     }
-    if (currentActiveGoal(this.runtime)?.id !== run.goalId || (this.runtime.activeGoal?.activationId ?? this.runtime.activeGoal?.id) !== run.activationId) {
+    if (
+      currentActiveGoal(this.runtime)?.id !== run.goalId ||
+      (this.runtime.activeGoal?.activationId ?? this.runtime.activeGoal?.id) !== run.activationId
+    ) {
       this.closeCurrentRun();
       this.emitError(runId, "start", "SUPERSEDED", "The managed Goal was superseded.");
       return;
@@ -345,7 +366,12 @@ export class GoalRunController {
     });
   }
 
-  private emitError(runId: string, operation: "start" | "cancel", code: GoalRunErrorCode, message: string) {
+  private emitError(
+    runId: string,
+    operation: "start" | "cancel",
+    code: GoalRunErrorCode,
+    message: string,
+  ) {
     this.runtime.pi.events.emit(goalRunEventChannel(runId), {
       type: "error",
       runId,
@@ -355,7 +381,12 @@ export class GoalRunController {
   }
 
   private ownsRun(run: ManagedRun, generation: number) {
-    return this.session?.generation === generation && this.generation === generation && this.run === run && !run.closed;
+    return (
+      this.session?.generation === generation &&
+      this.generation === generation &&
+      this.run === run &&
+      !run.closed
+    );
   }
 
   private closeCurrentRun() {

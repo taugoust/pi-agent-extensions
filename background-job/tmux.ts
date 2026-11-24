@@ -30,7 +30,13 @@ export type PaneState = {
 };
 
 export interface JobProcessBackend {
-  launch(id: string, cwd: string, jobDir: string, shell: string, options?: { placement?: JobPlacement; infrastructure?: boolean; name?: string }): Promise<JobLaunch>;
+  launch(
+    id: string,
+    cwd: string,
+    jobDir: string,
+    shell: string,
+    options?: { placement?: JobPlacement; infrastructure?: boolean; name?: string },
+  ): Promise<JobLaunch>;
   paneState(id: string, launch: JobLaunch): Promise<PaneState>;
   capture(id: string, launch: JobLaunch): Promise<string>;
   signal(id: string, launch: JobLaunch, signal: NodeJS.Signals): Promise<void>;
@@ -45,38 +51,88 @@ export async function processStartToken(pid: number): Promise<string> {
     const text = await readFile(`/proc/${pid}/stat`, "utf8");
     const close = text.lastIndexOf(")");
     if (close < 0) throw new Error(`Cannot parse process identity for PID ${pid}`);
-    const fields = text.slice(close + 2).trim().split(/\s+/);
+    const fields = text
+      .slice(close + 2)
+      .trim()
+      .split(/\s+/);
     const start = fields[19];
-    if (!start || !/^[0-9]+$/.test(start)) throw new Error(`Cannot parse process start time for PID ${pid}`);
+    if (!start || !/^[0-9]+$/.test(start))
+      throw new Error(`Cannot parse process start time for PID ${pid}`);
     return `linux-proc:${start}`;
   }
-  const result = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], { timeout: TMUX_TIMEOUT_MS, maxBuffer: 4096 });
+  const result = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], {
+    timeout: TMUX_TIMEOUT_MS,
+    maxBuffer: 4096,
+  });
   const token = result.stdout.trim().replace(/\s+/g, " ");
   if (!token) throw new Error(`Cannot read process start time for PID ${pid}`);
   return `ps-lstart:${token}`;
 }
 
-async function placementAt(tmux: string, socketPath: string, paneId: string): Promise<JobPlacement> {
-  if (!socketPath.startsWith('/') || socketPath.includes('\0') || !/^%[0-9]+$/.test(paneId)) throw new Error('Invalid trusted tmux placement');
+async function placementAt(
+  tmux: string,
+  socketPath: string,
+  paneId: string,
+): Promise<JobPlacement> {
+  if (!socketPath.startsWith("/") || socketPath.includes("\0") || !/^%[0-9]+$/.test(paneId))
+    throw new Error("Invalid trusted tmux placement");
   socketPath = await realpath(socketPath);
   const info = await lstat(socketPath);
-  if (!info.isSocket() || info.uid !== process.getuid?.()) throw new Error('Tmux placement requires a same-user socket');
-  const { stdout } = await execFileAsync(tmux, ['-S', socketPath, 'display-message', '-p', '-t', paneId, '#{session_id}|#{window_id}|#{pane_id}|#{pane_pid}|#{pane_dead}'], { timeout: TMUX_TIMEOUT_MS, maxBuffer: 4096 });
-  const [sessionId, windowId, actualPane, pid, dead] = stdout.trim().split('|');
-  if (!/^\$[0-9]+$/.test(sessionId ?? '') || !/^@[0-9]+$/.test(windowId ?? '') || actualPane !== paneId || dead !== '0' || !Number.isSafeInteger(Number(pid)) || Number(pid) < 1) throw new Error('Caller tmux pane is missing or no longer running');
-  return { socketPath, sessionId, windowId, paneId, panePid: Number(pid), paneStartToken: await processStartToken(Number(pid)) };
+  if (!info.isSocket() || info.uid !== process.getuid?.())
+    throw new Error("Tmux placement requires a same-user socket");
+  const { stdout } = await execFileAsync(
+    tmux,
+    [
+      "-S",
+      socketPath,
+      "display-message",
+      "-p",
+      "-t",
+      paneId,
+      "#{session_id}|#{window_id}|#{pane_id}|#{pane_pid}|#{pane_dead}",
+    ],
+    { timeout: TMUX_TIMEOUT_MS, maxBuffer: 4096 },
+  );
+  const [sessionId, windowId, actualPane, pid, dead] = stdout.trim().split("|");
+  if (
+    !/^\$[0-9]+$/.test(sessionId ?? "") ||
+    !/^@[0-9]+$/.test(windowId ?? "") ||
+    actualPane !== paneId ||
+    dead !== "0" ||
+    !Number.isSafeInteger(Number(pid)) ||
+    Number(pid) < 1
+  )
+    throw new Error("Caller tmux pane is missing or no longer running");
+  return {
+    socketPath,
+    sessionId,
+    windowId,
+    paneId,
+    panePid: Number(pid),
+    paneStartToken: await processStartToken(Number(pid)),
+  };
 }
 
 export async function resolveLocalPlacement(tmux: string): Promise<JobPlacement> {
-  const socket = process.env.TMUX?.replace(/,[0-9]+,[0-9]+$/, '');
+  const socket = process.env.TMUX?.replace(/,[0-9]+,[0-9]+$/, "");
   const pane = process.env.TMUX_PANE;
-  if (!socket || !pane) throw new Error('background_job start requires Pi to run inside tmux (TMUX and TMUX_PANE); no private visible-job fallback is permitted');
+  if (!socket || !pane)
+    throw new Error(
+      "background_job start requires Pi to run inside tmux (TMUX and TMUX_PANE); no private visible-job fallback is permitted",
+    );
   return await placementAt(tmux, socket, pane);
 }
 
 export async function validatePlacement(tmux: string, expected: JobPlacement): Promise<void> {
   const actual = await placementAt(tmux, expected.socketPath, expected.paneId);
-  if (Object.keys(actual).some(key => actual[key as keyof JobPlacement] !== expected[key as keyof JobPlacement])) throw new Error('Trusted caller tmux placement is stale; refusing to launch in replacement work');
+  if (
+    Object.keys(actual).some(
+      (key) => actual[key as keyof JobPlacement] !== expected[key as keyof JobPlacement],
+    )
+  )
+    throw new Error(
+      "Trusted caller tmux placement is stale; refusing to launch in replacement work",
+    );
 }
 
 export class TmuxBackend implements JobProcessBackend {
@@ -87,16 +143,34 @@ export class TmuxBackend implements JobProcessBackend {
     private readonly runnerPath: string,
   ) {}
 
-  private async run(args: string[], allowFailure = false, socket = this.store.socketPath): Promise<{ stdout: string; stderr: string; code: number }> {
+  private async run(
+    args: string[],
+    allowFailure = false,
+    socket = this.store.socketPath,
+  ): Promise<{ stdout: string; stderr: string; code: number }> {
     try {
-      const result = await execFileAsync(this.tmuxPath, ["-S", socket, ...(socket === this.store.socketPath ? ["-f", this.store.tmuxConfigPath] : []), ...args], {
-        timeout: TMUX_TIMEOUT_MS,
-        maxBuffer: MAX_CLIENT_OUTPUT,
-        env: { ...process.env, TMUX: undefined, TMUX_PANE: undefined } as NodeJS.ProcessEnv,
-      });
+      const result = await execFileAsync(
+        this.tmuxPath,
+        [
+          "-S",
+          socket,
+          ...(socket === this.store.socketPath ? ["-f", this.store.tmuxConfigPath] : []),
+          ...args,
+        ],
+        {
+          timeout: TMUX_TIMEOUT_MS,
+          maxBuffer: MAX_CLIENT_OUTPUT,
+          env: { ...process.env, TMUX: undefined, TMUX_PANE: undefined } as NodeJS.ProcessEnv,
+        },
+      );
       return { stdout: result.stdout, stderr: result.stderr, code: 0 };
     } catch (error) {
-      const failure = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: number | string; killed?: boolean };
+      const failure = error as NodeJS.ErrnoException & {
+        stdout?: string;
+        stderr?: string;
+        code?: number | string;
+        killed?: boolean;
+      };
       if (allowFailure && typeof failure.code === "number") {
         return { stdout: failure.stdout ?? "", stderr: failure.stderr ?? "", code: failure.code };
       }
@@ -106,13 +180,18 @@ export class TmuxBackend implements JobProcessBackend {
   }
 
   private async sessionExists(): Promise<boolean> {
-    const result = await this.run(["display-message", "-p", "-t", SESSION, "#{@pi_background_server}"], true);
+    const result = await this.run(
+      ["display-message", "-p", "-t", SESSION, "#{@pi_background_server}"],
+      true,
+    );
     if (result.code === 0) {
-      if (result.stdout.trim() !== "v1") throw new Error("Refusing a tmux server not owned by background-job");
+      if (result.stdout.trim() !== "v1")
+        throw new Error("Refusing a tmux server not owned by background-job");
       return true;
     }
     const anyServer = await this.run(["list-sessions", "-F", "#{session_name}"], true);
-    if (anyServer.code === 0) throw new Error("Refusing an unexpected live tmux server at the background-job socket");
+    if (anyServer.code === 0)
+      throw new Error("Refusing an unexpected live tmux server at the background-job socket");
     return false;
   }
 
@@ -120,65 +199,155 @@ export class TmuxBackend implements JobProcessBackend {
     try {
       const info = await lstat(this.store.socketPath);
       if (!info.isSocket()) throw new Error("background-job tmux socket path is not a Unix socket");
-      if (info.uid !== process.getuid?.()) throw new Error("background-job tmux socket has the wrong owner");
+      if (info.uid !== process.getuid?.())
+        throw new Error("background-job tmux socket has the wrong owner");
       await rm(this.store.socketPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
 
-  async launch(id: string, cwd: string, jobDir: string, shell: string, options?: { placement?: JobPlacement; infrastructure?: boolean; name?: string }): Promise<JobLaunch> {
-    if (process.platform !== "linux") throw new Error("Background job launch is supported only on Linux");
+  async launch(
+    id: string,
+    cwd: string,
+    jobDir: string,
+    shell: string,
+    options?: { placement?: JobPlacement; infrastructure?: boolean; name?: string },
+  ): Promise<JobLaunch> {
+    if (process.platform !== "linux")
+      throw new Error("Background job launch is supported only on Linux");
     // Fail before creating a pane: otherwise a missing interpreter/script can
     // exit before finishLaunch reads /proc, obscuring the actionable error.
     validateRuntimePath(this.nodePath, "Node executable", constants.X_OK);
     validateRuntimePath(this.runnerPath, "background-job runner");
     if (!options?.infrastructure) {
-      const placement = options?.placement ?? await resolveLocalPlacement(this.tmuxPath);
+      const placement = options?.placement ?? (await resolveLocalPlacement(this.tmuxPath));
       await validatePlacement(this.tmuxPath, placement);
       const runnerCommand = `${quote(this.nodePath)} ${quote(this.runnerPath)} ${quote(jobDir)} ${quote(shell)} 1048576`;
       const intentPath = `${jobDir}/launch-intent.json`;
-      const nonce = randomBytes(32).toString('hex');
-      const ownerStart = (await processStartToken(process.pid)).replace('linux-proc:', '');
-      const serverIdentity = await this.run(['display-message', '-p', '-t', placement.paneId, '#{pid}'], false, placement.socketPath);
+      const nonce = randomBytes(32).toString("hex");
+      const ownerStart = (await processStartToken(process.pid)).replace("linux-proc:", "");
+      const serverIdentity = await this.run(
+        ["display-message", "-p", "-t", placement.paneId, "#{pid}"],
+        false,
+        placement.socketPath,
+      );
       const serverPid = Number(serverIdentity.stdout.trim());
-      const serverStart = (await processStartToken(serverPid)).replace('linux-proc:', '');
-      const command = `PASEO_BACKGROUND_JOB_LAUNCH=${Buffer.from(intentPath).toString('base64url')}.${nonce} ${runnerCommand}`;
+      const serverStart = (await processStartToken(serverPid)).replace("linux-proc:", "");
+      const command = `PASEO_BACKGROUND_JOB_LAUNCH=${Buffer.from(intentPath).toString("base64url")}.${nonce} ${runnerCommand}`;
       // Publish presentation evidence before tmux can expose the new pane.
       // This never grants control authority; that still uses the launch token.
       const intent = {
-        schemaVersion: 1, nonce, command, jobId: id,
-        socketPath: placement.socketPath, serverEpoch: `${serverPid}:${serverStart}`,
-        ownerPid: process.pid, ownerToken: `${process.pid}:${ownerStart}`,
+        schemaVersion: 1,
+        nonce,
+        command,
+        jobId: id,
+        socketPath: placement.socketPath,
+        serverEpoch: `${serverPid}:${serverStart}`,
+        ownerPid: process.pid,
+        ownerToken: `${process.pid}:${ownerStart}`,
       };
-      await writeFile(intentPath, JSON.stringify(intent), {mode:0o600, flag:'wx'});
-      const ownershipToken = randomBytes(16).toString('hex');
-      const split = ['split-window', '-d', '-P', '-F', '#{window_id}|#{pane_id}|#{pane_pid}', '-t', placement.paneId, '-c', cwd, command].map(quote).join(' ');
+      await writeFile(intentPath, JSON.stringify(intent), { mode: 0o600, flag: "wx" });
+      const ownershipToken = randomBytes(16).toString("hex");
+      const split = [
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{window_id}|#{pane_id}|#{pane_pid}",
+        "-t",
+        placement.paneId,
+        "-c",
+        cwd,
+        command,
+      ]
+        .map(quote)
+        .join(" ");
       const guard = [
-        `#{==:#{pane_pid},${placement.panePid}}`, `#{==:#{pane_dead},0}`,
-        `#{==:#{window_id},${placement.windowId}}`, `#{==:#{session_id},${placement.sessionId}}`,
-      ].reduce((left,right) => `#{&&:${left},${right}}`);
+        `#{==:#{pane_pid},${placement.panePid}}`,
+        `#{==:#{pane_dead},0}`,
+        `#{==:#{window_id},${placement.windowId}}`,
+        `#{==:#{session_id},${placement.sessionId}}`,
+      ].reduce((left, right) => `#{&&:${left},${right}}`);
       let result;
-      try { result = await this.run(['if-shell', '-F', '-t', placement.paneId, guard, split, 'display-message -p pi-job-placement-mismatch'], false, placement.socketPath); }
-      catch (error) {
+      try {
+        result = await this.run(
+          [
+            "if-shell",
+            "-F",
+            "-t",
+            placement.paneId,
+            guard,
+            split,
+            "display-message -p pi-job-placement-mismatch",
+          ],
+          false,
+          placement.socketPath,
+        );
+      } catch (error) {
         const message = String(error);
         if (!/no space for new pane|pane too small/i.test(message)) throw error;
         // The failed split is definitive (tmux rejected it); recover geometry
         // only in the caller's existing window, then retry exactly once.
-        const current = await this.run(['display-message','-p','-t',placement.paneId,'#{pane_pid}|#{window_id}|#{session_id}|#{pane_dead}'],true,placement.socketPath);
-        if (current.code !== 0 || current.stdout.trim() !== `${placement.panePid}|${placement.windowId}|${placement.sessionId}|0`) throw error;
-        await this.run(['select-layout','-t',placement.windowId,'tiled'],false,placement.socketPath);
-        result = await this.run(['if-shell', '-F', '-t', placement.paneId, guard, split, 'display-message -p pi-job-placement-mismatch'], false, placement.socketPath);
+        const current = await this.run(
+          [
+            "display-message",
+            "-p",
+            "-t",
+            placement.paneId,
+            "#{pane_pid}|#{window_id}|#{session_id}|#{pane_dead}",
+          ],
+          true,
+          placement.socketPath,
+        );
+        if (
+          current.code !== 0 ||
+          current.stdout.trim() !==
+            `${placement.panePid}|${placement.windowId}|${placement.sessionId}|0`
+        )
+          throw error;
+        await this.run(
+          ["select-layout", "-t", placement.windowId, "tiled"],
+          false,
+          placement.socketPath,
+        );
+        result = await this.run(
+          [
+            "if-shell",
+            "-F",
+            "-t",
+            placement.paneId,
+            guard,
+            split,
+            "display-message -p pi-job-placement-mismatch",
+          ],
+          false,
+          placement.socketPath,
+        );
       }
-      if (result.stdout.includes('pi-job-placement-mismatch')) throw new Error('Caller tmux placement changed before launch');
-      try { return await this.finishLaunch(id, result.stdout, placement.socketPath, placement, ownershipToken, options?.name, intentPath, intent); }
-      catch (error) { await this.cleanupFailedLaunch(id, result.stdout, placement.socketPath, ownershipToken); throw error; }
+      if (result.stdout.includes("pi-job-placement-mismatch"))
+        throw new Error("Caller tmux placement changed before launch");
+      try {
+        return await this.finishLaunch(
+          id,
+          result.stdout,
+          placement.socketPath,
+          placement,
+          ownershipToken,
+          options?.name,
+          intentPath,
+          intent,
+        );
+      } catch (error) {
+        await this.cleanupFailedLaunch(id, result.stdout, placement.socketPath, ownershipToken);
+        throw error;
+      }
     }
     let exists = await this.sessionExists();
     if (!exists) await this.removeStaleSocket();
     const format = "#{window_id}|#{pane_id}|#{pane_pid}";
     const command = `${quote(this.nodePath)} ${quote(this.runnerPath)} ${quote(jobDir)} ${quote(shell)} 1048576`;
-    const ownershipToken = randomBytes(16).toString('hex');
+    const ownershipToken = randomBytes(16).toString("hex");
     const args = exists
       ? ["new-window", "-d", "-P", "-F", format, "-t", `${SESSION}:`, "-n", id, "-c", cwd, command]
       : ["new-session", "-d", "-P", "-F", format, "-s", SESSION, "-n", id, "-c", cwd, command];
@@ -186,71 +355,201 @@ export class TmuxBackend implements JobProcessBackend {
     try {
       result = await this.run(args);
     } catch (error) {
-      if (!exists && await this.sessionExists()) {
+      if (!exists && (await this.sessionExists())) {
         exists = true;
-        result = await this.run(["new-window", "-d", "-P", "-F", format, "-t", `${SESSION}:`, "-n", id, "-c", cwd, command]);
+        result = await this.run([
+          "new-window",
+          "-d",
+          "-P",
+          "-F",
+          format,
+          "-t",
+          `${SESSION}:`,
+          "-n",
+          id,
+          "-c",
+          cwd,
+          command,
+        ]);
       } else throw error;
     }
-    try { return await this.finishLaunch(id, result.stdout, this.store.socketPath, undefined, ownershipToken, options?.name); }
-    catch (error) { await this.cleanupFailedLaunch(id, result.stdout, this.store.socketPath, ownershipToken); throw error; }
+    try {
+      return await this.finishLaunch(
+        id,
+        result.stdout,
+        this.store.socketPath,
+        undefined,
+        ownershipToken,
+        options?.name,
+      );
+    } catch (error) {
+      await this.cleanupFailedLaunch(id, result.stdout, this.store.socketPath, ownershipToken);
+      throw error;
+    }
   }
 
-  private async cleanupFailedLaunch(id: string, output: string, socketPath: string, ownershipToken: string): Promise<void> {
+  private async cleanupFailedLaunch(
+    id: string,
+    output: string,
+    socketPath: string,
+    ownershipToken: string,
+  ): Promise<void> {
     const [windowId, paneId, pidRaw] = output.trim().split("|");
     const pid = Number(pidRaw);
-    if (!/^@[0-9]+$/.test(windowId ?? "") || !/^%[0-9]+$/.test(paneId ?? "") || !Number.isSafeInteger(pid) || pid < 1) return;
+    if (
+      !/^@[0-9]+$/.test(windowId ?? "") ||
+      !/^%[0-9]+$/.test(paneId ?? "") ||
+      !Number.isSafeInteger(pid) ||
+      pid < 1
+    )
+      return;
     const guard = `#{&&:#{==:#{@pi_background_job_id},${id}},#{&&:#{==:#{@pi_background_job_token},${ownershipToken}},#{&&:#{==:#{pane_pid},${pid}},#{==:#{window_id},${windowId}}}}}`;
-    await this.run(["if-shell", "-F", "-t", paneId, guard, `kill-pane -t ${paneId}`, "display-message -p pi-job-launch-identity-mismatch"], true, socketPath).catch(() => undefined);
+    await this.run(
+      [
+        "if-shell",
+        "-F",
+        "-t",
+        paneId,
+        guard,
+        `kill-pane -t ${paneId}`,
+        "display-message -p pi-job-launch-identity-mismatch",
+      ],
+      true,
+      socketPath,
+    ).catch(() => undefined);
   }
 
-  private async finishLaunch(id: string, output: string, socketPath: string, placement: JobPlacement | undefined, ownershipToken: string, name?: string, intentPath?: string, intent?: Record<string, unknown>): Promise<JobLaunch> {
+  private async finishLaunch(
+    id: string,
+    output: string,
+    socketPath: string,
+    placement: JobPlacement | undefined,
+    ownershipToken: string,
+    name?: string,
+    intentPath?: string,
+    intent?: Record<string, unknown>,
+  ): Promise<JobLaunch> {
     const [windowId, paneId, pidRaw] = output.trim().split("|");
     const panePid = Number(pidRaw);
     if (!windowId || !paneId || !Number.isSafeInteger(panePid) || panePid < 1) {
-      throw new Error(`tmux returned malformed launch identity: ${JSON.stringify(output.slice(0, 500))}`);
+      throw new Error(
+        `tmux returned malformed launch identity: ${JSON.stringify(output.slice(0, 500))}`,
+      );
     }
     // The runner waits for launch-ready: set pane-local retention and ownership
     // before opening that gate. Never alter the caller's window options.
-    await this.run([
-      'set-option','-p','-t',paneId,'@pi_background_job_id',id,';','set-option','-p','-t',paneId,'@pi_background_job_token',ownershipToken,';','set-option','-p','-t',paneId,'remain-on-exit','on',';','set-option','-p','-t',paneId,'remain-on-exit-format','',
-    ], false, socketPath);
+    await this.run(
+      [
+        "set-option",
+        "-p",
+        "-t",
+        paneId,
+        "@pi_background_job_id",
+        id,
+        ";",
+        "set-option",
+        "-p",
+        "-t",
+        paneId,
+        "@pi_background_job_token",
+        ownershipToken,
+        ";",
+        "set-option",
+        "-p",
+        "-t",
+        paneId,
+        "remain-on-exit",
+        "on",
+        ";",
+        "set-option",
+        "-p",
+        "-t",
+        paneId,
+        "remain-on-exit-format",
+        "",
+      ],
+      false,
+      socketPath,
+    );
     // Human-readable title is pane-local and is applied only to this newly
     // created pane, while the runner is still blocked behind launch-ready.
-    if (name !== undefined) await this.run(['set-option','-p','-t',paneId,'@pi_background_job_name',name], false, socketPath);
-    const identity = await this.run(['display-message', '-p', '-t', paneId, '#{pid}|#{session_id}|#{window_id}'], false, socketPath);
-    const [serverRaw, sessionId, actualWindow] = identity.stdout.trim().split('|');
-    if (!/^\$[0-9]+$/.test(sessionId ?? '') || actualWindow !== windowId || placement && (windowId !== placement.windowId || sessionId !== placement.sessionId)) throw new Error('Tmux launch placement changed');
+    if (name !== undefined)
+      await this.run(
+        ["set-option", "-p", "-t", paneId, "@pi_background_job_name", name],
+        false,
+        socketPath,
+      );
+    const identity = await this.run(
+      ["display-message", "-p", "-t", paneId, "#{pid}|#{session_id}|#{window_id}"],
+      false,
+      socketPath,
+    );
+    const [serverRaw, sessionId, actualWindow] = identity.stdout.trim().split("|");
+    if (
+      !/^\$[0-9]+$/.test(sessionId ?? "") ||
+      actualWindow !== windowId ||
+      (placement && (windowId !== placement.windowId || sessionId !== placement.sessionId))
+    )
+      throw new Error("Tmux launch placement changed");
     const serverPid = Number(serverRaw);
     const serverStartToken = await processStartToken(serverPid);
-    const readyPath = this.store.path(id, 'runner-ready');
+    const readyPath = this.store.path(id, "runner-ready");
     const deadline = Date.now() + 30_000;
-    let ready: { schemaVersion: number; pid: number; startToken: string; startedAt: string } | undefined;
+    let ready:
+      | { schemaVersion: number; pid: number; startToken: string; startedAt: string }
+      | undefined;
     while (!ready && Date.now() < deadline) {
-      try { ready = JSON.parse(await readFile(readyPath, 'utf8')); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-      if (!ready) await new Promise(resolve => setTimeout(resolve, 20));
+      try {
+        ready = JSON.parse(await readFile(readyPath, "utf8"));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (!ready) await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    if (!ready || ready.schemaVersion !== 1 || ready.pid !== panePid || !Number.isSafeInteger(ready.pid) || typeof ready.startToken !== 'string' || !/^linux-proc:[0-9]+$/.test(ready.startToken) || !Number.isFinite(Date.parse(ready.startedAt))) {
-      throw new Error('background-job runner did not publish a matching startup identity');
+    if (
+      !ready ||
+      ready.schemaVersion !== 1 ||
+      ready.pid !== panePid ||
+      !Number.isSafeInteger(ready.pid) ||
+      typeof ready.startToken !== "string" ||
+      !/^linux-proc:[0-9]+$/.test(ready.startToken) ||
+      !Number.isFinite(Date.parse(ready.startedAt))
+    ) {
+      throw new Error("background-job runner did not publish a matching startup identity");
     }
     // Runner remains behind launch-ready until this controller validates its
     // identity, so the token must still match a live proc entry here.
     const paneStartToken = await processStartToken(panePid);
-    if (paneStartToken !== ready.startToken) throw new Error('background-job runner process identity changed during startup');
-    await this.run(['set-option', '-p', '-t', paneId, '@pi_background_job_start_token', paneStartToken], false, socketPath);
+    if (paneStartToken !== ready.startToken)
+      throw new Error("background-job runner process identity changed during startup");
+    await this.run(
+      ["set-option", "-p", "-t", paneId, "@pi_background_job_start_token", paneStartToken],
+      false,
+      socketPath,
+    );
     // Readers must see either the live-launcher record or the committed pane,
     // never a truncated JSON record during the startup handoff.
     if (intentPath && intent) {
       const temporary = `${intentPath}.${ownershipToken}.tmp`;
-      await writeFile(temporary, JSON.stringify({...intent, paneId, panePid, paneStartToken}), {mode:0o600, flag:'wx'});
+      await writeFile(temporary, JSON.stringify({ ...intent, paneId, panePid, paneStartToken }), {
+        mode: 0o600,
+        flag: "wx",
+      });
       await rename(temporary, intentPath);
     }
     // Repeated splits must not shrink the caller to an unsplittable sliver.
     // Layout failure does not invalidate an otherwise successfully owned job.
-    if (placement) await this.run(['select-layout', '-t', windowId, 'tiled'], true, socketPath).catch(() => undefined);
+    if (placement)
+      await this.run(["select-layout", "-t", windowId, "tiled"], true, socketPath).catch(
+        () => undefined,
+      );
     return {
       schemaVersion: 1,
-      socketPath, sessionId, serverPid, serverStartToken, ownershipToken,
+      socketPath,
+      sessionId,
+      serverPid,
+      serverStartToken,
+      ownershipToken,
       windowId,
       paneId,
       panePid,
@@ -265,43 +564,78 @@ export class TmuxBackend implements JobProcessBackend {
 
   private async inspect(id: string, launch: JobLaunch, exitRecheck = false): Promise<PaneState> {
     const socket = launch.socketPath ?? this.store.socketPath;
-    if (launch.serverPid && await this.identityToken(launch.serverPid).catch(() => '') !== launch.serverStartToken) throw new Error('Saved tmux server identity changed; refusing replacement work');
-    const result = await this.run(["display-message", "-p", "-t", launch.paneId, "#{@pi_background_job_id}|#{pane_dead}|#{pane_pid}|#{@pi_background_job_token}|#{session_id}|#{window_id}|#{pid}|#{@pi_background_job_start_token}"], true, socket);
+    if (
+      launch.serverPid &&
+      (await this.identityToken(launch.serverPid).catch(() => "")) !== launch.serverStartToken
+    )
+      throw new Error("Saved tmux server identity changed; refusing replacement work");
+    const result = await this.run(
+      [
+        "display-message",
+        "-p",
+        "-t",
+        launch.paneId,
+        "#{@pi_background_job_id}|#{pane_dead}|#{pane_pid}|#{@pi_background_job_token}|#{session_id}|#{window_id}|#{pid}|#{@pi_background_job_start_token}",
+      ],
+      true,
+      socket,
+    );
     if (result.code !== 0) {
-      if (exitRecheck && !/can't find pane:/.test(result.stderr)) throw new Error('Cannot verify missing tmux pane after exit recheck');
+      if (exitRecheck && !/can't find pane:/.test(result.stderr))
+        throw new Error("Cannot verify missing tmux pane after exit recheck");
       return { exists: false };
     }
-    const [tag, deadRaw, pidRaw, token, session, window, server, startToken] = result.stdout.trim().split("|");
+    const [tag, deadRaw, pidRaw, token, session, window, server, startToken] = result.stdout
+      .trim()
+      .split("|");
     // Some tmux versions answer a missing pane with success and only the
     // server fields filled. Confirm the pane is really absent from the server
     // before the ownership check, which would otherwise refuse forever.
     if (!tag && !deadRaw && !pidRaw && !token && !startToken) {
       const panes = await this.run(["list-panes", "-a", "-F", "#{pane_id}"], true, socket);
-      if (panes.code !== 0) throw new Error('Cannot verify missing tmux pane');
+      if (panes.code !== 0) throw new Error("Cannot verify missing tmux pane");
       if (!panes.stdout.split("\n").includes(launch.paneId)) return { exists: false };
     }
     // A foreground group is promoted with move-window. Its server-global window
     // and pane identities remain unchanged; sessionId is launch history only.
-    if (launch.ownershipToken && (token !== launch.ownershipToken || startToken !== launch.paneStartToken || !/^\$[0-9]+$/.test(session ?? '') || window !== launch.windowId || Number(server) !== launch.serverPid)) throw new Error('Saved tmux pane ownership/placement changed; refusing replacement work');
+    if (
+      launch.ownershipToken &&
+      (token !== launch.ownershipToken ||
+        startToken !== launch.paneStartToken ||
+        !/^\$[0-9]+$/.test(session ?? "") ||
+        window !== launch.windowId ||
+        Number(server) !== launch.serverPid)
+    )
+      throw new Error("Saved tmux pane ownership/placement changed; refusing replacement work");
     if (!tag && !deadRaw && !pidRaw) return { exists: false };
-    if (tag !== id) throw new Error(`Refusing unowned tmux pane for ${id}: ${JSON.stringify(result.stdout.slice(0, 500))}`);
+    if (tag !== id)
+      throw new Error(
+        `Refusing unowned tmux pane for ${id}: ${JSON.stringify(result.stdout.slice(0, 500))}`,
+      );
     const panePid = Number(pidRaw);
     if ((deadRaw !== "0" && deadRaw !== "1") || !Number.isSafeInteger(panePid)) {
       throw new Error("tmux returned malformed pane state");
     }
-    if (panePid !== launch.panePid) throw new Error('Saved tmux pane start identity changed; refusing replacement work');
-    if (deadRaw === '0') {
-      if (exitRecheck) throw new Error('Saved tmux pane start identity unavailable after exit recheck; refusing replacement work');
+    if (panePid !== launch.panePid)
+      throw new Error("Saved tmux pane start identity changed; refusing replacement work");
+    if (deadRaw === "0") {
+      if (exitRecheck)
+        throw new Error(
+          "Saved tmux pane start identity unavailable after exit recheck; refusing replacement work",
+        );
       let current: string;
-      try { current = await this.identityToken(panePid); }
-      catch (error) {
+      try {
+        current = await this.identityToken(panePid);
+      } catch (error) {
         // A live tmux snapshot can precede runner exit and /proc removal.
         // Reobserve once, authenticating the server and every pane option again.
         // Only a dead/missing pane proves this race; never trust stale live data.
-        if (process.platform !== 'linux' || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        if (process.platform !== "linux" || (error as NodeJS.ErrnoException).code !== "ENOENT")
+          throw error;
         return this.inspect(id, launch, true);
       }
-      if (current !== launch.paneStartToken) throw new Error('Saved tmux pane start identity changed; refusing replacement work');
+      if (current !== launch.paneStartToken)
+        throw new Error("Saved tmux pane start identity changed; refusing replacement work");
     }
     return { exists: true, dead: deadRaw === "1", panePid };
   }
@@ -313,7 +647,11 @@ export class TmuxBackend implements JobProcessBackend {
   async capture(id: string, launch: JobLaunch): Promise<string> {
     const state = await this.inspect(id, launch);
     if (!state.exists) return "";
-    const result = await this.run(["capture-pane", "-p", "-J", "-S", "-2000", "-t", launch.paneId], false, launch.socketPath ?? this.store.socketPath);
+    const result = await this.run(
+      ["capture-pane", "-p", "-J", "-S", "-2000", "-t", launch.paneId],
+      false,
+      launch.socketPath ?? this.store.socketPath,
+    );
     return state.dead ? stripTmuxExitFooter(result.stdout) : result.stdout;
   }
 
@@ -327,7 +665,9 @@ export class TmuxBackend implements JobProcessBackend {
     const state = await this.inspect(id, launch);
     if (!state.exists) return;
     if (!state.dead && state.panePid === launch.panePid) {
-      try { process.kill(launch.panePid, "SIGUSR2"); } catch {}
+      try {
+        process.kill(launch.panePid, "SIGUSR2");
+      } catch {}
       for (let attempt = 0; attempt < 10; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 50));
         const current = await this.inspect(id, launch);
@@ -335,8 +675,13 @@ export class TmuxBackend implements JobProcessBackend {
       }
       const current = await this.inspect(id, launch);
       if (current.exists && !current.dead) {
-        if (await processStartToken(launch.panePid) !== launch.paneStartToken) throw new Error('Pane process changed during cancellation');
-        try { process.kill(launch.panePid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+        if ((await processStartToken(launch.panePid)) !== launch.paneStartToken)
+          throw new Error("Pane process changed during cancellation");
+        try {
+          process.kill(launch.panePid, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
       }
     }
     // Cancellation terminates execution but deliberately retains the dead pane.
@@ -347,12 +692,13 @@ export class TmuxBackend implements JobProcessBackend {
     // result.json is published immediately before runner exit. Allow that short
     // handoff to settle without turning reap into implicit cancellation.
     for (let attempt = 0; state.exists && !state.dead && attempt < 20; attempt++) {
-      await new Promise(resolve => setTimeout(resolve, 25));
+      await new Promise((resolve) => setTimeout(resolve, 25));
       state = await this.inspect(id, launch);
     }
     if (!state.exists) return;
     if (!state.dead) throw new Error(`Background job ${id} pane is still running; cancel it first`);
-    if (!launch.ownershipToken) throw new Error('Legacy pane lacks a reap ownership token; refusing automatic cleanup');
+    if (!launch.ownershipToken)
+      throw new Error("Legacy pane lacks a reap ownership token; refusing automatic cleanup");
     // Check pane-local ownership inside tmux immediately before mutation.
     const checks = [
       `#{==:#{@pi_background_job_token},${launch.ownershipToken}}`,
@@ -360,11 +706,25 @@ export class TmuxBackend implements JobProcessBackend {
       `#{==:#{@pi_background_job_start_token},${launch.paneStartToken}}`,
       `#{==:#{pid},${launch.serverPid}}`,
       `#{==:#{window_id},${launch.windowId}}`,
-      `#{==:#{pane_pid},${launch.panePid}}`, '#{pane_dead}',
+      `#{==:#{pane_pid},${launch.panePid}}`,
+      "#{pane_dead}",
     ];
     const guard = checks.reduce((left, right) => `#{&&:${left},${right}}`);
-    const result = await this.run(['if-shell', '-F', '-t', launch.paneId, guard, `kill-pane -t ${launch.paneId}`, 'display-message -p pi-job-identity-mismatch'], false, launch.socketPath ?? this.store.socketPath);
-    if (result.stdout.includes('pi-job-identity-mismatch')) throw new Error('Pane ownership changed; reap refused');
+    const result = await this.run(
+      [
+        "if-shell",
+        "-F",
+        "-t",
+        launch.paneId,
+        guard,
+        `kill-pane -t ${launch.paneId}`,
+        "display-message -p pi-job-identity-mismatch",
+      ],
+      false,
+      launch.socketPath ?? this.store.socketPath,
+    );
+    if (result.stdout.includes("pi-job-identity-mismatch"))
+      throw new Error("Pane ownership changed; reap refused");
   }
 
   attachCommand(launch?: JobLaunch): string {

@@ -51,18 +51,20 @@ export function createBuiltinProviderAdapters(
   options: { loader?: ProviderModuleLoader } = {},
 ): AccountProviderAdapter[] {
   const loader = options.loader ?? defaultProviderModuleLoader;
-  return [{
-    id: "openai-codex",
-    displayName: "OpenAI Codex",
-    requiresApiKeyBridge: true,
-    runtimeAuthMode: "authorization-header",
-    resolveOAuth: (ctx) => {
-      const oauth = ctx.modelRegistry.getProvider("openai-codex")?.auth.oauth;
-      if (!oauth) throw new Error("Pi's native OpenAI Codex OAuth provider is unavailable.");
-      return oauth;
+  return [
+    {
+      id: "openai-codex",
+      displayName: "OpenAI Codex",
+      requiresApiKeyBridge: true,
+      runtimeAuthMode: "authorization-header",
+      resolveOAuth: (ctx) => {
+        const oauth = ctx.modelRegistry.getProvider("openai-codex")?.auth.oauth;
+        if (!oauth) throw new Error("Pi's native OpenAI Codex OAuth provider is unavailable.");
+        return oauth;
+      },
+      oauth: createLazyProviderOwnedOAuth("openai-codex", loader),
     },
-    oauth: createLazyProviderOwnedOAuth("openai-codex", loader),
-  }];
+  ];
 }
 
 export function resolveProviderOAuth(
@@ -112,7 +114,9 @@ export async function loginWithOAuthUI(
   throw result.error;
 }
 
-type NativeOAuthLoginResult = { ok: true; credential: OAuthCredential } | { ok: false; error: unknown };
+type NativeOAuthLoginResult =
+  | { ok: true; credential: OAuthCredential }
+  | { ok: false; error: unknown };
 
 type NativeOAuthComponent = {
   render(width: number): string[];
@@ -138,7 +142,12 @@ class NativeOAuthLoginFlow {
     ownerSignal: AbortSignal,
     private readonly done: (result: NativeOAuthLoginResult) => void,
   ) {
-    this.dialog = new LoginDialogComponent(tui, adapter.id, () => this.controller.abort(), adapter.displayName);
+    this.dialog = new LoginDialogComponent(
+      tui,
+      adapter.id,
+      () => this.controller.abort(),
+      adapter.displayName,
+    );
     this.current = this.dialog;
     this.signal = AbortSignal.any([ownerSignal, this.dialog.signal, this.controller.signal]);
   }
@@ -286,7 +295,10 @@ async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise
   }
 }
 
-function createLazyProviderOwnedOAuth(providerId: AccountProviderId, loader: ProviderModuleLoader): ProviderOwnedOAuth {
+function createLazyProviderOwnedOAuth(
+  providerId: AccountProviderId,
+  loader: ProviderModuleLoader,
+): ProviderOwnedOAuth {
   const load = () => loadProviderOwnedOAuth(providerId, loader);
   return {
     login: async (interaction, options) => (await load()).login(interaction, options),
@@ -302,7 +314,8 @@ async function loadProviderOwnedOAuth(
   let promise = oauthPromises.get(providerId);
   if (!promise) {
     promise = loader().then((module) => {
-      const oauth = module.builtinProviders().find((provider) => provider.id === providerId)?.auth.oauth;
+      const oauth = module.builtinProviders().find((provider) => provider.id === providerId)
+        ?.auth.oauth;
       if (!oauth) throw new Error(`Pi's built-in ${providerId} OAuth provider is unavailable.`);
       return oauth;
     });
@@ -339,14 +352,23 @@ async function promptForOAuth(
   return value;
 }
 
-function notifyOAuthEvent(ctx: ExtensionCommandContext, providerName: string, event: AuthEvent): void {
+function notifyOAuthEvent(
+  ctx: ExtensionCommandContext,
+  providerName: string,
+  event: AuthEvent,
+): void {
   switch (event.type) {
     case "info":
-      ctx.ui.notify([event.message, ...(event.links ?? []).map((link) => link.url)].join("\n"), "info");
+      ctx.ui.notify(
+        [event.message, ...(event.links ?? []).map((link) => link.url)].join("\n"),
+        "info",
+      );
       break;
     case "auth_url":
       ctx.ui.notify(
-        [`Open this URL to login to ${providerName}:`, event.url, event.instructions].filter(Boolean).join("\n"),
+        [`Open this URL to login to ${providerName}:`, event.url, event.instructions]
+          .filter(Boolean)
+          .join("\n"),
         "info",
       );
       break;

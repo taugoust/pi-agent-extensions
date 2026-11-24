@@ -28,10 +28,7 @@ import {
   type ReloadableSubagentPermissionAuthority,
   type SubagentPermissionRequest,
 } from "../shared/subagent-permission.js";
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 const GATE_CLAIM_KEY = "__paeAgentSHPermissionGateClaimV1";
 const COMMAND_AUTHORITY_KEY = "__paeCommandAuthorityV1";
@@ -156,7 +153,13 @@ type CommandAuthority = {
   protocol: 1;
   active: boolean;
   consume(toolCallId: string, command: string, cwd: string): boolean;
-  authorize(toolCallId: string, command: string, cwd: string, ownerSessionId: string, signal?: AbortSignal): Promise<void>;
+  authorize(
+    toolCallId: string,
+    command: string,
+    cwd: string,
+    ownerSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
 };
 
 type FrameWaiter = {
@@ -190,13 +193,15 @@ function claimInheritedGate(startup: AgentSHStartupClassification): GateClaim | 
   const root = globalThis as Record<string, unknown>;
   const existing = root[GATE_CLAIM_KEY] as GateClaim | undefined;
   const socketPresent = ownEnvironment(GATE_SOCKET_ENV);
-  const rawSocket = socketPresent ? process.env[GATE_SOCKET_ENV] ?? "" : undefined;
+  const rawSocket = socketPresent ? (process.env[GATE_SOCKET_ENV] ?? "") : undefined;
   if (socketPresent) delete process.env[GATE_SOCKET_ENV];
 
   if (existing?.protocol === PROTOCOL_VERSION && typeof existing.rawSocket === "string") {
-    if (!existing.startup
-      || (existing.startup.kind !== "guard-only" && existing.startup.kind !== "conflict")
-      || existing.startup.protocol !== "permission-gate") {
+    if (
+      !existing.startup ||
+      (existing.startup.kind !== "guard-only" && existing.startup.kind !== "conflict") ||
+      existing.startup.protocol !== "permission-gate"
+    ) {
       existing.startup = {
         kind: startup.kind === "full" || startup.kind === "conflict" ? "conflict" : "guard-only",
         protocol: "permission-gate",
@@ -269,7 +274,9 @@ function gateSubagentAuthority(claim: GateClaim): ReloadableSubagentPermissionAu
     const phase = existing.phase();
     if (phase === "unbound" || phase === "reloading") return existing;
     if (phase === "active" || phase === "draining") {
-      existing.fail(new Error("Overlapping Permission Gate extension runtimes cannot share child authority"));
+      existing.fail(
+        new Error("Overlapping Permission Gate extension runtimes cannot share child authority"),
+      );
     }
   }
   const created = createReloadableSubagentPermissionAuthority();
@@ -292,7 +299,9 @@ function paseoRemoteSelect(
   try {
     if (!bridge.isConnected()) return null;
     if (typeof bridge.selectMirrored === "function") {
-      return Promise.resolve(bridge.selectMirrored(title, options, localSelect, { signal })).catch(() => undefined);
+      return Promise.resolve(bridge.selectMirrored(title, options, localSelect, { signal })).catch(
+        () => undefined,
+      );
     }
     return Promise.resolve(bridge.select(title, options, { signal })).catch(() => undefined);
   } catch {
@@ -319,7 +328,10 @@ function truncateUTF8(value: string, maximum: number): string {
 }
 
 function exactUTF8(value: string, field: string, maximum: number, allowEmpty = true): string {
-  if ((!allowEmpty && value.length === 0) || Buffer.from(value, "utf8").toString("utf8") !== value) {
+  if (
+    (!allowEmpty && value.length === 0) ||
+    Buffer.from(value, "utf8").toString("utf8") !== value
+  ) {
     throw new Error(`AgentSH Permission Gate ${field} is not valid UTF-8`);
   }
   if (byteLength(value) > maximum) {
@@ -344,7 +356,9 @@ function exactKeys(
   const allowed = new Set([...required, ...optional]);
   for (const key of Object.keys(object)) {
     if (!allowed.has(key)) {
-      throw new Error(`AgentSH Permission Gate ${name} contains unknown field ${JSON.stringify(key)}`);
+      throw new Error(
+        `AgentSH Permission Gate ${name} contains unknown field ${JSON.stringify(key)}`,
+      );
     }
   }
   for (const key of required) {
@@ -374,11 +388,14 @@ function parseHelloResponse(value: unknown): void {
     throw new Error("AgentSH Permission Gate hello has invalid capabilities");
   }
   const capabilities = object.capabilities.map((value) => {
-    if (typeof value !== "string") throw new Error("AgentSH Permission Gate capability must be a string");
+    if (typeof value !== "string")
+      throw new Error("AgentSH Permission Gate capability must be a string");
     return exactUTF8(value, "capability", 64, false);
   });
-  if (new Set(capabilities).size !== capabilities.length
-    || !["bash", "resolve", "cancel"].every((capability) => capabilities.includes(capability))) {
+  if (
+    new Set(capabilities).size !== capabilities.length ||
+    !["bash", "resolve", "cancel"].every((capability) => capabilities.includes(capability))
+  ) {
     throw new Error("AgentSH Permission Gate does not advertise the required capabilities");
   }
 }
@@ -391,8 +408,12 @@ function parsePrompt(value: unknown): PromptMetadata {
     ["title", "message", "labels", "command_preview"],
     ["command_truncated"],
   );
-  if (typeof object.title !== "string" || typeof object.message !== "string"
-    || typeof object.command_preview !== "string" || !Array.isArray(object.labels)) {
+  if (
+    typeof object.title !== "string" ||
+    typeof object.message !== "string" ||
+    typeof object.command_preview !== "string" ||
+    !Array.isArray(object.labels)
+  ) {
     throw new Error("AgentSH Permission Gate returned malformed prompt metadata");
   }
   if (object.command_truncated !== undefined && typeof object.command_truncated !== "boolean") {
@@ -402,7 +423,8 @@ function parsePrompt(value: unknown): PromptMetadata {
     throw new Error("AgentSH Permission Gate returned too many prompt labels");
   }
   const labels = object.labels.map((label) => {
-    if (typeof label !== "string") throw new Error("AgentSH Permission Gate prompt label must be a string");
+    if (typeof label !== "string")
+      throw new Error("AgentSH Permission Gate prompt label must be a string");
     return exactUTF8(label, "prompt label", 256, false);
   });
   return {
@@ -453,9 +475,7 @@ function parseCompleteResponse(
   }
   return {
     decision: object.decision,
-    reason: object.reason === undefined
-      ? ""
-      : exactUTF8(object.reason, "completion reason", 512),
+    reason: object.reason === undefined ? "" : exactUTF8(object.reason, "completion reason", 512),
   };
 }
 
@@ -582,9 +602,12 @@ class AgentSHPermissionGateClient {
     this.#socket.unref();
     this.#socket.on("data", (chunk: Buffer) => this.#receive(Buffer.from(chunk)));
     this.#socket.on("end", () => this.#end());
-    this.#socket.on("error", (error) => this.#fail(new Error(`AgentSH Permission Gate transport error: ${error.message}`)));
+    this.#socket.on("error", (error) =>
+      this.#fail(new Error(`AgentSH Permission Gate transport error: ${error.message}`)),
+    );
     this.#socket.on("close", () => {
-      if (!this.#fatal) this.#fail(new Error("AgentSH Permission Gate transport closed unexpectedly"));
+      if (!this.#fatal)
+        this.#fail(new Error("AgentSH Permission Gate transport closed unexpectedly"));
     });
   }
 
@@ -616,23 +639,30 @@ class AgentSHPermissionGateClient {
       transportSignal: AbortSignal,
     ) => Promise<PromptResolution>,
   ): Promise<AuthorizationResult> {
-    const operation = this.#tail.then(async () => {
-      await this.initialize();
-      return await this.#authorize(request, signal, prompt);
-    }).catch((error) => {
-      const failure = asError(error);
-      this.#fail(failure);
-      throw failure;
-    });
-    this.#tail = operation.then(() => undefined, () => undefined);
+    const operation = this.#tail
+      .then(async () => {
+        await this.initialize();
+        return await this.#authorize(request, signal, prompt);
+      })
+      .catch((error) => {
+        const failure = asError(error);
+        this.#fail(failure);
+        throw failure;
+      });
+    this.#tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
     return operation;
   }
 
   async #initialize(): Promise<void> {
-    parseHelloResponse(await this.#exchange(
-      { v: PROTOCOL_VERSION, type: "hello", client: "pi-permission-gate" },
-      "hello",
-    ));
+    parseHelloResponse(
+      await this.#exchange(
+        { v: PROTOCOL_VERSION, type: "hello", client: "pi-permission-gate" },
+        "hello",
+      ),
+    );
   }
 
   async #authorize(
@@ -653,21 +683,28 @@ class AgentSHPermissionGateClient {
     exactUTF8(request.command, "command", MAX_COMMAND_BYTES, false);
     exactUTF8(request.cwd, "cwd", MAX_CWD_BYTES);
     exactUTF8(request.toolCallId, "tool call ID", MAX_ID_BYTES, false);
-    if (request.sessionId !== undefined) exactUTF8(request.sessionId, "session ID", MAX_ID_BYTES, false);
+    if (request.sessionId !== undefined)
+      exactUTF8(request.sessionId, "session ID", MAX_ID_BYTES, false);
 
     const id = `pi-${process.pid}-${++this.#requestNumber}`;
     // Install the bounded reader before writing. A fast local broker can reply
     // before Node invokes the write callback, and unsolicited frames are fatal.
-    const decision = parseDecisionResponse(await this.#exchange({
-      v: PROTOCOL_VERSION,
-      type: "authorize",
+    const decision = parseDecisionResponse(
+      await this.#exchange(
+        {
+          v: PROTOCOL_VERSION,
+          type: "authorize",
+          id,
+          kind: "bash",
+          command: request.command,
+          cwd: request.cwd,
+          tool_call_id: request.toolCallId,
+          ...(request.sessionId === undefined ? {} : { session_id: request.sessionId }),
+        },
+        "authorization decision",
+      ),
       id,
-      kind: "bash",
-      command: request.command,
-      cwd: request.cwd,
-      tool_call_id: request.toolCallId,
-      ...(request.sessionId === undefined ? {} : { session_id: request.sessionId }),
-    }, "authorization decision"), id);
+    );
     if (this.#fatal) throw this.#fatal;
     if (decision.decision === "allow") {
       return signal?.aborted
@@ -680,11 +717,7 @@ class AgentSHPermissionGateClient {
       resolution = { kind: "cancel", reason: "caller aborted" };
     } else {
       try {
-        resolution = await prompt(
-          decision.prompt,
-          this.timeoutMs,
-          this.#failureController.signal,
-        );
+        resolution = await prompt(decision.prompt, this.timeoutMs, this.#failureController.signal);
         if (this.#fatal) throw this.#fatal;
       } catch {
         resolution = {
@@ -727,9 +760,11 @@ class AgentSHPermissionGateClient {
     }
     return {
       allowed: complete.decision === "allow",
-      reason: complete.reason || (complete.decision === "allow"
-        ? "allowed by AgentSH Permission Gate"
-        : "denied by AgentSH Permission Gate"),
+      reason:
+        complete.reason ||
+        (complete.decision === "allow"
+          ? "allowed by AgentSH Permission Gate"
+          : "denied by AgentSH Permission Gate"),
     };
   }
 
@@ -759,9 +794,8 @@ class AgentSHPermissionGateClient {
         if (error) reject(error);
         else resolve();
       };
-      const onTransportFailure = () => finish(
-        this.#fatal ?? new Error("AgentSH Permission Gate transport failed"),
-      );
+      const onTransportFailure = () =>
+        finish(this.#fatal ?? new Error("AgentSH Permission Gate transport failed"));
       const timer = setTimeout(() => {
         const error = new Error("AgentSH Permission Gate timed out writing a protocol frame");
         this.#fail(error);
@@ -769,7 +803,9 @@ class AgentSHPermissionGateClient {
       }, this.timeoutMs);
       this.#failureController.signal.addEventListener("abort", onTransportFailure, { once: true });
       try {
-        this.#socket.write(frame, (error?: Error | null) => finish(error ? asError(error) : undefined));
+        this.#socket.write(frame, (error?: Error | null) =>
+          finish(error ? asError(error) : undefined),
+        );
       } catch (error) {
         finish(asError(error));
       }
@@ -835,9 +871,13 @@ class AgentSHPermissionGateClient {
 
   #end(): void {
     if (this.#fatal) return;
-    this.#fail(new Error(this.#buffer.length > 0
-      ? "AgentSH Permission Gate ended with an unterminated frame"
-      : "AgentSH Permission Gate reached unexpected EOF"));
+    this.#fail(
+      new Error(
+        this.#buffer.length > 0
+          ? "AgentSH Permission Gate ended with an unterminated frame"
+          : "AgentSH Permission Gate reached unexpected EOF",
+      ),
+    );
   }
 
   #protocolFailure(message: string): Error {
@@ -850,7 +890,9 @@ class AgentSHPermissionGateClient {
     if (this.#fatal) return;
     this.#fatal = error;
     this.#failureController.abort(error);
-    try { this.#failureHandler?.(error); } catch {}
+    try {
+      this.#failureHandler?.(error);
+    } catch {}
     if (this.#waiter) {
       const waiter = this.#waiter;
       this.#waiter = undefined;
@@ -866,7 +908,9 @@ function asError(error: unknown): Error {
 }
 
 function boundedError(error: unknown): string {
-  return asError(error).message.replace(/[\r\n\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+/g, " ").slice(0, 500);
+  return asError(error)
+    .message.replace(/[\r\n\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+/g, " ")
+    .slice(0, 500);
 }
 
 function safePromptText(value: string): string {
@@ -959,22 +1003,37 @@ async function resolveAgentSHPrompt(
     const interactions = workerInteractionsService("permission");
     if (interactions) {
       try {
-        const answer = await interactions.request({
-          kind: "permission",
-          title: safePromptText(metadata.title),
-          detail: title,
-          options,
-        }, deadline.signal);
+        const answer = await interactions.request(
+          {
+            kind: "permission",
+            title: safePromptText(metadata.title),
+            detail: title,
+            options,
+          },
+          deadline.signal,
+        );
         if (callerSignal?.aborted) return { kind: "cancel", reason: "caller aborted" };
-        if (transportSignal.aborted) throw transportSignal.reason ?? new Error("Permission Gate transport failed");
-        if (deadline.timedOut()) return { kind: "cancel", reason: "authorization prompt timed out" };
-        if (!answer || answer.kind !== "permission" || typeof answer.cancelled !== "boolean") return { kind: "cancel", reason: "authorization prompt returned an invalid response" };
+        if (transportSignal.aborted)
+          throw transportSignal.reason ?? new Error("Permission Gate transport failed");
+        if (deadline.timedOut())
+          return { kind: "cancel", reason: "authorization prompt timed out" };
+        if (!answer || answer.kind !== "permission" || typeof answer.cancelled !== "boolean")
+          return { kind: "cancel", reason: "authorization prompt returned an invalid response" };
         if (answer.cancelled) return { kind: "cancel", reason: "authorization prompt cancelled" };
         if (answer.value === ALLOW_CHOICE) return { kind: "resolve", decision: "allow" };
         if (answer.value === DENY_CHOICE) return { kind: "resolve", decision: "deny" };
         return { kind: "cancel", reason: "authorization prompt returned an invalid option" };
       } catch {
-        return { kind: "cancel", reason: callerSignal?.aborted ? "caller aborted" : transportSignal.aborted ? "transport failed" : deadline.timedOut() ? "authorization prompt timed out" : "authorization prompt failed" };
+        return {
+          kind: "cancel",
+          reason: callerSignal?.aborted
+            ? "caller aborted"
+            : transportSignal.aborted
+              ? "transport failed"
+              : deadline.timedOut()
+                ? "authorization prompt timed out"
+                : "authorization prompt failed",
+        };
       }
     }
     if (!ctx.hasUI) return { kind: "cancel", reason: "no UI available" };
@@ -1001,7 +1060,10 @@ async function resolveAgentSHPrompt(
   }
 }
 
-function linkedAbortSignal(parents: readonly (AbortSignal | undefined)[]): { signal: AbortSignal; dispose(): void } {
+function linkedAbortSignal(parents: readonly (AbortSignal | undefined)[]): {
+  signal: AbortSignal;
+  dispose(): void;
+} {
   const controller = new AbortController();
   const listeners: Array<{ signal: AbortSignal; listener(): void }> = [];
   for (const signal of parents) {
@@ -1022,7 +1084,10 @@ function linkedAbortSignal(parents: readonly (AbortSignal | undefined)[]): { sig
   };
 }
 
-function childPromptMetadata(metadata: PromptMetadata, request: SubagentPermissionRequest): PromptMetadata {
+function childPromptMetadata(
+  metadata: PromptMetadata,
+  request: SubagentPermissionRequest,
+): PromptMetadata {
   const task = truncateUTF8(safePromptText(request.task).replace(/\s+/g, " "), 512);
   const origin = `Requested by native subagent ${safePromptText(request.label)}${task ? `\nTask: ${task}` : ""}`;
   return {
@@ -1031,10 +1096,20 @@ function childPromptMetadata(metadata: PromptMetadata, request: SubagentPermissi
   };
 }
 
-function renderGateStatus(ctx: ExtensionContext, state: "ready" | "waiting" | "error" = "ready", promptsEnabled = true): void {
+function renderGateStatus(
+  ctx: ExtensionContext,
+  state: "ready" | "waiting" | "error" = "ready",
+  promptsEnabled = true,
+): void {
   if (!ctx.hasUI) return;
-  const color = state === "error" || !promptsEnabled ? "error" : state === "waiting" ? "warning" : "success";
-  const text = state === "error" || !promptsEnabled ? "AgentSH gate ✗" : state === "waiting" ? "AgentSH gate ?" : "AgentSH gate ✓";
+  const color =
+    state === "error" || !promptsEnabled ? "error" : state === "waiting" ? "warning" : "success";
+  const text =
+    state === "error" || !promptsEnabled
+      ? "AgentSH gate ✗"
+      : state === "waiting"
+        ? "AgentSH gate ?"
+        : "AgentSH gate ✓";
   ctx.ui.setStatus("permission-gate-mode", undefined);
   ctx.ui.setStatus("permission-gate", ctx.ui.theme.fg(color, text));
 }
@@ -1051,10 +1126,13 @@ export default function permissionGate(pi: ExtensionAPI) {
   let sessionContext: ExtensionContext | undefined;
   let activePiSessionId: string | undefined;
   const authorityOwner = Symbol("permission-gate-extension-runtime");
-  let subagentAuthority = inheritedGateClaim ? gateSubagentAuthority(inheritedGateClaim) : undefined;
+  let subagentAuthority = inheritedGateClaim
+    ? gateSubagentAuthority(inheritedGateClaim)
+    : undefined;
   const publishSubagentAuthority = () => {
     if (subagentAuthority) {
-      (globalThis as Record<string, unknown>)[SUBAGENT_PERMISSION_AUTHORITY_KEY] = subagentAuthority.authority;
+      (globalThis as Record<string, unknown>)[SUBAGENT_PERMISSION_AUTHORITY_KEY] =
+        subagentAuthority.authority;
     }
   };
   publishSubagentAuthority();
@@ -1064,14 +1142,18 @@ export default function permissionGate(pi: ExtensionAPI) {
     active: true,
     async authorize(toolCallId, command, cwd, ownerSessionId, signal) {
       const context = sessionContext;
-      if (!commandAuthority.active || !context || stablePiSessionId(context) !== ownerSessionId) throw new Error("Parent command authority is unavailable for this session");
+      if (!commandAuthority.active || !context || stablePiSessionId(context) !== ownerSessionId)
+        throw new Error("Parent command authority is unavailable for this session");
       if (signal?.aborted) throw new Error("Delegated command authorization was cancelled");
       try {
         const decision = await authorizeCommand(
           { toolName: "background_job", toolCallId, input: { action: "start", command } },
           { ...context, cwd, signal: signal ?? context.signal },
         );
-        if (!commandAuthority.active || sessionContext !== context || signal?.aborted) throw new Error("Parent command authority changed or request was cancelled during authorization");
+        if (!commandAuthority.active || sessionContext !== context || signal?.aborted)
+          throw new Error(
+            "Parent command authority changed or request was cancelled during authorization",
+          );
         if (decision?.block) throw new Error(decision.reason);
       } catch (error) {
         commandReceipts.delete(toolCallId);
@@ -1085,7 +1167,11 @@ export default function permissionGate(pi: ExtensionAPI) {
     },
   };
   (globalThis as Record<string, unknown>)[COMMAND_AUTHORITY_KEY] = commandAuthority;
-  const authorizeBackgroundStart = (event: { toolName: string; toolCallId?: unknown }, command: string, cwd: string) => {
+  const authorizeBackgroundStart = (
+    event: { toolName: string; toolCallId?: unknown },
+    command: string,
+    cwd: string,
+  ) => {
     if (event.toolName !== "background_job" || typeof event.toolCallId !== "string") return;
     if (commandReceipts.size >= MAX_REQUESTS) commandReceipts.clear();
     commandReceipts.set(event.toolCallId, { command, cwd });
@@ -1093,13 +1179,17 @@ export default function permissionGate(pi: ExtensionAPI) {
 
   let enabled = true;
   const modeChanges = new Set<AbortController>();
-  const promptsEnabled = () => inheritedGateClaim?.promptMode?.sessionId !== activePiSessionId
-    || inheritedGateClaim?.promptMode?.enabled !== false;
+  const promptsEnabled = () =>
+    inheritedGateClaim?.promptMode?.sessionId !== activePiSessionId ||
+    inheritedGateClaim?.promptMode?.enabled !== false;
   const gateStatus = (ctx: ExtensionContext, state: "ready" | "waiting" | "error" = "ready") =>
     renderGateStatus(ctx, state, inheritedGateClaim ? promptsEnabled() : enabled);
   const resolveSessionPrompt = async (
-    ctx: ExtensionContext, metadata: PromptMetadata, timeoutMs: number,
-    transportSignal: AbortSignal, callerSignal: AbortSignal | undefined = ctx.signal,
+    ctx: ExtensionContext,
+    metadata: PromptMetadata,
+    timeoutMs: number,
+    transportSignal: AbortSignal,
+    callerSignal: AbortSignal | undefined = ctx.signal,
   ): Promise<PromptResolution> => {
     if (callerSignal?.aborted) return { kind: "cancel", reason: "caller aborted" };
     if (transportSignal.aborted) throw transportSignal.reason;
@@ -1108,10 +1198,21 @@ export default function permissionGate(pi: ExtensionAPI) {
     modeChanges.add(changed);
     const linked = linkedAbortSignal([callerSignal, changed.signal]);
     try {
-      const resolution = await resolveAgentSHPrompt(ctx, metadata, timeoutMs, transportSignal, linked.signal);
+      const resolution = await resolveAgentSHPrompt(
+        ctx,
+        metadata,
+        timeoutMs,
+        transportSignal,
+        linked.signal,
+      );
       // Mode changes dismiss local/mirrored UI, not the AgentSH request. Its
       // exact pending ID is still resolved and its authoritative receipt checked.
-      if (changed.signal.aborted && !callerSignal?.aborted && !transportSignal.aborted && !promptsEnabled()) {
+      if (
+        changed.signal.aborted &&
+        !callerSignal?.aborted &&
+        !transportSignal.aborted &&
+        !promptsEnabled()
+      ) {
         return { kind: "resolve", decision: "allow" };
       }
       return resolution;
@@ -1144,9 +1245,10 @@ export default function permissionGate(pi: ExtensionAPI) {
     const api = (globalThis as Record<string, any>).__AGENTSH_PI__;
     let state: AgentSHRuntimeState | undefined;
     try {
-      state = api && typeof api.getSupervisorState !== "function"
-        ? { configured: true, active: false }
-        : api?.getSupervisorState?.();
+      state =
+        api && typeof api.getSupervisorState !== "function"
+          ? { configured: true, active: false }
+          : api?.getSupervisorState?.();
     } catch {
       state = { configured: true, active: false };
     }
@@ -1158,9 +1260,11 @@ export default function permissionGate(pi: ExtensionAPI) {
   };
   const legacySuppressed = () => {
     const disposition = runtimeDisposition();
-    return suppressLegacySynchronously
-      || disposition.kind === "full"
-      || disposition.kind === "unavailable";
+    return (
+      suppressLegacySynchronously ||
+      disposition.kind === "full" ||
+      disposition.kind === "unavailable"
+    );
   };
 
   const reportGateFailure = (
@@ -1190,7 +1294,9 @@ export default function permissionGate(pi: ExtensionAPI) {
       throw new Error("parent AgentSH Permission Gate session is not active");
     }
     if (agentSHStartup.kind === "conflict" || runtimeDisposition().kind !== "guard-only") {
-      throw new Error("parent AgentSH Permission Gate is no longer the sole active command authority");
+      throw new Error(
+        "parent AgentSH Permission Gate is no longer the sole active command authority",
+      );
     }
     exactUTF8(request.subagentId, "subagent ID", MAX_ID_BYTES - "subagent:".length, false);
     exactUTF8(request.label, "subagent label", MAX_ID_BYTES, false);
@@ -1226,12 +1332,16 @@ export default function permissionGate(pi: ExtensionAPI) {
         },
       );
       if (sessionSignal.aborted || sessionContext !== ctx) {
-        throw new Error("parent AgentSH Permission Gate session ended before authorization completed");
+        throw new Error(
+          "parent AgentSH Permission Gate session ended before authorization completed",
+        );
       }
       failureReported = false;
       gateStatus(ctx, "ready");
       if (runtimeDisposition().kind !== "guard-only") {
-        throw new Error("parent AgentSH Permission Gate ceased to be the sole command authority before execution");
+        throw new Error(
+          "parent AgentSH Permission Gate ceased to be the sole command authority before execution",
+        );
       }
       return result;
     } catch (error) {
@@ -1252,14 +1362,21 @@ export default function permissionGate(pi: ExtensionAPI) {
   const operatorContext = (sessionId: string): ExtensionContext => {
     const root = globalThis as Record<string, unknown>;
     const ctx = sessionContext;
-    if (root[PERMISSION_GATE_OPERATOR_KEY] !== operatorService
-      || root[COMMAND_AUTHORITY_KEY] !== commandAuthority || !commandAuthority.active
-      || !ctx || !activePiSessionId || sessionId !== activePiSessionId
-      || stablePiSessionId(ctx) !== sessionId || !inheritedGateClaim
-      || inheritedGateClaim.error || inheritedGateClaim.client?.failure
-      || subagentAuthority?.phase() !== "active"
-      || root[SUBAGENT_PERMISSION_AUTHORITY_KEY] !== subagentAuthority.authority
-      || runtimeDisposition().kind !== "guard-only") {
+    if (
+      root[PERMISSION_GATE_OPERATOR_KEY] !== operatorService ||
+      root[COMMAND_AUTHORITY_KEY] !== commandAuthority ||
+      !commandAuthority.active ||
+      !ctx ||
+      !activePiSessionId ||
+      sessionId !== activePiSessionId ||
+      stablePiSessionId(ctx) !== sessionId ||
+      !inheritedGateClaim ||
+      inheritedGateClaim.error ||
+      inheritedGateClaim.client?.failure ||
+      subagentAuthority?.phase() !== "active" ||
+      root[SUBAGENT_PERMISSION_AUTHORITY_KEY] !== subagentAuthority.authority ||
+      runtimeDisposition().kind !== "guard-only"
+    ) {
       throw new Error("Permission prompt mode unavailable for this active guard-only session");
     }
     return ctx;
@@ -1272,7 +1389,8 @@ export default function permissionGate(pi: ExtensionAPI) {
     },
     applyMode(sessionId: string, enabled: boolean): PermissionGateMode {
       const ctx = operatorContext(sessionId);
-      if (typeof enabled !== "boolean") throw new Error("Permission prompt mode requires a boolean");
+      if (typeof enabled !== "boolean")
+        throw new Error("Permission prompt mode requires a boolean");
       inheritedGateClaim!.promptMode = { sessionId, enabled };
       if (!enabled) for (const controller of modeChanges) controller.abort();
       gateStatus(ctx, "ready");
@@ -1296,17 +1414,21 @@ export default function permissionGate(pi: ExtensionAPI) {
         const failure = inheritedGateClaim.error ?? inheritedGateClaim.client?.failure;
         try {
           const sessionId = stablePiSessionId(ctx);
-          if (action === "off" || action === "on") operatorService.applyMode(sessionId, action === "on");
+          if (action === "off" || action === "on")
+            operatorService.applyMode(sessionId, action === "on");
           else operatorService.status(sessionId);
         } catch (error) {
           gateStatus(ctx, "error");
-          ctx.ui.notify(`Permission prompt mode unavailable; full AgentSH sandbox policy is unchanged: ${boundedError(error)}`, "error");
+          ctx.ui.notify(
+            `Permission prompt mode unavailable; full AgentSH sandbox policy is unchanged: ${boundedError(error)}`,
+            "error",
+          );
           return;
         }
         gateStatus(ctx, failure ? "error" : "ready");
         ctx.ui.notify(
-          `AgentSH permission prompts ${promptsEnabled() ? "on" : "off"} for this session; child workers are updated next and reported separately. Authorization remains mandatory.`
-            + (failure ? ` Failed closed: ${boundedError(failure)}` : ""),
+          `AgentSH permission prompts ${promptsEnabled() ? "on" : "off"} for this session; child workers are updated next and reported separately. Authorization remains mandatory.` +
+            (failure ? ` Failed closed: ${boundedError(failure)}` : ""),
           failure ? "error" : "info",
         );
         return;
@@ -1323,7 +1445,14 @@ export default function permissionGate(pi: ExtensionAPI) {
         return;
       }
 
-      enabled = action === "on" ? true : action === "off" ? false : action === "status" ? enabled : !enabled;
+      enabled =
+        action === "on"
+          ? true
+          : action === "off"
+            ? false
+            : action === "status"
+              ? enabled
+              : !enabled;
       if (enabled) {
         ctx.ui.setStatus("permission-gate", ctx.ui.theme.fg("warning", "gate ■"));
         ctx.ui.notify("Permission gate enabled — dangerous commands require approval", "info");
@@ -1344,7 +1473,11 @@ export default function permissionGate(pi: ExtensionAPI) {
         const client = gateClient(inheritedGateClaim);
         await (eagerInitialization ?? client.initialize());
         if (client.failure) throw client.failure;
-        if (!subagentAuthority || subagentAuthority.phase() === "inactive" || subagentAuthority.phase() === "failed") {
+        if (
+          !subagentAuthority ||
+          subagentAuthority.phase() === "inactive" ||
+          subagentAuthority.phase() === "failed"
+        ) {
           subagentAuthority = gateSubagentAuthority(inheritedGateClaim);
           publishSubagentAuthority();
         }
@@ -1357,19 +1490,19 @@ export default function permissionGate(pi: ExtensionAPI) {
         boundAuthority.bind(
           authorityOwner,
           activePiSessionId,
-          async (request, signal, sessionSignal) => await authorizeSubagent(
-            boundAuthority,
-            request,
-            signal,
-            sessionSignal,
-          ),
+          async (request, signal, sessionSignal) =>
+            await authorizeSubagent(boundAuthority, request, signal, sessionSignal),
           () => {
             if (sessionContext !== ctx) {
-              throw new Error("Parent AgentSH Permission Gate session changed before child authorization commit");
+              throw new Error(
+                "Parent AgentSH Permission Gate session changed before child authorization commit",
+              );
             }
             if (client.failure) throw client.failure;
             if (runtimeDisposition().kind !== "guard-only") {
-              throw new Error("Parent AgentSH Permission Gate ceased to be the sole command authority before child authorization commit");
+              throw new Error(
+                "Parent AgentSH Permission Gate ceased to be the sole command authority before child authorization commit",
+              );
             }
           },
         );
@@ -1398,13 +1531,21 @@ export default function permissionGate(pi: ExtensionAPI) {
         const sessionId = activePiSessionId ?? stablePiSessionId(ctx);
         if (reason === "reload") {
           const began = await subagentAuthority.beginReload(authorityOwner, sessionId);
-          if (!began && subagentAuthority.phase() !== "failed" && subagentAuthority.phase() !== "inactive") {
-            subagentAuthority.fail(new Error("Child Permission Gate authority could not enter reload handoff"));
+          if (
+            !began &&
+            subagentAuthority.phase() !== "failed" &&
+            subagentAuthority.phase() !== "inactive"
+          ) {
+            subagentAuthority.fail(
+              new Error("Child Permission Gate authority could not enter reload handoff"),
+            );
           }
         } else {
           subagentAuthority.deactivate(
             authorityOwner,
-            new Error(`Parent Pi session shut down (${reason}); child command authority was revoked`),
+            new Error(
+              `Parent Pi session shut down (${reason}); child command authority was revoked`,
+            ),
           );
         }
       }
@@ -1425,7 +1566,12 @@ export default function permissionGate(pi: ExtensionAPI) {
     // Tool input is untrusted, not evidence that the trusted transform or gate
     // transport is broken. Reject it before transforms without revoking the
     // session's authority; the model can correct the next call normally.
-    if (!input || Array.isArray(input) || typeof input.command !== "string" || !input.command.trim()) {
+    if (
+      !input ||
+      Array.isArray(input) ||
+      typeof input.command !== "string" ||
+      !input.command.trim()
+    ) {
       return { block: true, reason: "Command must be a non-empty string" };
     }
     const sealAuthorizedBashInput = () => {
@@ -1448,7 +1594,8 @@ export default function permissionGate(pi: ExtensionAPI) {
         gateStatus(ctx, "error");
         return {
           block: true,
-          reason: "Conflicting AgentSH guard-only and full-supervisor authorities were selected; refusing command execution",
+          reason:
+            "Conflicting AgentSH guard-only and full-supervisor authorities were selected; refusing command execution",
         };
       }
       gateStatus(ctx, "waiting");
@@ -1483,7 +1630,8 @@ export default function permissionGate(pi: ExtensionAPI) {
         if (runtimeDisposition().kind === "unavailable") {
           return {
             block: true,
-            reason: "AgentSH Permission Gate allowed the command intent, but full AgentSH mode is unavailable; refusing native command execution",
+            reason:
+              "AgentSH Permission Gate allowed the command intent, but full AgentSH mode is unavailable; refusing native command execution",
           };
         }
         authorizeBackgroundStart(event, command, ctx.cwd);
@@ -1506,12 +1654,14 @@ export default function permissionGate(pi: ExtensionAPI) {
       if (ctx.hasUI) ctx.ui.setStatus("permission-gate", undefined);
       return {
         block: true,
-        reason: "Full AgentSH mode is selected but its supervisor is unavailable; refusing native command execution",
+        reason:
+          "Full AgentSH mode is selected but its supervisor is unavailable; refusing native command execution",
       };
     }
     if (disposition.kind === "full" || legacySuppressed()) {
       if (ctx.hasUI) ctx.ui.setStatus("permission-gate", undefined);
-      if (typeof input.command === "string") authorizeBackgroundStart(event, input.command, ctx.cwd);
+      if (typeof input.command === "string")
+        authorizeBackgroundStart(event, input.command, ctx.cwd);
       return undefined;
     }
 

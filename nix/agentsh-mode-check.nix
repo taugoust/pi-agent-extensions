@@ -15,11 +15,14 @@ let
     inherit self;
     lib = pkgs.lib;
   };
-  bundles = map (name: mkExtensionBundle {
-    inherit pkgs;
-    name = "agentsh-mode-${name}-bundle-check";
-    extensions = [ name ];
-  }) consumerNames;
+  bundles = map (
+    name:
+    mkExtensionBundle {
+      inherit pkgs;
+      name = "agentsh-mode-${name}-bundle-check";
+      extensions = [ name ];
+    }
+  ) consumerNames;
   inherit (import ./module-test-harness.nix { inherit self pkgs; }) evaluate valid;
   # Evaluate through the shared module harness, so options the module relies
   # on (such as `assertions` for removed options) are declared consistently.
@@ -150,10 +153,15 @@ pkgs.runCommand "agentsh-mode-check"
       test -f ${bundle}/shared/agentsh-mode.ts
     '') bundles}
 
-    ${pkgs.lib.concatMapStringsSep "\n" (name:
-      let files = homeFilesFor name; in ''
+    ${pkgs.lib.concatMapStringsSep "\n" (
+      name:
+      let
+        files = homeFilesFor name;
+      in
+      ''
         test -f ${files.".pi/agent/extensions/shared".source}/agentsh-mode.ts
-      '') consumerNames}
+      ''
+    ) consumerNames}
 
     touch "$out"
   ''

@@ -1,6 +1,26 @@
 import { createHash, randomBytes } from "node:crypto";
-import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, rmdirSync, unlinkSync } from "node:fs";
-import { access, lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import {
+  constants,
+  closeSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  rmdirSync,
+  unlinkSync,
+} from "node:fs";
+import {
+  access,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { SUBAGENT_CHILD_ID_PATTERN } from "./control.js";
 import { validateOutcomeSummaries, type TaskOutcomeSummary } from "./outcome.ts";
@@ -25,9 +45,22 @@ const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_TERMINAL_RECORDS = 100;
 const SCHEMA_VERSION = 3;
 
-export type BackgroundSubagentStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "lost";
+export type BackgroundSubagentStatus =
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "lost";
 export type BackgroundSubagentBackend = "native" | "agentsh";
-export type BackgroundSubagentChildStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "skipped" | "lost";
+export type BackgroundSubagentChildStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "skipped"
+  | "lost";
 
 export type BackgroundSubagentChildDescriptor = {
   /** Optional only for records created before per-child identities existed. */
@@ -97,12 +130,30 @@ export type LegacyWorktreeReapAudit = {
   attemptedAt: string;
   reason: string;
   optedInChildren: Array<{ childId?: string; taskId?: string; label: string }>;
-  provenChildSessions: Array<{ taskId: string; childId: string; sessionId: string; provenance: "native-task-store" }>;
-  knownWorktrees: Array<{ ownerSessionId: string; taskId: string; childId: string; path: string; repo: string; commonDir: string; branch: string; physicalIdentity?: { dev: string; ino: string; birthtimeMs: string } }>;
+  provenChildSessions: Array<{
+    taskId: string;
+    childId: string;
+    sessionId: string;
+    provenance: "native-task-store";
+  }>;
+  knownWorktrees: Array<{
+    ownerSessionId: string;
+    taskId: string;
+    childId: string;
+    path: string;
+    repo: string;
+    commonDir: string;
+    branch: string;
+    physicalIdentity?: { dev: string; ino: string; birthtimeMs: string };
+  }>;
   uncertainty: string[];
   cleanupAttempted: false;
 };
-export type LegacyWorktreeReapInventory = { knownWorktrees?: unknown[]; provenChildSessions?: unknown[]; uncertainty?: string[] };
+export type LegacyWorktreeReapInventory = {
+  knownWorktrees?: unknown[];
+  provenChildSessions?: unknown[];
+  uncertainty?: string[];
+};
 
 export type BackgroundSubagentResultPage = {
   child: number;
@@ -186,33 +237,56 @@ function boundedText(value: unknown, maximum = MAX_BACKGROUND_SUBAGENT_TEXT_BYTE
 }
 
 function requiredString(value: unknown, label: string, maximum: number): string {
-  if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > maximum) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    Buffer.byteLength(value, "utf8") > maximum
+  ) {
     throw new Error(`invalid ${label}`);
   }
   return value;
 }
 
 function parseArtifacts(value: unknown): BackgroundSubagentArtifact[] {
-  if (!Array.isArray(value) || value.length > 8) throw new Error("invalid background subagent artifacts");
+  if (!Array.isArray(value) || value.length > 8)
+    throw new Error("invalid background subagent artifacts");
   const children = new Set<number>();
   const childIds = new Set<string>();
   const artifacts = value.map((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("invalid background subagent artifact");
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      throw new Error("invalid background subagent artifact");
     const artifact = entry as Record<string, unknown>;
-    if (!Number.isSafeInteger(artifact.child) || (artifact.child as number) < 1 || (artifact.child as number) > 8
-      || children.has(artifact.child as number)) throw new Error("invalid background subagent artifact child");
+    if (
+      !Number.isSafeInteger(artifact.child) ||
+      (artifact.child as number) < 1 ||
+      (artifact.child as number) > 8 ||
+      children.has(artifact.child as number)
+    )
+      throw new Error("invalid background subagent artifact child");
     children.add(artifact.child as number);
-    const childId = artifact.childId === undefined
-      ? undefined
-      : requiredString(artifact.childId, "background subagent artifact child id", 64);
+    const childId =
+      artifact.childId === undefined
+        ? undefined
+        : requiredString(artifact.childId, "background subagent artifact child id", 64);
     if (childId && (!SUBAGENT_CHILD_ID_PATTERN.test(childId) || childIds.has(childId))) {
       throw new Error("invalid background subagent artifact child id");
     }
     if (childId) childIds.add(childId);
-    if (!Number.isSafeInteger(artifact.bytes) || (artifact.bytes as number) < 0 || (artifact.bytes as number) > MAX_RETAINED_SUBAGENT_REPORT_BYTES) throw new Error("invalid background subagent artifact bytes");
-    if (!Number.isSafeInteger(artifact.totalBytes) || (artifact.totalBytes as number) < (artifact.bytes as number)) throw new Error("invalid background subagent artifact total bytes");
-    if (typeof artifact.complete !== "boolean") throw new Error("invalid background subagent artifact completeness");
-    if (typeof artifact.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(artifact.sha256)) throw new Error("invalid background subagent artifact checksum");
+    if (
+      !Number.isSafeInteger(artifact.bytes) ||
+      (artifact.bytes as number) < 0 ||
+      (artifact.bytes as number) > MAX_RETAINED_SUBAGENT_REPORT_BYTES
+    )
+      throw new Error("invalid background subagent artifact bytes");
+    if (
+      !Number.isSafeInteger(artifact.totalBytes) ||
+      (artifact.totalBytes as number) < (artifact.bytes as number)
+    )
+      throw new Error("invalid background subagent artifact total bytes");
+    if (typeof artifact.complete !== "boolean")
+      throw new Error("invalid background subagent artifact completeness");
+    if (typeof artifact.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(artifact.sha256))
+      throw new Error("invalid background subagent artifact checksum");
     return {
       child: artifact.child as number,
       ...(childId ? { childId } : {}),
@@ -227,57 +301,103 @@ function parseArtifacts(value: unknown): BackgroundSubagentArtifact[] {
 }
 
 function parseChildren(value: unknown): BackgroundSubagentChildDescriptor[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 8) throw new Error("invalid background subagent children");
+  if (!Array.isArray(value) || value.length < 1 || value.length > 8)
+    throw new Error("invalid background subagent children");
   const ids = new Set<string>();
   return value.map((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("invalid background subagent child");
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      throw new Error("invalid background subagent child");
     const child = entry as Record<string, unknown>;
     const allowed = new Set(["childId", "taskId", "label", "task", "cleanupWorktreesOnReap"]);
-    for (const key of Object.keys(child)) if (!allowed.has(key)) throw new Error(`unknown background subagent child field ${key}`);
-    const childId = child.childId === undefined
-      ? undefined
-      : requiredString(child.childId, "background subagent child id", 64);
+    for (const key of Object.keys(child))
+      if (!allowed.has(key)) throw new Error(`unknown background subagent child field ${key}`);
+    const childId =
+      child.childId === undefined
+        ? undefined
+        : requiredString(child.childId, "background subagent child id", 64);
     if (childId && (!SUBAGENT_CHILD_ID_PATTERN.test(childId) || ids.has(childId))) {
       throw new Error("invalid background subagent child id");
     }
     if (childId) ids.add(childId);
     const taskId = child.taskId;
-    if (taskId !== undefined && (typeof taskId !== "string" || !/^subagent-task-[0-9a-f]{24}$/.test(taskId))) throw new Error("Invalid task identity");
-    if (child.cleanupWorktreesOnReap !== undefined && typeof child.cleanupWorktreesOnReap !== "boolean") throw new Error("Invalid trusted worktree cleanup policy");
+    if (
+      taskId !== undefined &&
+      (typeof taskId !== "string" || !/^subagent-task-[0-9a-f]{24}$/.test(taskId))
+    )
+      throw new Error("Invalid task identity");
+    if (
+      child.cleanupWorktreesOnReap !== undefined &&
+      typeof child.cleanupWorktreesOnReap !== "boolean"
+    )
+      throw new Error("Invalid trusted worktree cleanup policy");
     return {
       ...(childId ? { childId } : {}),
       ...(taskId ? { taskId: taskId as string } : {}),
       label: requiredString(child.label, "background subagent child label", 256),
-      ...(child.task === undefined ? {} : { task: requiredString(child.task, "background subagent child task", 2048) }),
+      ...(child.task === undefined
+        ? {}
+        : { task: requiredString(child.task, "background subagent child task", 2048) }),
       cleanupWorktreesOnReap: child.cleanupWorktreesOnReap === true,
     };
   });
 }
 
 function parseRecord(value: unknown): BackgroundSubagentRecord {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("background subagent state must be an object");
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("background subagent state must be an object");
   const data = value as Record<string, unknown>;
-  const allowed = new Set(["schemaVersion", "id", "sessionId", "backend", "mode", "summary", "children", "createdAt", "updatedAt", "ownerPid", "ownerStartToken", "status", "latest", "result", "artifacts", "error", "taskOutcomes"]);
-  for (const key of Object.keys(data)) if (!allowed.has(key)) throw new Error(`unknown background subagent field ${key}`);
-  if (![1, 2, SCHEMA_VERSION].includes(data.schemaVersion as number)) throw new Error("unsupported background subagent state schema");
+  const allowed = new Set([
+    "schemaVersion",
+    "id",
+    "sessionId",
+    "backend",
+    "mode",
+    "summary",
+    "children",
+    "createdAt",
+    "updatedAt",
+    "ownerPid",
+    "ownerStartToken",
+    "status",
+    "latest",
+    "result",
+    "artifacts",
+    "error",
+    "taskOutcomes",
+  ]);
+  for (const key of Object.keys(data))
+    if (!allowed.has(key)) throw new Error(`unknown background subagent field ${key}`);
+  if (![1, 2, SCHEMA_VERSION].includes(data.schemaVersion as number))
+    throw new Error("unsupported background subagent state schema");
   const id = requiredString(data.id, "background subagent id", 64);
   if (!BACKGROUND_SUBAGENT_ID_PATTERN.test(id)) throw new Error("invalid background subagent id");
-  if (data.backend !== "native" && data.backend !== "agentsh") throw new Error("invalid background subagent backend");
-  if (data.mode !== "single" && data.mode !== "parallel" && data.mode !== "chain") throw new Error("invalid background subagent mode");
-  if (!["running", "cancelling", "completed", "failed", "cancelled", "lost"].includes(String(data.status))) throw new Error("invalid background subagent status");
-  if (!Number.isSafeInteger(data.ownerPid) || (data.ownerPid as number) < 1) throw new Error("invalid background subagent owner pid");
+  if (data.backend !== "native" && data.backend !== "agentsh")
+    throw new Error("invalid background subagent backend");
+  if (data.mode !== "single" && data.mode !== "parallel" && data.mode !== "chain")
+    throw new Error("invalid background subagent mode");
+  if (
+    !["running", "cancelling", "completed", "failed", "cancelled", "lost"].includes(
+      String(data.status),
+    )
+  )
+    throw new Error("invalid background subagent status");
+  if (!Number.isSafeInteger(data.ownerPid) || (data.ownerPid as number) < 1)
+    throw new Error("invalid background subagent owner pid");
   for (const field of ["createdAt", "updatedAt"] as const) {
-    if (!Number.isFinite(Date.parse(requiredString(data[field], field, 64)))) throw new Error(`invalid ${field}`);
+    if (!Number.isFinite(Date.parse(requiredString(data[field], field, 64))))
+      throw new Error(`invalid ${field}`);
   }
   if (data.schemaVersion !== SCHEMA_VERSION && data.children !== undefined) {
     throw new Error("legacy background subagent state cannot contain child identities");
   }
   const children = data.children === undefined ? undefined : parseChildren(data.children);
   const parsedArtifacts = data.artifacts === undefined ? undefined : parseArtifacts(data.artifacts);
-  const taskOutcomes = data.taskOutcomes === undefined ? undefined : validateOutcomeSummaries(data.taskOutcomes);
+  const taskOutcomes =
+    data.taskOutcomes === undefined ? undefined : validateOutcomeSummaries(data.taskOutcomes);
   const artifacts = parsedArtifacts?.map((entry) => {
     const { childId: artifactChildId, ...artifact } = entry;
-    if (children && entry.child > children.length) throw new Error("background subagent artifact child is outside its group");
+    if (children && entry.child > children.length)
+      throw new Error("background subagent artifact child is outside its group");
     const descriptorChildId = children?.[entry.child - 1]?.childId;
     if (artifactChildId && descriptorChildId && artifactChildId !== descriptorChildId) {
       throw new Error("background subagent artifact child identity does not match its group");
@@ -310,7 +430,7 @@ function parseRecord(value: unknown): BackgroundSubagentRecord {
     latest: boundedText(data.latest),
     ...(data.result === undefined ? {} : { result: boundedText(data.result) }),
     ...(artifacts?.length ? { artifacts } : {}),
-    ...(taskOutcomes ? {taskOutcomes} : {}),
+    ...(taskOutcomes ? { taskOutcomes } : {}),
     ...(data.error === undefined ? {} : { error: boundedText(data.error, 4096) }),
   };
 }
@@ -322,7 +442,9 @@ async function processStartToken(pid: number): Promise<string | undefined> {
       const close = stat.lastIndexOf(")");
       const fields = stat.slice(close + 2).split(" ");
       return fields[19];
-    } catch { return undefined; }
+    } catch {
+      return undefined;
+    }
   }
   if (pid !== process.pid) return undefined;
   return `${pid}:${Math.floor(Date.now() - process.uptime() * 1000)}`;
@@ -352,12 +474,24 @@ function serializeBoundedState(record: BackgroundSubagentRecord): string {
 
   type StringSlot = { owner: Record<string, any>; key: string; minimum: number };
   const slots = (): StringSlot[] => [
-    ...(snapshot.error === undefined ? [] : [{ owner: snapshot as any, key: "error", minimum: 64 }]),
+    ...(snapshot.error === undefined
+      ? []
+      : [{ owner: snapshot as any, key: "error", minimum: 64 }]),
     { owner: snapshot as any, key: "summary", minimum: 64 },
-    ...(snapshot.children ?? []).map((child) => ({ owner: child as any, key: "label", minimum: 16 })),
-    ...(snapshot.artifacts ?? []).map((artifact) => ({ owner: artifact as any, key: "label", minimum: 16 })),
+    ...(snapshot.children ?? []).map((child) => ({
+      owner: child as any,
+      key: "label",
+      minimum: 16,
+    })),
+    ...(snapshot.artifacts ?? []).map((artifact) => ({
+      owner: artifact as any,
+      key: "label",
+      minimum: 16,
+    })),
     { owner: snapshot as any, key: "latest", minimum: 64 },
-    ...(snapshot.result === undefined ? [] : [{ owner: snapshot as any, key: "result", minimum: 64 }]),
+    ...(snapshot.result === undefined
+      ? []
+      : [{ owner: snapshot as any, key: "result", minimum: 64 }]),
   ];
 
   while (Buffer.byteLength(serialize(), "utf8") > MAX_STATE_BYTES) {
@@ -378,26 +512,41 @@ function serializeBoundedState(record: BackgroundSubagentRecord): string {
 }
 
 async function exists(path: string): Promise<boolean> {
-  try { await access(path, constants.F_OK); return true; } catch { return false; }
+  try {
+    await access(path, constants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 type LegacyReloadAdopter = (sessionId: string) => boolean;
 
 function legacyReloadAdopter(value: unknown, root: string): LegacyReloadAdopter | undefined {
   try {
-    const candidate = value as {
-      root?: unknown;
-      managerAbiVersion?: unknown;
-      adoptReload?: (sessionId: string) => unknown;
-    } | undefined;
+    const candidate = value as
+      | {
+          root?: unknown;
+          managerAbiVersion?: unknown;
+          adoptReload?: (sessionId: string) => unknown;
+        }
+      | undefined;
     // V3 did not carry an ABI marker. Never expose that object as the current
     // manager or call its storage/lifecycle methods; retain only the narrow
     // reload acknowledgement needed to disarm its already-running watchdog.
-    if (!candidate || candidate.managerAbiVersion !== undefined || candidate.root !== root
-      || typeof candidate.adoptReload !== "function") return undefined;
+    if (
+      !candidate ||
+      candidate.managerAbiVersion !== undefined ||
+      candidate.root !== root ||
+      typeof candidate.adoptReload !== "function"
+    )
+      return undefined;
     return (sessionId) => {
-      try { return candidate.adoptReload!.call(candidate, sessionId) === true; }
-      catch { return false; }
+      try {
+        return candidate.adoptReload!.call(candidate, sessionId) === true;
+      } catch {
+        return false;
+      }
     };
   } catch {
     return undefined;
@@ -415,7 +564,10 @@ export class BackgroundSubagentManager {
   private initialized?: Promise<void>;
   private ownerStartToken = "";
 
-  constructor(readonly root: string, legacyManager?: unknown) {
+  constructor(
+    readonly root: string,
+    legacyManager?: unknown,
+  ) {
     this.adoptLegacyReload = legacyReloadAdopter(legacyManager, root);
   }
 
@@ -434,15 +586,23 @@ export class BackgroundSubagentManager {
     this.reloadAdoptionTimers.delete(sessionId);
   }
 
-  private get jobsRoot(): string { return join(this.root, "jobs"); }
+  private get jobsRoot(): string {
+    return join(this.root, "jobs");
+  }
   private jobDir(id: string): string {
-    if (!BACKGROUND_SUBAGENT_ID_PATTERN.test(id)) throw new Error(`Invalid background subagent ID: ${id}`);
+    if (!BACKGROUND_SUBAGENT_ID_PATTERN.test(id))
+      throw new Error(`Invalid background subagent ID: ${id}`);
     return join(this.jobsRoot, id);
   }
-  private statePath(id: string): string { return join(this.jobDir(id), "state.json"); }
-  private notifiedPath(id: string): string { return join(this.jobDir(id), "notified"); }
+  private statePath(id: string): string {
+    return join(this.jobDir(id), "state.json");
+  }
+  private notifiedPath(id: string): string {
+    return join(this.jobDir(id), "notified");
+  }
   private artifactPath(id: string, child: number): string {
-    if (!Number.isSafeInteger(child) || child < 1 || child > 8) throw new Error("Invalid background subagent result child");
+    if (!Number.isSafeInteger(child) || child < 1 || child > 8)
+      throw new Error("Invalid background subagent result child");
     return join(this.jobDir(id), `result-${child}.md`);
   }
 
@@ -455,11 +615,16 @@ export class BackgroundSubagentManager {
     await mkdir(this.jobsRoot, { recursive: true, mode: 0o700 });
     for (const directory of [this.root, this.jobsRoot]) {
       const info = await lstat(directory);
-      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`${directory} is not a directory`);
-      if (process.getuid && info.uid !== process.getuid()) throw new Error(`${directory} is owned by another user`);
-      if ((info.mode & 0o077) !== 0) throw new Error(`${directory} must not be accessible by group or other users`);
+      if (!info.isDirectory() || info.isSymbolicLink())
+        throw new Error(`${directory} is not a directory`);
+      if (process.getuid && info.uid !== process.getuid())
+        throw new Error(`${directory} is owned by another user`);
+      if ((info.mode & 0o077) !== 0)
+        throw new Error(`${directory} must not be accessible by group or other users`);
     }
-    this.ownerStartToken = await processStartToken(process.pid) ?? `${process.pid}:${Math.floor(Date.now() - process.uptime() * 1000)}`;
+    this.ownerStartToken =
+      (await processStartToken(process.pid)) ??
+      `${process.pid}:${Math.floor(Date.now() - process.uptime() * 1000)}`;
     const entries = await readdir(this.jobsRoot, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory() || !BACKGROUND_SUBAGENT_ID_PATTERN.test(entry.name)) continue;
@@ -468,11 +633,16 @@ export class BackgroundSubagentManager {
         if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_STATE_BYTES) continue;
         const record = parseRecord(JSON.parse(await readFile(this.statePath(entry.name), "utf8")));
         if (record.id !== entry.name) continue;
-        if ((record.status === "running" || record.status === "cancelling") &&
-            (!this.runtime.controllers.has(record.id) || record.ownerPid !== process.pid || record.ownerStartToken !== this.ownerStartToken)) {
+        if (
+          (record.status === "running" || record.status === "cancelling") &&
+          (!this.runtime.controllers.has(record.id) ||
+            record.ownerPid !== process.pid ||
+            record.ownerStartToken !== this.ownerStartToken)
+        ) {
           record.status = "lost";
           record.updatedAt = new Date().toISOString();
-          record.error = "The owning Pi process exited before this subagent reported a terminal result.";
+          record.error =
+            "The owning Pi process exited before this subagent reported a terminal result.";
           await this.persist(record);
         }
         this.records.set(record.id, record);
@@ -494,10 +664,17 @@ export class BackgroundSubagentManager {
         if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_STATE_BYTES) continue;
         const persisted = parseRecord(JSON.parse(await readFile(this.statePath(id), "utf8")));
         const current = this.records.get(id);
-        const terminalAdvance = Boolean(current && isBackgroundSubagentActive(current) && !isBackgroundSubagentActive(persisted));
-        const regressesCancellation = current?.status === "cancelling" && persisted.status === "running";
-        if (!current || terminalAdvance
-          || (!regressesCancellation && Date.parse(persisted.updatedAt) > Date.parse(current.updatedAt))) {
+        const terminalAdvance = Boolean(
+          current && isBackgroundSubagentActive(current) && !isBackgroundSubagentActive(persisted),
+        );
+        const regressesCancellation =
+          current?.status === "cancelling" && persisted.status === "running";
+        if (
+          !current ||
+          terminalAdvance ||
+          (!regressesCancellation &&
+            Date.parse(persisted.updatedAt) > Date.parse(current.updatedAt))
+        ) {
           this.records.set(id, persisted);
         }
         if (!isBackgroundSubagentActive(persisted)) this.migratedRecordIds.delete(id);
@@ -511,28 +688,44 @@ export class BackgroundSubagentManager {
   private async persist(record: BackgroundSubagentRecord): Promise<void> {
     const snapshot = structuredClone(record);
     const previous = this.writeChains.get(record.id) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(() => {
-      if (this.runtime.reaped.has(this.jobDir(record.id)) || this.runtime.reaping.has(this.jobDir(record.id))) throw new Error(`Reaped or reaping background subagent: ${record.id}`);
-      return writeAtomicBytes(this.statePath(record.id), serializeBoundedState(snapshot));
-    });
+    const current = previous
+      .catch(() => undefined)
+      .then(() => {
+        if (
+          this.runtime.reaped.has(this.jobDir(record.id)) ||
+          this.runtime.reaping.has(this.jobDir(record.id))
+        )
+          throw new Error(`Reaped or reaping background subagent: ${record.id}`);
+        return writeAtomicBytes(this.statePath(record.id), serializeBoundedState(snapshot));
+      });
     this.writeChains.set(record.id, current);
-    try { await current; }
-    finally { if (this.writeChains.get(record.id) === current) this.writeChains.delete(record.id); }
+    try {
+      await current;
+    } finally {
+      if (this.writeChains.get(record.id) === current) this.writeChains.delete(record.id);
+    }
   }
 
-  async start(input: {
-    sessionId: string;
-    backend: BackgroundSubagentBackend;
-    mode: "single" | "parallel" | "chain";
-    summary: string;
-    children?: BackgroundSubagentChildDescriptor[];
-  }, runner: BackgroundSubagentRunner, launchSignal?: AbortSignal): Promise<BackgroundSubagentRecord> {
+  async start(
+    input: {
+      sessionId: string;
+      backend: BackgroundSubagentBackend;
+      mode: "single" | "parallel" | "chain";
+      summary: string;
+      children?: BackgroundSubagentChildDescriptor[];
+    },
+    runner: BackgroundSubagentRunner,
+    launchSignal?: AbortSignal,
+  ): Promise<BackgroundSubagentRecord> {
     const sessionId = requiredString(input.sessionId, "session id", 512);
     const session = this.sessionState(sessionId);
     const launchGeneration = session.generation;
-    if (session.phase !== "active") throw new Error("Owning Pi session is not accepting background subagent launches");
+    if (session.phase !== "active")
+      throw new Error("Owning Pi session is not accepting background subagent launches");
     if (launchSignal?.aborted) {
-      throw launchSignal.reason instanceof Error ? launchSignal.reason : new Error("Background subagent launch cancelled");
+      throw launchSignal.reason instanceof Error
+        ? launchSignal.reason
+        : new Error("Background subagent launch cancelled");
     }
     await this.initialize();
     await this.refreshMigratedRecords();
@@ -540,10 +733,17 @@ export class BackgroundSubagentManager {
       throw new Error("Owning Pi session changed before background subagent launch");
     }
     if (launchSignal?.aborted) {
-      throw launchSignal.reason instanceof Error ? launchSignal.reason : new Error("Background subagent launch cancelled");
+      throw launchSignal.reason instanceof Error
+        ? launchSignal.reason
+        : new Error("Background subagent launch cancelled");
     }
-    const active = [...this.records.values()].filter((record) => record.status === "running" || record.status === "cancelling");
-    if (active.length >= MAX_BACKGROUND_SUBAGENTS) throw new Error(`Background subagent concurrency limit reached (${MAX_BACKGROUND_SUBAGENTS})`);
+    const active = [...this.records.values()].filter(
+      (record) => record.status === "running" || record.status === "cancelling",
+    );
+    if (active.length >= MAX_BACKGROUND_SUBAGENTS)
+      throw new Error(
+        `Background subagent concurrency limit reached (${MAX_BACKGROUND_SUBAGENTS})`,
+      );
     const now = new Date().toISOString();
     const id = `subagent-job-${randomBytes(12).toString("hex")}`;
     const children = input.children === undefined ? undefined : parseChildren(input.children);
@@ -563,9 +763,12 @@ export class BackgroundSubagentManager {
       latest: "(starting…)",
     };
     const controller = new AbortController();
-    const abortPendingLaunch = () => controller.abort(
-      launchSignal?.reason instanceof Error ? launchSignal.reason : new Error("Background subagent launch cancelled"),
-    );
+    const abortPendingLaunch = () =>
+      controller.abort(
+        launchSignal?.reason instanceof Error
+          ? launchSignal.reason
+          : new Error("Background subagent launch cancelled"),
+      );
     if (launchSignal) launchSignal.addEventListener("abort", abortPendingLaunch, { once: true });
     this.runtime.controllers.set(id, controller);
     this.runtime.pendingLaunches.set(id, { sessionId, controller });
@@ -584,10 +787,15 @@ export class BackgroundSubagentManager {
       await discardPendingLaunch();
       throw error;
     }
-    if (controller.signal.aborted || session.phase !== "active" || session.generation !== launchGeneration) {
-      const error = controller.signal.reason instanceof Error
-        ? controller.signal.reason
-        : new Error("Owning Pi session changed before background subagent launch");
+    if (
+      controller.signal.aborted ||
+      session.phase !== "active" ||
+      session.generation !== launchGeneration
+    ) {
+      const error =
+        controller.signal.reason instanceof Error
+          ? controller.signal.reason
+          : new Error("Owning Pi session changed before background subagent launch");
       await discardPendingLaunch();
       throw error;
     }
@@ -598,17 +806,34 @@ export class BackgroundSubagentManager {
       // Enter the runner before returning the launch record. This closes the
       // reload/shutdown gap between publishing a running job and acquiring its
       // backend transport or native child resources.
-      execution = Promise.resolve(runner(controller.signal, (text) => this.updateProgress(id, text)));
+      execution = Promise.resolve(
+        runner(controller.signal, (text) => this.updateProgress(id, text)),
+      );
     } catch (error) {
       execution = Promise.reject(error);
     }
-    void execution.then(
-      (outcome) => this.finish(id, controller.signal.aborted ? "cancelled" : outcome.failed ? "failed" : "completed", outcome.text, undefined, outcome.reports, outcome.taskOutcomes),
-      (error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        return this.finish(id, controller.signal.aborted ? "cancelled" : "failed", message, message);
-      },
-    ).catch(() => undefined);
+    void execution
+      .then(
+        (outcome) =>
+          this.finish(
+            id,
+            controller.signal.aborted ? "cancelled" : outcome.failed ? "failed" : "completed",
+            outcome.text,
+            undefined,
+            outcome.reports,
+            outcome.taskOutcomes,
+          ),
+        (error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          return this.finish(
+            id,
+            controller.signal.aborted ? "cancelled" : "failed",
+            message,
+            message,
+          );
+        },
+      )
+      .catch(() => undefined);
     return structuredClone(record);
   }
 
@@ -632,57 +857,66 @@ export class BackgroundSubagentManager {
     reports: RetainedSubagentReport[],
   ): Array<RetainedSubagentReport & { child: number; childId?: string }> {
     const descriptors = record.children ?? [];
-    const hasPersistedChildIdentities = descriptors.some((descriptor) => Boolean(descriptor.childId));
+    const hasPersistedChildIdentities = descriptors.some((descriptor) =>
+      Boolean(descriptor.childId),
+    );
     const seen = new Set<number>();
-    return reports.slice(0, 8).map((report) => {
-      const explicitChild = report.child;
-      if (explicitChild !== undefined
-        && (!Number.isSafeInteger(explicitChild) || explicitChild < 1 || explicitChild > 8)) {
-        throw new Error("retained subagent report has an invalid child ordinal");
-      }
-      if (report.childId !== undefined && !SUBAGENT_CHILD_ID_PATTERN.test(report.childId)) {
-        throw new Error("retained subagent report has an invalid child identity");
-      }
-      const identityIndex = report.childId
-        ? descriptors.findIndex((descriptor) => descriptor.childId === report.childId)
-        : -1;
-      if (report.childId && hasPersistedChildIdentities && identityIndex < 0) {
-        throw new Error("retained subagent report child identity does not belong to its group");
-      }
-      const labelMatches = descriptors
-        .map((descriptor, index) => descriptor.label === report.label ? index : -1)
-        .filter((index) => index >= 0);
-      const conventional = report.label.match(/^(?:task|step|child) ([1-8])$/i);
-      const child = identityIndex >= 0
-        ? identityIndex + 1
-        : explicitChild
-          ?? (labelMatches.length === 1 ? labelMatches[0] + 1 : undefined)
-          ?? (conventional ? Number(conventional[1]) : undefined)
-          ?? (record.mode === "single" && reports.length === 1 ? 1 : undefined);
-      if (child === undefined) {
-        throw new Error("retained parallel subagent report has no stable child identity");
-      }
-      if (identityIndex >= 0 && explicitChild !== undefined && explicitChild !== child) {
-        throw new Error("retained subagent report child identity and ordinal disagree");
-      }
-      if (seen.has(child)) throw new Error(`duplicate retained subagent report for child ${child}`);
-      seen.add(child);
-      if (descriptors.length > 0 && child > descriptors.length) {
-        throw new Error("retained subagent report child ordinal is outside its group");
-      }
-      const descriptorId = descriptors[child - 1]?.childId;
-      if (report.childId && descriptorId && report.childId !== descriptorId) {
-        throw new Error("retained subagent report child identity and ordinal disagree");
-      }
-      const { childId: _reportedChildId, ...reportWithoutIdentity } = report;
-      return {
-        ...reportWithoutIdentity,
-        child,
-        // Only the identity persisted before launch is controllable. Report
-        // payloads from pre-identity producers cannot mint one retroactively.
-        ...(descriptorId ? { childId: descriptorId } : {}),
-      };
-    }).sort((a, b) => a.child - b.child);
+    return reports
+      .slice(0, 8)
+      .map((report) => {
+        const explicitChild = report.child;
+        if (
+          explicitChild !== undefined &&
+          (!Number.isSafeInteger(explicitChild) || explicitChild < 1 || explicitChild > 8)
+        ) {
+          throw new Error("retained subagent report has an invalid child ordinal");
+        }
+        if (report.childId !== undefined && !SUBAGENT_CHILD_ID_PATTERN.test(report.childId)) {
+          throw new Error("retained subagent report has an invalid child identity");
+        }
+        const identityIndex = report.childId
+          ? descriptors.findIndex((descriptor) => descriptor.childId === report.childId)
+          : -1;
+        if (report.childId && hasPersistedChildIdentities && identityIndex < 0) {
+          throw new Error("retained subagent report child identity does not belong to its group");
+        }
+        const labelMatches = descriptors
+          .map((descriptor, index) => (descriptor.label === report.label ? index : -1))
+          .filter((index) => index >= 0);
+        const conventional = report.label.match(/^(?:task|step|child) ([1-8])$/i);
+        const child =
+          identityIndex >= 0
+            ? identityIndex + 1
+            : (explicitChild ??
+              (labelMatches.length === 1 ? labelMatches[0] + 1 : undefined) ??
+              (conventional ? Number(conventional[1]) : undefined) ??
+              (record.mode === "single" && reports.length === 1 ? 1 : undefined));
+        if (child === undefined) {
+          throw new Error("retained parallel subagent report has no stable child identity");
+        }
+        if (identityIndex >= 0 && explicitChild !== undefined && explicitChild !== child) {
+          throw new Error("retained subagent report child identity and ordinal disagree");
+        }
+        if (seen.has(child))
+          throw new Error(`duplicate retained subagent report for child ${child}`);
+        seen.add(child);
+        if (descriptors.length > 0 && child > descriptors.length) {
+          throw new Error("retained subagent report child ordinal is outside its group");
+        }
+        const descriptorId = descriptors[child - 1]?.childId;
+        if (report.childId && descriptorId && report.childId !== descriptorId) {
+          throw new Error("retained subagent report child identity and ordinal disagree");
+        }
+        const { childId: _reportedChildId, ...reportWithoutIdentity } = report;
+        return {
+          ...reportWithoutIdentity,
+          child,
+          // Only the identity persisted before launch is controllable. Report
+          // payloads from pre-identity producers cannot mint one retroactively.
+          ...(descriptorId ? { childId: descriptorId } : {}),
+        };
+      })
+      .sort((a, b) => a.child - b.child);
   }
 
   private async persistReports(
@@ -691,7 +925,10 @@ export class BackgroundSubagentManager {
   ): Promise<BackgroundSubagentArtifact[]> {
     const artifacts: BackgroundSubagentArtifact[] = [];
     const selected = this.resolveReports(record, reports);
-    const fairLimit = Math.min(MAX_RETAINED_SUBAGENT_REPORT_BYTES, Math.floor(MAX_RETAINED_SUBAGENT_JOB_BYTES / Math.max(1, selected.length)));
+    const fairLimit = Math.min(
+      MAX_RETAINED_SUBAGENT_REPORT_BYTES,
+      Math.floor(MAX_RETAINED_SUBAGENT_JOB_BYTES / Math.max(1, selected.length)),
+    );
     for (const report of selected) {
       const source = Buffer.from(report.text, "utf8");
       let retained = source.subarray(0, fairLimit);
@@ -717,7 +954,14 @@ export class BackgroundSubagentManager {
     return artifacts;
   }
 
-  private async finish(id: string, status: "completed" | "failed" | "cancelled", text: string, error?: string, reports?: RetainedSubagentReport[], taskOutcomes?: TaskOutcomeSummary[]): Promise<void> {
+  private async finish(
+    id: string,
+    status: "completed" | "failed" | "cancelled",
+    text: string,
+    error?: string,
+    reports?: RetainedSubagentReport[],
+    taskOutcomes?: TaskOutcomeSummary[],
+  ): Promise<void> {
     const record = this.records.get(id);
     if (!record || !["running", "cancelling"].includes(record.status)) return;
     const timer = this.runtime.flushTimers.get(id);
@@ -729,19 +973,34 @@ export class BackgroundSubagentManager {
     if (error) record.error = boundedText(error, 4096);
     try {
       const retainedReports = reports?.filter((report) => report.text.trim()) ?? [];
-      record.artifacts = await this.persistReports(record, retainedReports.length
-        ? retainedReports
-        : [{ child: 1, label: "result", text: text || record.latest || "(no output)" }]);
+      record.artifacts = await this.persistReports(
+        record,
+        retainedReports.length
+          ? retainedReports
+          : [{ child: 1, label: "result", text: text || record.latest || "(no output)" }],
+      );
     } catch (artifactError) {
-      record.error = boundedText([record.error, `Result artifact unavailable: ${artifactError instanceof Error ? artifactError.message : String(artifactError)}`].filter(Boolean).join("\n"), 4096);
+      record.error = boundedText(
+        [
+          record.error,
+          `Result artifact unavailable: ${artifactError instanceof Error ? artifactError.message : String(artifactError)}`,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        4096,
+      );
     }
     record.status = status;
     record.updatedAt = new Date().toISOString();
     await this.persist(record);
     this.runtime.controllers.delete(id);
-    if (![...this.records.values()].some(
-      (candidate) => candidate.sessionId === record.sessionId && isBackgroundSubagentActive(candidate),
-    )) this.clearReloadWatchdog(record.sessionId);
+    if (
+      ![...this.records.values()].some(
+        (candidate) =>
+          candidate.sessionId === record.sessionId && isBackgroundSubagentActive(candidate),
+      )
+    )
+      this.clearReloadWatchdog(record.sessionId);
     await this.prune();
   }
 
@@ -749,7 +1008,8 @@ export class BackgroundSubagentManager {
     await this.initialize();
     await this.refreshMigratedRecords();
     const record = this.records.get(id);
-    if (!record || this.runtime.reaped.has(this.jobDir(id))) throw new Error(`Unknown background subagent: ${id}`);
+    if (!record || this.runtime.reaped.has(this.jobDir(id)))
+      throw new Error(`Unknown background subagent: ${id}`);
     return structuredClone(record);
   }
 
@@ -762,8 +1022,9 @@ export class BackgroundSubagentManager {
   ): Promise<BackgroundSubagentResultPage> {
     const key = this.jobDir(id);
     this.runtime.storageReaders.set(key, (this.runtime.storageReaders.get(key) ?? 0) + 1);
-    try { return await this.readResultPage(id, childOrId, offset, limit, diagnostics); }
-    finally {
+    try {
+      return await this.readResultPage(id, childOrId, offset, limit, diagnostics);
+    } finally {
       const remaining = (this.runtime.storageReaders.get(key) ?? 1) - 1;
       if (remaining) this.runtime.storageReaders.set(key, remaining);
       else this.runtime.storageReaders.delete(key);
@@ -778,10 +1039,16 @@ export class BackgroundSubagentManager {
     diagnostics = false,
   ): Promise<BackgroundSubagentResultPage> {
     const record = await this.get(id);
-    if (isBackgroundSubagentActive(record)) throw new Error("Background subagent result is not ready");
-    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Result offset must be a non-negative integer");
-    if (!Number.isSafeInteger(limit) || limit < 4 || limit > MAX_SUBAGENT_RESULT_PAGE_BYTES) throw new Error(`Result limit must be between 4 and ${MAX_SUBAGENT_RESULT_PAGE_BYTES} bytes`);
-    if (typeof childOrId === "number" && (!Number.isSafeInteger(childOrId) || childOrId < 1 || childOrId > 8)) {
+    if (isBackgroundSubagentActive(record))
+      throw new Error("Background subagent result is not ready");
+    if (!Number.isSafeInteger(offset) || offset < 0)
+      throw new Error("Result offset must be a non-negative integer");
+    if (!Number.isSafeInteger(limit) || limit < 4 || limit > MAX_SUBAGENT_RESULT_PAGE_BYTES)
+      throw new Error(`Result limit must be between 4 and ${MAX_SUBAGENT_RESULT_PAGE_BYTES} bytes`);
+    if (
+      typeof childOrId === "number" &&
+      (!Number.isSafeInteger(childOrId) || childOrId < 1 || childOrId > 8)
+    ) {
       throw new Error("Result child must be an integer between 1 and 8");
     }
     if (typeof childOrId === "string" && !SUBAGENT_CHILD_ID_PATTERN.test(childOrId)) {
@@ -792,25 +1059,31 @@ export class BackgroundSubagentManager {
     if (artifacts.length === 0 && legacyResult) {
       const current = this.records.get(id);
       if (!current) throw new Error(`Unknown background subagent: ${id}`);
-      current.artifacts = await this.persistReports(current, [{
-        child: 1,
-        label: "result",
-        text: legacyResult,
-        totalBytes: Buffer.byteLength(legacyResult, "utf8") + 1,
-        complete: false,
-      }]);
+      current.artifacts = await this.persistReports(current, [
+        {
+          child: 1,
+          label: "result",
+          text: legacyResult,
+          totalBytes: Buffer.byteLength(legacyResult, "utf8") + 1,
+          complete: false,
+        },
+      ]);
       await this.persist(current);
       artifacts = current.artifacts;
     }
-    if (artifacts.length === 0) throw new Error("No retained result artifact is available for this background subagent");
+    if (artifacts.length === 0)
+      throw new Error("No retained result artifact is available for this background subagent");
     if (artifacts.length > 1 && childOrId === undefined) {
       throw new Error("Parallel and chain results require a child number or child_id");
     }
     let artifact: BackgroundSubagentArtifact | undefined;
     if (typeof childOrId === "string") {
-      const descriptorIndex = record.children?.findIndex((child) => child.childId === childOrId) ?? -1;
-      if (descriptorIndex >= 0) artifact = artifacts.find((candidate) => candidate.child === descriptorIndex + 1);
-      if (!artifact) throw new Error(`Background subagent result child_id ${childOrId} is unavailable`);
+      const descriptorIndex =
+        record.children?.findIndex((child) => child.childId === childOrId) ?? -1;
+      if (descriptorIndex >= 0)
+        artifact = artifacts.find((candidate) => candidate.child === descriptorIndex + 1);
+      if (!artifact)
+        throw new Error(`Background subagent result child_id ${childOrId} is unavailable`);
     } else {
       const child = childOrId ?? artifacts[0].child;
       artifact = artifacts.find((candidate) => candidate.child === child);
@@ -819,19 +1092,35 @@ export class BackgroundSubagentManager {
     const child = artifact.child;
     const path = this.artifactPath(id, child);
     const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink() || info.size !== artifact.bytes) throw new Error("Retained background subagent result identity is invalid");
-    if (process.getuid && info.uid !== process.getuid()) throw new Error("Retained background subagent result is owned by another user");
-    if ((info.mode & 0o077) !== 0) throw new Error("Retained background subagent result is not private");
+    if (!info.isFile() || info.isSymbolicLink() || info.size !== artifact.bytes)
+      throw new Error("Retained background subagent result identity is invalid");
+    if (process.getuid && info.uid !== process.getuid())
+      throw new Error("Retained background subagent result is owned by another user");
+    if ((info.mode & 0o077) !== 0)
+      throw new Error("Retained background subagent result is not private");
     const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
     const handle = await open(path, constants.O_RDONLY | noFollow);
     try {
       const opened = await handle.stat();
-      if (!opened.isFile() || opened.size !== artifact.bytes || opened.dev !== info.dev || opened.ino !== info.ino) throw new Error("Retained background subagent result identity changed");
+      if (
+        !opened.isFile() ||
+        opened.size !== artifact.bytes ||
+        opened.dev !== info.dev ||
+        opened.ino !== info.ino
+      )
+        throw new Error("Retained background subagent result identity changed");
       const completeArtifact = await handle.readFile();
-      if (createHash("sha256").update(completeArtifact).digest("hex") !== artifact.sha256) throw new Error("Retained background subagent result checksum mismatch");
-      const view = Buffer.from((diagnostics ? diagnosticReport : answerOnlyReport)(completeArtifact.toString("utf8")) || "(no visible terminal report)", "utf8");
-      if (offset > view.byteLength) throw new Error(`Result offset ${offset} exceeds retained size ${view.byteLength}`);
-      if (offset < view.byteLength && (view[offset] & 0xc0) === 0x80) throw new Error(`Result offset ${offset} is not a UTF-8 character boundary`);
+      if (createHash("sha256").update(completeArtifact).digest("hex") !== artifact.sha256)
+        throw new Error("Retained background subagent result checksum mismatch");
+      const view = Buffer.from(
+        (diagnostics ? diagnosticReport : answerOnlyReport)(completeArtifact.toString("utf8")) ||
+          "(no visible terminal report)",
+        "utf8",
+      );
+      if (offset > view.byteLength)
+        throw new Error(`Result offset ${offset} exceeds retained size ${view.byteLength}`);
+      if (offset < view.byteLength && (view[offset] & 0xc0) === 0x80)
+        throw new Error(`Result offset ${offset} is not a UTF-8 character boundary`);
       const bytesRead = Math.min(limit, view.byteLength - offset);
       let retained = view.subarray(offset, offset + bytesRead);
       let text = "";
@@ -843,8 +1132,10 @@ export class BackgroundSubagentManager {
           retained = retained.subarray(0, -1);
         }
       }
-      const nextOffset = offset + retained.byteLength < view.byteLength ? offset + retained.byteLength : undefined;
-      if (bytesRead > 0 && retained.byteLength === 0) throw new Error("Result limit ends before one complete UTF-8 character");
+      const nextOffset =
+        offset + retained.byteLength < view.byteLength ? offset + retained.byteLength : undefined;
+      if (bytesRead > 0 && retained.byteLength === 0)
+        throw new Error("Result limit ends before one complete UTF-8 character");
       const childId = record.children?.[child - 1]?.childId;
       return {
         child,
@@ -854,7 +1145,10 @@ export class BackgroundSubagentManager {
         ...(nextOffset === undefined ? {} : { nextOffset }),
         bytes: retained.byteLength,
         totalBytes: view.byteLength,
-        sourceTotalBytes: Math.max(view.byteLength, artifact.totalBytes - (artifact.bytes - view.byteLength)),
+        sourceTotalBytes: Math.max(
+          view.byteLength,
+          artifact.totalBytes - (artifact.bytes - view.byteLength),
+        ),
         complete: artifact.complete,
         sha256: createHash("sha256").update(view).digest("hex"),
         text,
@@ -868,19 +1162,31 @@ export class BackgroundSubagentManager {
     await this.initialize();
     await this.refreshMigratedRecords();
     return [...this.records.values()]
-      .filter((record) => !this.runtime.pendingLaunches.has(record.id) && !this.runtime.reaped.has(this.jobDir(record.id)))
+      .filter(
+        (record) =>
+          !this.runtime.pendingLaunches.has(record.id) &&
+          !this.runtime.reaped.has(this.jobDir(record.id)),
+      )
       .filter((record) => !sessionId || record.sessionId === sessionId)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, Math.max(1, Math.min(limit, 1000)))
       .map((record) => structuredClone(record));
   }
 
-  async wait(id: string, timeoutMs: number, signal?: AbortSignal): Promise<{ record: BackgroundSubagentRecord; timedOut: boolean }> {
+  async wait(
+    id: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<{ record: BackgroundSubagentRecord; timedOut: boolean }> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Background subagent wait cancelled");
+      if (signal?.aborted)
+        throw signal.reason instanceof Error
+          ? signal.reason
+          : new Error("Background subagent wait cancelled");
       const record = await this.get(id);
-      if (!isBackgroundSubagentActive(record) || Date.now() >= deadline) return { record, timedOut: isBackgroundSubagentActive(record) };
+      if (!isBackgroundSubagentActive(record) || Date.now() >= deadline)
+        return { record, timedOut: isBackgroundSubagentActive(record) };
       await new Promise<void>((resolve, reject) => {
         const done = () => {
           signal?.removeEventListener("abort", abort);
@@ -890,7 +1196,11 @@ export class BackgroundSubagentManager {
         const abort = () => {
           clearTimeout(delay);
           signal?.removeEventListener("abort", abort);
-          reject(signal?.reason instanceof Error ? signal.reason : new Error("Background subagent wait cancelled"));
+          reject(
+            signal?.reason instanceof Error
+              ? signal.reason
+              : new Error("Background subagent wait cancelled"),
+          );
         };
         signal?.addEventListener("abort", abort, { once: true });
         if (signal?.aborted) abort();
@@ -899,31 +1209,60 @@ export class BackgroundSubagentManager {
   }
 
   /** Legacy subprocess records have no child PID/pane identity. Reap storage only. */
-  async reapNative(id: string, sessionId: string, options: {
-    force?: true;
-    reason?: string;
-    worktreeInventory?: (record: BackgroundSubagentRecord) => Promise<LegacyWorktreeReapInventory>;
-  } = {}): Promise<BackgroundSubagentRecord> {
+  async reapNative(
+    id: string,
+    sessionId: string,
+    options: {
+      force?: true;
+      reason?: string;
+      worktreeInventory?: (
+        record: BackgroundSubagentRecord,
+      ) => Promise<LegacyWorktreeReapInventory>;
+    } = {},
+  ): Promise<BackgroundSubagentRecord> {
     await this.initialize();
     await this.refreshMigratedRecords();
     // No awaits below: validation and deletion cannot interleave with local
     // finish/progress/result migration, reload, notification, or another reap.
     const current = this.records.get(id);
     if (!current) throw new Error(`Unknown background subagent: ${id}`);
-    if (!sessionId || current.sessionId !== sessionId) throw new Error("Legacy subagent belongs to another Pi session");
-    if (current.backend !== "native") throw new Error("AgentSH groups cannot be reaped here; use AgentSH's supported lifecycle controls. No state was removed.");
-    if (options.force === true && (!options.reason?.trim() || Buffer.byteLength(options.reason) > 1000)) throw new Error("Forced legacy reap requires a non-empty audited reason of at most 1000 bytes");
-    if (options.force !== undefined && options.force !== true) throw new Error("Invalid forced legacy reap option");
+    if (!sessionId || current.sessionId !== sessionId)
+      throw new Error("Legacy subagent belongs to another Pi session");
+    if (current.backend !== "native")
+      throw new Error(
+        "AgentSH groups cannot be reaped here; use AgentSH's supported lifecycle controls. No state was removed.",
+      );
+    if (
+      options.force === true &&
+      (!options.reason?.trim() || Buffer.byteLength(options.reason) > 1000)
+    )
+      throw new Error(
+        "Forced legacy reap requires a non-empty audited reason of at most 1000 bytes",
+      );
+    if (options.force !== undefined && options.force !== true)
+      throw new Error("Invalid forced legacy reap option");
     const directory = this.jobDir(id);
-    if (isBackgroundSubagentActive(current) || this.runtime.controllers.has(id)
-      || this.runtime.pendingLaunches.has(id) || this.runtime.flushTimers.has(id)
-      || this.writeChains.has(id) || this.runtime.storageReaders.has(directory) || this.runtime.reaping.has(directory)) {
-      throw new Error("Legacy native group is active or its retained storage is busy; wait for terminal completion and retry reap. Reap never cancels work.");
+    if (
+      isBackgroundSubagentActive(current) ||
+      this.runtime.controllers.has(id) ||
+      this.runtime.pendingLaunches.has(id) ||
+      this.runtime.flushTimers.has(id) ||
+      this.writeChains.has(id) ||
+      this.runtime.storageReaders.has(directory) ||
+      this.runtime.reaping.has(directory)
+    ) {
+      throw new Error(
+        "Legacy native group is active or its retained storage is busy; wait for terminal completion and retry reap. Reap never cancels work.",
+      );
     }
     const privateEntry = (file: string, directory = false) => {
       const info = lstatSync(file);
-      if (info.isSymbolicLink() || (directory ? !info.isDirectory() : !info.isFile())
-        || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o077) !== 0) {
+      if (
+        info.isSymbolicLink() ||
+        (directory ? !info.isDirectory() : !info.isFile()) ||
+        (process.getuid && info.uid !== process.getuid()) ||
+        (info.mode & 0o077) !== 0
+      ) {
         throw new Error("Legacy native storage identity is invalid or not private");
       }
       return info;
@@ -938,108 +1277,227 @@ export class BackgroundSubagentManager {
     let persistedText: string;
     try {
       const opened = fstatSync(fd);
-      if (opened.dev !== stateInfo.dev || opened.ino !== stateInfo.ino) throw new Error("Legacy native state identity changed");
+      if (opened.dev !== stateInfo.dev || opened.ino !== stateInfo.ino)
+        throw new Error("Legacy native state identity changed");
       persistedText = readFileSync(fd, "utf8");
       persisted = parseRecord(JSON.parse(persistedText));
-    } finally { closeSync(fd); }
-    if (persisted.id !== id || persisted.sessionId !== sessionId || persisted.backend !== "native"
-      || persisted.createdAt !== current.createdAt || persisted.ownerPid !== current.ownerPid
-      || persisted.ownerStartToken !== current.ownerStartToken || isBackgroundSubagentActive(persisted)
-      || persisted.status !== current.status || persisted.updatedAt !== current.updatedAt) {
-      throw new Error("Legacy native state changed or ownership does not match; no state was removed");
+    } finally {
+      closeSync(fd);
+    }
+    if (
+      persisted.id !== id ||
+      persisted.sessionId !== sessionId ||
+      persisted.backend !== "native" ||
+      persisted.createdAt !== current.createdAt ||
+      persisted.ownerPid !== current.ownerPid ||
+      persisted.ownerStartToken !== current.ownerStartToken ||
+      isBackgroundSubagentActive(persisted) ||
+      persisted.status !== current.status ||
+      persisted.updatedAt !== current.updatedAt
+    ) {
+      throw new Error(
+        "Legacy native state changed or ownership does not match; no state was removed",
+      );
     }
     // Another live executor can still write the record even after reporting a
     // terminal status. Lost is not proof of death. Fail closed on unknown PID
     // identity; never signal a PID from this pre-child-identity schema.
     const verifyExecutorStopped = () => {
-      if (persisted.ownerPid !== process.pid || persisted.status === "lost" || this.adoptLegacyReload) {
+      if (
+        persisted.ownerPid !== process.pid ||
+        persisted.status === "lost" ||
+        this.adoptLegacyReload
+      ) {
         let alive = true;
         try {
           if (process.platform === "linux") {
             const procStat = readFileSync(`/proc/${persisted.ownerPid}/stat`, "utf8");
             const close = procStat.lastIndexOf(")");
             const token = close >= 0 ? procStat.slice(close + 2).split(" ")[19] : undefined;
-            if (token && /^[0-9]+$/.test(token) && /^[0-9]+$/.test(persisted.ownerStartToken)
-              && token !== persisted.ownerStartToken) alive = false;
+            if (
+              token &&
+              /^[0-9]+$/.test(token) &&
+              /^[0-9]+$/.test(persisted.ownerStartToken) &&
+              token !== persisted.ownerStartToken
+            )
+              alive = false;
           } else process.kill(persisted.ownerPid, 0);
         } catch (error) {
-          if (["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) alive = false;
+          if (["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? ""))
+            alive = false;
         }
-        if (alive) throw new Error("Legacy executor may still be alive; reap refused. Stop/exit that executor separately, then restart Pi and retry. No process was signalled or state removed.");
+        if (alive)
+          throw new Error(
+            "Legacy executor may still be alive; reap refused. Stop/exit that executor separately, then restart Pi and retry. No process was signalled or state removed.",
+          );
       }
     };
     verifyExecutorStopped();
     const files = readdirSync(directory);
-    const fileSnapshots = new Map<string, { dev: number; ino: number; size: number; mtimeMs: number }>();
+    const fileSnapshots = new Map<
+      string,
+      { dev: number; ino: number; size: number; mtimeMs: number }
+    >();
     for (const file of files) {
-      if (!/^(?:state\.json|notified|result-[1-8]\.md)$/.test(file)) throw new Error("Unexpected legacy storage entry; no state was removed");
+      if (!/^(?:state\.json|notified|result-[1-8]\.md)$/.test(file))
+        throw new Error("Unexpected legacy storage entry; no state was removed");
       const info = privateEntry(join(directory, file));
-      fileSnapshots.set(file, { dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs });
+      fileSnapshots.set(file, {
+        dev: info.dev,
+        ino: info.ino,
+        size: info.size,
+        mtimeMs: info.mtimeMs,
+      });
     }
-    const optedIn = (persisted.children ?? []).filter(child => child.cleanupWorktreesOnReap === true);
+    const optedIn = (persisted.children ?? []).filter(
+      (child) => child.cleanupWorktreesOnReap === true,
+    );
     if (optedIn.length && options.force !== true) {
-      throw new Error("Legacy coordinator worktree cleanup cannot be proven by this subprocess manager; retain the coordinator or retry with force:true and a reason to durably audit known leftovers and inventory uncertainty. No worktrees or retained records were removed.");
+      throw new Error(
+        "Legacy coordinator worktree cleanup cannot be proven by this subprocess manager; retain the coordinator or retry with force:true and a reason to durably audit known leftovers and inventory uncertainty. No worktrees or retained records were removed.",
+      );
     }
-    if (options.force === true && !optedIn.length) throw new Error("Forced legacy reap is unsupported unless a retained child opted into cleanupWorktreesOnReap; no state was removed.");
+    if (options.force === true && !optedIn.length)
+      throw new Error(
+        "Forced legacy reap is unsupported unless a retained child opted into cleanupWorktreesOnReap; no state was removed.",
+      );
 
     this.runtime.reaping.add(directory);
     let auditResult: (LegacyWorktreeReapAudit & { auditPath: string }) | undefined;
     try {
       if (optedIn.length) {
-        const uncertainty = ["Legacy subprocess records do not retain authenticated recursive child-session ancestry; no complete worktree inventory or cleanup proof is available."];
+        const uncertainty = [
+          "Legacy subprocess records do not retain authenticated recursive child-session ancestry; no complete worktree inventory or cleanup proof is available.",
+        ];
         let inventory: LegacyWorktreeReapInventory = {};
         if (options.worktreeInventory) {
-          try { inventory = await options.worktreeInventory(structuredClone(persisted)); }
-          catch (error) { uncertainty.push(`Known worktree inventory query failed: ${String(error).slice(0, 1000)}`); }
+          try {
+            inventory = await options.worktreeInventory(structuredClone(persisted));
+          } catch (error) {
+            uncertainty.push(
+              `Known worktree inventory query failed: ${String(error).slice(0, 1000)}`,
+            );
+          }
         } else uncertainty.push("No trusted worktree registry observer was available.");
         for (const item of inventory.uncertainty ?? []) {
           if (typeof item === "string" && item.trim()) uncertainty.push(item.trim().slice(0, 1000));
-          else uncertainty.push("Worktree registry observer returned malformed uncertainty metadata.");
+          else
+            uncertainty.push("Worktree registry observer returned malformed uncertainty metadata.");
         }
-        const optedKeys = new Set(optedIn.filter(c => c.childId && c.taskId).map(c => `${c.taskId}\\0${c.childId}`));
+        const optedKeys = new Set(
+          optedIn.filter((c) => c.childId && c.taskId).map((c) => `${c.taskId}\\0${c.childId}`),
+        );
         const provenChildSessions: LegacyWorktreeReapAudit["provenChildSessions"] = [];
         for (const value of inventory.provenChildSessions ?? []) {
           const row = value as any;
-          if (!row || typeof row.taskId !== "string" || typeof row.childId !== "string" || typeof row.sessionId !== "string"
-            || !optedKeys.has(`${row.taskId}\\0${row.childId}`) || !/^[a-f0-9-]{36}$/.test(row.sessionId)
-            || row.provenance !== "native-task-store"
-            || provenChildSessions.some(proven => proven.taskId === row.taskId && proven.childId === row.childId)) {
-            uncertainty.push("Task store returned a child session that could not be tied to one opted-in child identity.");
+          if (
+            !row ||
+            typeof row.taskId !== "string" ||
+            typeof row.childId !== "string" ||
+            typeof row.sessionId !== "string" ||
+            !optedKeys.has(`${row.taskId}\\0${row.childId}`) ||
+            !/^[a-f0-9-]{36}$/.test(row.sessionId) ||
+            row.provenance !== "native-task-store" ||
+            provenChildSessions.some(
+              (proven) => proven.taskId === row.taskId && proven.childId === row.childId,
+            )
+          ) {
+            uncertainty.push(
+              "Task store returned a child session that could not be tied to one opted-in child identity.",
+            );
             continue;
           }
-          provenChildSessions.push({ taskId: row.taskId, childId: row.childId, sessionId: row.sessionId, provenance: row.provenance });
+          provenChildSessions.push({
+            taskId: row.taskId,
+            childId: row.childId,
+            sessionId: row.sessionId,
+            provenance: row.provenance,
+          });
         }
-        const provenSessionIds = new Set(provenChildSessions.map(proven => proven.sessionId));
+        const provenSessionIds = new Set(provenChildSessions.map((proven) => proven.sessionId));
         const knownWorktrees: LegacyWorktreeReapAudit["knownWorktrees"] = [];
         const seenWorktrees = new Set<string>();
         for (const value of inventory.knownWorktrees ?? []) {
           const row = value as any;
           const physical = row?.physicalIdentity;
-          const parentProvisioned = row?.ownerSessionId === sessionId && typeof row?.taskId === "string" && typeof row?.childId === "string"
-            && optedKeys.has(`${row.taskId}\\0${row.childId}`);
-          const directlyProvenChild = typeof row?.ownerSessionId === "string" && provenSessionIds.has(row.ownerSessionId);
-          if (!row || (!parentProvisioned && !directlyProvenChild) || typeof row.taskId !== "string" || typeof row.childId !== "string"
-            || ![row.path, row.repo, row.commonDir].every((v: unknown) => typeof v === "string" && v.startsWith("/") && Buffer.byteLength(v) <= 4096)
-            || typeof row.branch !== "string" || !row.branch || Buffer.byteLength(row.branch) > 256
-            || physical !== undefined && (!physical || ![physical.dev, physical.ino, physical.birthtimeMs].every((v: unknown) => typeof v === "string" && v.length <= 128))) {
-            uncertainty.push("Registry observer returned a worktree that could not be tied to an opted-in child identity; omitted from known leftovers.");
+          const parentProvisioned =
+            row?.ownerSessionId === sessionId &&
+            typeof row?.taskId === "string" &&
+            typeof row?.childId === "string" &&
+            optedKeys.has(`${row.taskId}\\0${row.childId}`);
+          const directlyProvenChild =
+            typeof row?.ownerSessionId === "string" && provenSessionIds.has(row.ownerSessionId);
+          if (
+            !row ||
+            (!parentProvisioned && !directlyProvenChild) ||
+            typeof row.taskId !== "string" ||
+            typeof row.childId !== "string" ||
+            ![row.path, row.repo, row.commonDir].every(
+              (v: unknown) =>
+                typeof v === "string" && v.startsWith("/") && Buffer.byteLength(v) <= 4096,
+            ) ||
+            typeof row.branch !== "string" ||
+            !row.branch ||
+            Buffer.byteLength(row.branch) > 256 ||
+            (physical !== undefined &&
+              (!physical ||
+                ![physical.dev, physical.ino, physical.birthtimeMs].every(
+                  (v: unknown) => typeof v === "string" && v.length <= 128,
+                )))
+          ) {
+            uncertainty.push(
+              "Registry observer returned a worktree that could not be tied to an opted-in child identity; omitted from known leftovers.",
+            );
             continue;
           }
           const key = `${row.taskId}\\0${row.childId}`;
           if (seenWorktrees.has(key)) continue;
           seenWorktrees.add(key);
-          knownWorktrees.push({ ownerSessionId: row.ownerSessionId, taskId: row.taskId, childId: row.childId, path: row.path,
-            repo: row.repo, commonDir: row.commonDir, branch: row.branch,
-            ...(physical ? { physicalIdentity: { dev: physical.dev, ino: physical.ino, birthtimeMs: physical.birthtimeMs } } : {}) });
+          knownWorktrees.push({
+            ownerSessionId: row.ownerSessionId,
+            taskId: row.taskId,
+            childId: row.childId,
+            path: row.path,
+            repo: row.repo,
+            commonDir: row.commonDir,
+            branch: row.branch,
+            ...(physical
+              ? {
+                  physicalIdentity: {
+                    dev: physical.dev,
+                    ino: physical.ino,
+                    birthtimeMs: physical.birthtimeMs,
+                  },
+                }
+              : {}),
+          });
         }
         const uniqueUncertainty = [...new Set(uncertainty)].slice(0, 16);
-        const audit: LegacyWorktreeReapAudit = { schemaVersion: 1, jobId: id, sessionId, attemptedAt: new Date().toISOString(),
-          reason: options.reason!.trim(), optedInChildren: optedIn.map(child => ({ ...(child.childId ? { childId: child.childId } : {}),
-            ...(child.taskId ? { taskId: child.taskId } : {}), label: child.label.slice(0, 256) })), provenChildSessions, knownWorktrees,
-          uncertainty: uniqueUncertainty, cleanupAttempted: false };
+        const audit: LegacyWorktreeReapAudit = {
+          schemaVersion: 1,
+          jobId: id,
+          sessionId,
+          attemptedAt: new Date().toISOString(),
+          reason: options.reason!.trim(),
+          optedInChildren: optedIn.map((child) => ({
+            ...(child.childId ? { childId: child.childId } : {}),
+            ...(child.taskId ? { taskId: child.taskId } : {}),
+            label: child.label.slice(0, 256),
+          })),
+          provenChildSessions,
+          knownWorktrees,
+          uncertainty: uniqueUncertainty,
+          cleanupAttempted: false,
+        };
         const auditDocument = `${JSON.stringify(audit)}\n`;
-        if (Buffer.byteLength(auditDocument) > MAX_STATE_BYTES) throw new Error("Legacy worktree reap audit exceeds its durable size bound; no retained storage was removed");
-        const auditPath = join(this.root, `worktree-reap-audit-${id}-${randomBytes(8).toString("hex")}.json`);
+        if (Buffer.byteLength(auditDocument) > MAX_STATE_BYTES)
+          throw new Error(
+            "Legacy worktree reap audit exceeds its durable size bound; no retained storage was removed",
+          );
+        const auditPath = join(
+          this.root,
+          `worktree-reap-audit-${id}-${randomBytes(8).toString("hex")}.json`,
+        );
         await writeAtomicBytes(auditPath, auditDocument);
         auditResult = { ...audit, auditPath };
       }
@@ -1047,43 +1505,87 @@ export class BackgroundSubagentManager {
       // the retained record or storage. Recheck every destructive authority
       // immediately before deletion, synchronously and without an intervening
       // await; any discrepancy leaves the job storage intact.
-      if (this.records.get(id) !== current || JSON.stringify(current) !== JSON.stringify(persisted)
-        || isBackgroundSubagentActive(current) || this.runtime.controllers.has(id)
-        || this.runtime.pendingLaunches.has(id) || this.runtime.flushTimers.has(id)
-        || this.writeChains.has(id) || this.runtime.storageReaders.has(directory)
-        || !this.runtime.reaping.has(directory)) {
-        throw new Error("Legacy native state or activity changed during reap; retained storage was not removed");
+      if (
+        this.records.get(id) !== current ||
+        JSON.stringify(current) !== JSON.stringify(persisted) ||
+        isBackgroundSubagentActive(current) ||
+        this.runtime.controllers.has(id) ||
+        this.runtime.pendingLaunches.has(id) ||
+        this.runtime.flushTimers.has(id) ||
+        this.writeChains.has(id) ||
+        this.runtime.storageReaders.has(directory) ||
+        !this.runtime.reaping.has(directory)
+      ) {
+        throw new Error(
+          "Legacy native state or activity changed during reap; retained storage was not removed",
+        );
       }
-      const sameEntry = (path: string, expected: { dev: number; ino: number }, isDirectory = false) => {
+      const sameEntry = (
+        path: string,
+        expected: { dev: number; ino: number },
+        isDirectory = false,
+      ) => {
         const actual = privateEntry(path, isDirectory);
-        if (actual.dev !== expected.dev || actual.ino !== expected.ino) throw new Error("Legacy native storage identity changed during reap; retained storage was not removed");
+        if (actual.dev !== expected.dev || actual.ino !== expected.ino)
+          throw new Error(
+            "Legacy native storage identity changed during reap; retained storage was not removed",
+          );
       };
       sameEntry(this.root, rootInfo, true);
       sameEntry(this.jobsRoot, jobsInfo, true);
       sameEntry(directory, directoryInfo, true);
       const finalFiles = readdirSync(directory);
-      if (finalFiles.length !== files.length || finalFiles.some(file => !fileSnapshots.has(file))) {
-        throw new Error("Legacy native storage contents changed during reap; retained storage was not removed");
+      if (
+        finalFiles.length !== files.length ||
+        finalFiles.some((file) => !fileSnapshots.has(file))
+      ) {
+        throw new Error(
+          "Legacy native storage contents changed during reap; retained storage was not removed",
+        );
       }
       for (const file of files) {
         const info = privateEntry(join(directory, file));
         const expected = fileSnapshots.get(file)!;
-        if (info.dev !== expected.dev || info.ino !== expected.ino || info.size !== expected.size || info.mtimeMs !== expected.mtimeMs) {
-          throw new Error("Legacy native storage file changed during reap; retained storage was not removed");
+        if (
+          info.dev !== expected.dev ||
+          info.ino !== expected.ino ||
+          info.size !== expected.size ||
+          info.mtimeMs !== expected.mtimeMs
+        ) {
+          throw new Error(
+            "Legacy native storage file changed during reap; retained storage was not removed",
+          );
         }
       }
       const finalStateInfo = privateEntry(this.statePath(id));
-      if (finalStateInfo.dev !== stateInfo.dev || finalStateInfo.ino !== stateInfo.ino || finalStateInfo.size > MAX_STATE_BYTES) {
-        throw new Error("Legacy native state identity changed during reap; retained storage was not removed");
+      if (
+        finalStateInfo.dev !== stateInfo.dev ||
+        finalStateInfo.ino !== stateInfo.ino ||
+        finalStateInfo.size > MAX_STATE_BYTES
+      ) {
+        throw new Error(
+          "Legacy native state identity changed during reap; retained storage was not removed",
+        );
       }
-      const finalFd = openSync(this.statePath(id), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      const finalFd = openSync(
+        this.statePath(id),
+        constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+      );
       let finalText: string;
       try {
         const opened = fstatSync(finalFd);
-        if (opened.dev !== stateInfo.dev || opened.ino !== stateInfo.ino) throw new Error("Legacy native state identity changed during reap; retained storage was not removed");
+        if (opened.dev !== stateInfo.dev || opened.ino !== stateInfo.ino)
+          throw new Error(
+            "Legacy native state identity changed during reap; retained storage was not removed",
+          );
         finalText = readFileSync(finalFd, "utf8");
-      } finally { closeSync(finalFd); }
-      if (finalText !== persistedText) throw new Error("Legacy native owner/backend/status/contents changed during reap; retained storage was not removed");
+      } finally {
+        closeSync(finalFd);
+      }
+      if (finalText !== persistedText)
+        throw new Error(
+          "Legacy native owner/backend/status/contents changed during reap; retained storage was not removed",
+        );
       // Also repeat the liveness proof after the asynchronous interval.
       verifyExecutorStopped();
       this.runtime.reaped.add(directory);
@@ -1094,7 +1596,9 @@ export class BackgroundSubagentManager {
       const result = structuredClone(persisted);
       if (auditResult) result.worktreeReapAudit = auditResult;
       return result;
-    } finally { this.runtime.reaping.delete(directory); }
+    } finally {
+      this.runtime.reaping.delete(directory);
+    }
   }
 
   async cancel(id: string): Promise<BackgroundSubagentRecord> {
@@ -1123,26 +1627,34 @@ export class BackgroundSubagentManager {
     timeoutMs = BACKGROUND_SUBAGENT_RELOAD_ADOPTION_TIMEOUT_MS,
   ): boolean {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {
-      throw new Error("Background subagent reload adoption timeout must be between 1 and 120000 milliseconds");
+      throw new Error(
+        "Background subagent reload adoption timeout must be between 1 and 120000 milliseconds",
+      );
     }
     const session = this.sessionState(sessionId);
     session.phase = "reloading";
     session.generation += 1;
-    const interruptedLaunch = new Error("Background subagent launch was interrupted by extension reload");
+    const interruptedLaunch = new Error(
+      "Background subagent launch was interrupted by extension reload",
+    );
     for (const pending of this.runtime.pendingLaunches.values()) {
       if (pending.sessionId === sessionId) pending.controller.abort(interruptedLaunch);
     }
     const active = [...this.records.values()].some(
-      (record) => record.sessionId === sessionId
-        && !this.runtime.pendingLaunches.has(record.id)
-        && isBackgroundSubagentActive(record),
+      (record) =>
+        record.sessionId === sessionId &&
+        !this.runtime.pendingLaunches.has(record.id) &&
+        isBackgroundSubagentActive(record),
     );
     this.clearReloadWatchdog(sessionId);
     if (!active) return false;
     const timer = setTimeout(() => {
       if (this.reloadAdoptionTimers.get(sessionId) !== timer) return;
       this.reloadAdoptionTimers.delete(sessionId);
-      this.requestCancelSession(sessionId, new Error("Replacement subagent extension did not adopt running work after reload"));
+      this.requestCancelSession(
+        sessionId,
+        new Error("Replacement subagent extension did not adopt running work after reload"),
+      );
     }, timeoutMs);
     this.reloadAdoptionTimers.set(sessionId, timer);
     return true;
@@ -1196,9 +1708,14 @@ export class BackgroundSubagentManager {
   async markNotified(id: string): Promise<boolean> {
     await this.get(id);
     const directory = this.jobDir(id);
-    if (this.runtime.reaping.has(directory) || this.runtime.reaped.has(directory)) throw new Error("Legacy group reap is reserved; notification state was not changed");
+    if (this.runtime.reaping.has(directory) || this.runtime.reaped.has(directory))
+      throw new Error("Legacy group reap is reserved; notification state was not changed");
     try {
-      const fd = openSync(this.notifiedPath(id), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+      const fd = openSync(
+        this.notifiedPath(id),
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+        0o600,
+      );
       closeSync(fd);
       return true;
     } catch (error) {
@@ -1226,12 +1743,25 @@ export class BackgroundSubagentManager {
 
 function compatibleV4Manager(value: unknown, root: string): value is BackgroundSubagentManager {
   const candidate = value as Record<string, unknown> | undefined;
-  return candidate?.managerAbiVersion === 4 && candidate.root === root
-    && [
-      "initialize", "start", "get", "list", "wait", "cancel", "readResult",
-      "beginReloadAdoption", "activateSession", "adoptReload", "requestCancelSession",
-      "isNotified", "markNotified",
-    ].every((method) => typeof candidate[method] === "function");
+  return (
+    candidate?.managerAbiVersion === 4 &&
+    candidate.root === root &&
+    [
+      "initialize",
+      "start",
+      "get",
+      "list",
+      "wait",
+      "cancel",
+      "readResult",
+      "beginReloadAdoption",
+      "activateSession",
+      "adoptReload",
+      "requestCancelSession",
+      "isNotified",
+      "markNotified",
+    ].every((method) => typeof candidate[method] === "function")
+  );
 }
 
 export function sharedBackgroundSubagentManager(root: string): BackgroundSubagentManager {
@@ -1268,22 +1798,41 @@ type TrackedChildGroup = {
   updatedAt: string;
 };
 
-function inferredChildDescriptors(record: BackgroundSubagentRecord): BackgroundSubagentChildDescriptor[] {
+function inferredChildDescriptors(
+  record: BackgroundSubagentRecord,
+): BackgroundSubagentChildDescriptor[] {
   if (record.children?.length) return record.children.map((child) => ({ ...child }));
   const countMatch = record.summary.match(/^(?:parallel|chain) ([1-8]):/);
-  const count = record.mode === "single"
-    ? 1
-    : Math.max(1, record.artifacts?.length ?? 0, Number(countMatch?.[1] ?? 1));
+  const count =
+    record.mode === "single"
+      ? 1
+      : Math.max(1, record.artifacts?.length ?? 0, Number(countMatch?.[1] ?? 1));
   return Array.from({ length: Math.min(8, count) }, (_, index) => ({
-    label: record.artifacts?.[index]?.label || (record.mode === "chain" ? `step ${index + 1}` : record.mode === "parallel" ? `task ${index + 1}` : "subagent"),
+    label:
+      record.artifacts?.[index]?.label ||
+      (record.mode === "chain"
+        ? `step ${index + 1}`
+        : record.mode === "parallel"
+          ? `task ${index + 1}`
+          : "subagent"),
   }));
 }
 
-function groupTerminalChildStatus(record: BackgroundSubagentRecord, child: BackgroundSubagentChild, failedPendingChild?: number): BackgroundSubagentChildStatus {
+function groupTerminalChildStatus(
+  record: BackgroundSubagentRecord,
+  child: BackgroundSubagentChild,
+  failedPendingChild?: number,
+): BackgroundSubagentChildStatus {
   if (record.status === "completed") return "completed";
   if (record.status === "cancelled") return "cancelled";
   if (record.status === "lost") return "lost";
-  if (record.status === "failed" && child.status === "pending" && record.mode === "chain" && child.child !== failedPendingChild) return "skipped";
+  if (
+    record.status === "failed" &&
+    child.status === "pending" &&
+    record.mode === "chain" &&
+    child.child !== failedPendingChild
+  )
+    return "skipped";
   return "failed";
 }
 
@@ -1292,9 +1841,13 @@ export class BackgroundSubagentChildTracker {
   readonly childIdentityVersion = 2;
   private readonly groups = new Map<string, TrackedChildGroup>();
 
-  register(record: BackgroundSubagentRecord, descriptors: BackgroundSubagentChildDescriptor[] = inferredChildDescriptors(record)): void {
+  register(
+    record: BackgroundSubagentRecord,
+    descriptors: BackgroundSubagentChildDescriptor[] = inferredChildDescriptors(record),
+  ): void {
     const selected = descriptors.slice(0, 8);
-    if (selected.length === 0) selected.push({ label: record.mode === "single" ? "subagent" : "child 1" });
+    if (selected.length === 0)
+      selected.push({ label: record.mode === "single" ? "subagent" : "child 1" });
     let group = this.groups.get(record.id);
     if (!group || group.sessionId !== record.sessionId) {
       group = { sessionId: record.sessionId, children: new Map(), updatedAt: record.updatedAt };
@@ -1317,7 +1870,7 @@ export class BackgroundSubagentChildTracker {
       } else {
         group.children.set(child, {
           ...(childId ? { childId } : {}),
-          ...(descriptor.taskId ? {taskId:descriptor.taskId} : {}),
+          ...(descriptor.taskId ? { taskId: descriptor.taskId } : {}),
           child,
           label: boundedText(descriptor.label, 256) || `child ${child}`,
           ...(descriptor.task?.trim() ? { task: boundedText(descriptor.task, 2048) } : {}),
@@ -1335,7 +1888,8 @@ export class BackgroundSubagentChildTracker {
     if (!group) return;
     const now = new Date().toISOString();
     for (const candidate of progress.slice(0, 8)) {
-      if (!Number.isSafeInteger(candidate.child) || candidate.child < 1 || candidate.child > 8) continue;
+      if (!Number.isSafeInteger(candidate.child) || candidate.child < 1 || candidate.child > 8)
+        continue;
       const existing = group.children.get(candidate.child);
       if (existing && !isBackgroundSubagentChildActive(existing)) {
         if (isBackgroundSubagentChildActive({ ...existing, status: candidate.status })) continue;
@@ -1350,10 +1904,14 @@ export class BackgroundSubagentChildTracker {
       const childId = existing?.childId;
       const next: BackgroundSubagentChild = {
         ...(childId ? { childId } : {}),
-        ...(existing?.taskId ? {taskId:existing.taskId} : {}),
+        ...(existing?.taskId ? { taskId: existing.taskId } : {}),
         child: candidate.child,
         label: boundedText(candidate.label, 256) || existing?.label || `child ${candidate.child}`,
-        ...(candidate.task?.trim() ? { task: boundedText(candidate.task, 2048) } : existing?.task ? { task: existing.task } : {}),
+        ...(candidate.task?.trim()
+          ? { task: boundedText(candidate.task, 2048) }
+          : existing?.task
+            ? { task: existing.task }
+            : {}),
         status: candidate.status,
         updatedAt: existing?.status === candidate.status ? existing.updatedAt : now,
       };
@@ -1367,14 +1925,21 @@ export class BackgroundSubagentChildTracker {
     const group = this.groups.get(record.id)!;
     for (const child of group.children.values()) {
       const descriptor = record.children?.[child.child - 1];
-      if (descriptor?.taskId && descriptor.childId === child.childId) child.taskId = descriptor.taskId;
+      if (descriptor?.taskId && descriptor.childId === child.childId)
+        child.taskId = descriptor.taskId;
     }
     if (!isBackgroundSubagentActive(record)) {
       const now = new Date().toISOString();
-      const failedPendingChild = record.status === "failed" && record.mode === "chain"
-        && ![...group.children.values()].some((child) => ["running", "failed", "cancelled", "lost"].includes(child.status))
-        ? [...group.children.values()].filter((child) => child.status === "pending").sort((a, b) => a.child - b.child)[0]?.child
-        : undefined;
+      const failedPendingChild =
+        record.status === "failed" &&
+        record.mode === "chain" &&
+        ![...group.children.values()].some((child) =>
+          ["running", "failed", "cancelled", "lost"].includes(child.status),
+        )
+          ? [...group.children.values()]
+              .filter((child) => child.status === "pending")
+              .sort((a, b) => a.child - b.child)[0]?.child
+          : undefined;
       for (const child of group.children.values()) {
         if (!isBackgroundSubagentChildActive(child)) continue;
         child.status = groupTerminalChildStatus(record, child, failedPendingChild);
@@ -1382,21 +1947,30 @@ export class BackgroundSubagentChildTracker {
       }
       group.updatedAt = now;
     }
-    const children = [...group.children.values()].sort((a, b) => a.child - b.child).map((child) => structuredClone(child));
+    const children = [...group.children.values()]
+      .sort((a, b) => a.child - b.child)
+      .map((child) => structuredClone(child));
     this.prune(record.id);
     return children;
   }
 
   removeSession(sessionId: string): void {
-    for (const [id, group] of this.groups) if (group.sessionId === sessionId) this.groups.delete(id);
+    for (const [id, group] of this.groups)
+      if (group.sessionId === sessionId) this.groups.delete(id);
   }
 
   private prune(protectedId?: string): void {
     if (this.groups.size <= MAX_TRACKED_CHILD_GROUPS) return;
-    const oldest = [...this.groups.entries()].sort((a, b) => a[1].updatedAt.localeCompare(b[1].updatedAt));
+    const oldest = [...this.groups.entries()].sort((a, b) =>
+      a[1].updatedAt.localeCompare(b[1].updatedAt),
+    );
     for (const [id, group] of oldest) {
       if (this.groups.size <= MAX_TRACKED_CHILD_GROUPS) break;
-      if (id !== protectedId && [...group.children.values()].every((child) => !isBackgroundSubagentChildActive(child))) this.groups.delete(id);
+      if (
+        id !== protectedId &&
+        [...group.children.values()].every((child) => !isBackgroundSubagentChildActive(child))
+      )
+        this.groups.delete(id);
     }
     for (const [id] of oldest) {
       if (this.groups.size <= MAX_TRACKED_CHILD_GROUPS) break;
@@ -1408,9 +1982,14 @@ export class BackgroundSubagentChildTracker {
 export function sharedBackgroundSubagentChildTracker(): BackgroundSubagentChildTracker {
   const root = globalThis as Record<string, unknown>;
   const existing = root[CHILD_TRACKER_KEY] as BackgroundSubagentChildTracker | undefined;
-  if (existing?.childIdentityVersion === 2
-    && typeof existing.register === "function" && typeof existing.update === "function"
-    && typeof existing.reconcile === "function" && typeof existing.removeSession === "function") return existing;
+  if (
+    existing?.childIdentityVersion === 2 &&
+    typeof existing.register === "function" &&
+    typeof existing.update === "function" &&
+    typeof existing.reconcile === "function" &&
+    typeof existing.removeSession === "function"
+  )
+    return existing;
   const created = new BackgroundSubagentChildTracker();
   root[CHILD_TRACKER_KEY] = created;
   return created;
@@ -1426,7 +2005,11 @@ async function waitPollDelay(timeoutMs: number, signal?: AbortSignal): Promise<v
     const abort = () => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", abort);
-      reject(signal?.reason instanceof Error ? signal.reason : new Error("Background subagent wait cancelled"));
+      reject(
+        signal?.reason instanceof Error
+          ? signal.reason
+          : new Error("Background subagent wait cancelled"),
+      );
     };
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
@@ -1447,16 +2030,27 @@ export async function waitForAnyBackgroundSubagentChild(
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<BackgroundSubagentWaitAnyResult> {
-  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Background subagent wait cancelled");
+  if (signal?.aborted)
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new Error("Background subagent wait cancelled");
   const activeRecords = records.filter(isBackgroundSubagentActive);
-  const initialChildren = activeRecords.map((record) => ({ record, children: tracker.reconcile(record) }));
-  const candidates = initialChildren.flatMap(({ record, children }) => children
-    .filter(isBackgroundSubagentChildActive)
-    .map((child) => ({ jobId: record.id, child: child.child })));
+  const initialChildren = activeRecords.map((record) => ({
+    record,
+    children: tracker.reconcile(record),
+  }));
+  const candidates = initialChildren.flatMap(({ record, children }) =>
+    children
+      .filter(isBackgroundSubagentChildActive)
+      .map((child) => ({ jobId: record.id, child: child.child })),
+  );
   if (candidates.length === 0) return { timedOut: false, remainingChildren: 0 };
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Background subagent wait cancelled");
+    if (signal?.aborted)
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new Error("Background subagent wait cancelled");
     const current = new Map<string, BackgroundSubagentRecord>();
     for (const record of activeRecords) current.set(record.id, await manager.get(record.id));
     let remainingChildren = 0;
@@ -1479,10 +2073,15 @@ export async function waitForAllBackgroundSubagentGroups(
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<{ records: BackgroundSubagentRecord[]; timedOut: boolean }> {
-  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Background subagent wait cancelled");
+  if (signal?.aborted)
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new Error("Background subagent wait cancelled");
   const active = records.filter(isBackgroundSubagentActive);
   if (active.length === 0) return { records: [], timedOut: false };
-  const waited = await Promise.all(active.map((record) => manager.wait(record.id, timeoutMs, signal)));
+  const waited = await Promise.all(
+    active.map((record) => manager.wait(record.id, timeoutMs, signal)),
+  );
   return {
     records: waited.map((entry) => entry.record),
     timedOut: waited.some((entry) => entry.timedOut),
@@ -1503,10 +2102,16 @@ export type BackgroundSubagentNotificationState = {
 
 export function sharedBackgroundSubagentNotificationState(): BackgroundSubagentNotificationState {
   const root = globalThis as Record<string, unknown>;
-  const existing = root[NOTIFICATION_STATE_KEY] as Partial<BackgroundSubagentNotificationState> | undefined;
-  if (existing?.idlePending instanceof Set && existing.idleInFlight instanceof Set
-    && existing.deliveryClaims instanceof Map && existing.consumed instanceof Set
-    && existing.consumptionPending instanceof Set) {
+  const existing = root[NOTIFICATION_STATE_KEY] as
+    | Partial<BackgroundSubagentNotificationState>
+    | undefined;
+  if (
+    existing?.idlePending instanceof Set &&
+    existing.idleInFlight instanceof Set &&
+    existing.deliveryClaims instanceof Map &&
+    existing.consumed instanceof Set &&
+    existing.consumptionPending instanceof Set
+  ) {
     return existing as BackgroundSubagentNotificationState;
   }
   if (existing?.idlePending instanceof Set && existing.idleInFlight instanceof Set) {
@@ -1515,15 +2120,18 @@ export function sharedBackgroundSubagentNotificationState(): BackgroundSubagentN
       idleInFlight: existing.idleInFlight,
       // Legacy state used a Set for transient old-owner claims. Preserve the
       // accepted-message sets, but claims themselves cannot cross that ABI.
-      deliveryClaims: existing.deliveryClaims instanceof Map
-        ? existing.deliveryClaims
-        : new Map<string, symbol>(),
-      consumed: existing.consumptionPending instanceof Set && existing.consumed instanceof Set
-        ? existing.consumed
-        : new Set<string>(),
-      consumptionPending: existing.consumptionPending instanceof Set
-        ? existing.consumptionPending
-        : new Set<string>(),
+      deliveryClaims:
+        existing.deliveryClaims instanceof Map
+          ? existing.deliveryClaims
+          : new Map<string, symbol>(),
+      consumed:
+        existing.consumptionPending instanceof Set && existing.consumed instanceof Set
+          ? existing.consumed
+          : new Set<string>(),
+      consumptionPending:
+        existing.consumptionPending instanceof Set
+          ? existing.consumptionPending
+          : new Set<string>(),
     };
     root[NOTIFICATION_STATE_KEY] = migrated;
     return migrated;
@@ -1541,6 +2149,11 @@ export function sharedBackgroundSubagentNotificationState(): BackgroundSubagentN
 
 export function backgroundSubagentLine(record: BackgroundSubagentRecord): string {
   const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(record.createdAt)) / 1000));
-  const age = seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
+  const age =
+    seconds < 60
+      ? `${seconds}s`
+      : seconds < 3600
+        ? `${Math.floor(seconds / 60)}m`
+        : `${Math.floor(seconds / 3600)}h`;
   return `${record.id}  ${record.status}  ${age}  ${record.backend}/${record.mode}  ${record.summary.replace(/\s+/g, " ")}`;
 }

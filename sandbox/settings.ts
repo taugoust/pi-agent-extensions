@@ -1,6 +1,10 @@
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { mergeExtensionSettings, readExtensionDefaults, readPreferenceDocument } from "../shared/extension-defaults.js";
+import {
+  mergeExtensionSettings,
+  readExtensionDefaults,
+  readPreferenceDocument,
+} from "../shared/extension-defaults.js";
 
 // Existing operator tunables only. Identity, capabilities, policy, enforcement,
 // trusted recovery executables and model-visible authority stay environment-owned.
@@ -29,17 +33,20 @@ const fields = {
 let settings: Record<string, unknown> | undefined;
 function preferences(): Record<string, unknown> {
   if (settings) return settings;
-  const document = mergeExtensionSettings(readExtensionDefaults("sandbox"),
-    readPreferenceDocument(join(getAgentDir(), "sandbox.json")));
+  const document = mergeExtensionSettings(
+    readExtensionDefaults("sandbox"),
+    readPreferenceDocument(join(getAgentDir(), "sandbox.json")),
+  );
   for (const field of Object.values(fields)) {
     const value = document[field];
     if (value === undefined) continue;
-    const valid = field === "approvalBell" || field === "debugRestErrors"
-      ? typeof value === "boolean"
-      : typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+    const valid =
+      field === "approvalBell" || field === "debugRestErrors"
+        ? typeof value === "boolean"
+        : typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
     if (!valid) throw new Error(`Invalid sandbox ${field} preference`);
   }
-  return settings = document;
+  return (settings = document);
 }
 
 /** Existing environment overrides remain highest priority; no process.env mutation. */
@@ -48,5 +55,11 @@ export function sandboxSetting(name: string): string | undefined {
   if (!field) return process.env[name];
   const value = preferences()[field];
   if (process.env[name] !== undefined) return process.env[name];
-  return value === undefined ? undefined : typeof value === "boolean" ? (value ? "1" : "0") : String(value);
+  return value === undefined
+    ? undefined
+    : typeof value === "boolean"
+      ? value
+        ? "1"
+        : "0"
+      : String(value);
 }

@@ -31,13 +31,20 @@ export async function verifyModelApiKeyAuth(
     if (model.api === "openai-codex-responses") {
       let origin: string | undefined;
       const baseUrl = resolved.baseUrl ?? model.baseUrl;
-      try { if (typeof baseUrl === "string") origin = new URL(baseUrl).origin; } catch { /* fail closed below */ }
+      try {
+        if (typeof baseUrl === "string") origin = new URL(baseUrl).origin;
+      } catch {
+        /* fail closed below */
+      }
       if (origin !== "https://chatgpt.com") {
-        throw new EffectiveAuthConflictError("OpenAI Codex account authentication requires the official ChatGPT origin.");
+        throw new EffectiveAuthConflictError(
+          "OpenAI Codex account authentication requires the official ChatGPT origin.",
+        );
       }
     }
     const openai = model.api === "openai-responses" || model.api === "openai-completions";
-    const keyHeader = model.api === "anthropic-messages" ? "x-api-key" : openai ? "api-key" : undefined;
+    const keyHeader =
+      model.api === "anthropic-messages" ? "x-api-key" : openai ? "api-key" : undefined;
     const headers = new Map<string, { name: string; value: string | null }>();
     for (const [name, value] of Object.entries(resolved.headers ?? {})) {
       const normalized = name.toLowerCase();
@@ -56,7 +63,8 @@ export async function verifyModelApiKeyAuth(
           : text === apiKey);
       // pi-messages passes a plain object to fetch: a differently cased key would coexist
       // with its generated lowercase header and be combined by the HTTP Headers parser.
-      const duplicate = model.api === "pi-messages" && header === "authorization" && name !== header;
+      const duplicate =
+        model.api === "pi-messages" && header === "authorization" && name !== header;
       if (!matches || duplicate) {
         throw new EffectiveAuthConflictError(
           `${provider.displayName} has a conflicting authentication header. Remove the configured authentication header or select default from /accounts.`,

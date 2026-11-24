@@ -1,6 +1,10 @@
 import { sandboxSetting } from "./settings.js";
 import { stripSubagentTerminalControls } from "./subagent-text.js";
-import { cloneSubagentTerminal, normalizeSubagentTerminal, type SubagentTerminal } from "./subagent-terminal.js";
+import {
+  cloneSubagentTerminal,
+  normalizeSubagentTerminal,
+  type SubagentTerminal,
+} from "./subagent-terminal.js";
 
 export type SubagentUsage = {
   input: number;
@@ -107,7 +111,9 @@ export type SubagentStreamState = {
   stderr?: string;
 };
 
-export type SubagentStreamInitialState = Partial<Omit<SubagentStreamState, "usage" | "messages" | "stdoutDecoder">> & {
+export type SubagentStreamInitialState = Partial<
+  Omit<SubagentStreamState, "usage" | "messages" | "stdoutDecoder">
+> & {
   label: string;
   usage?: Partial<SubagentUsage>;
   messages?: unknown[];
@@ -124,7 +130,10 @@ function configuredPositiveInteger(value: string | undefined, fallback: number):
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export const MAX_SUBAGENT_RESULT_BYTES = configuredPositiveInteger(sandboxSetting("PI_AGENTSH_SUBAGENT_RESULT_MAX_BYTES"), 50 * 1024);
+export const MAX_SUBAGENT_RESULT_BYTES = configuredPositiveInteger(
+  sandboxSetting("PI_AGENTSH_SUBAGENT_RESULT_MAX_BYTES"),
+  50 * 1024,
+);
 export const MAX_SUBAGENT_LINE_BYTES = 64 * 1024;
 export const MAX_SUBAGENT_RELEVANT_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_RETAINED_MESSAGES = 16;
@@ -142,7 +151,16 @@ const MAX_LIVE_TOOL_STATUS_BYTES = 500;
 const liveToolStatuses = new WeakMap<SubagentStreamState, string>();
 
 export function usageZero(): SubagentUsage {
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, contextWindow: 0, turns: 0 };
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: 0,
+    contextTokens: 0,
+    contextWindow: 0,
+    turns: 0,
+  };
 }
 
 export function usageNumber(value: unknown): number {
@@ -201,12 +219,21 @@ function boundedString(value: unknown, maxBytes = MAX_METADATA_BYTES): string | 
 }
 
 function sanitizedDiagnostic(value: unknown): string | undefined {
-  const text = boundedString(typeof value === "string" ? stripSubagentTerminalControls(value) : value, MAX_DIAGNOSTIC_BYTES);
+  const text = boundedString(
+    typeof value === "string" ? stripSubagentTerminalControls(value) : value,
+    MAX_DIAGNOSTIC_BYTES,
+  );
   if (!text) return undefined;
   return text
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
-    .replace(/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|password|passwd|secret)\b\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
-    .replace(/-----BEGIN [^-\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\n]*PRIVATE KEY-----/g, "[private key redacted]");
+    .replace(
+      /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|password|passwd|secret)\b\s*[:=]\s*[^\s,;]+/gi,
+      "$1=[redacted]",
+    )
+    .replace(
+      /-----BEGIN [^-\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\n]*PRIVATE KEY-----/g,
+      "[private key redacted]",
+    );
 }
 
 function numericField(value: unknown): number | undefined {
@@ -226,7 +253,10 @@ function sanitizeUsage(value: unknown): Record<string, unknown> | undefined {
   return Object.keys(usage).length ? usage : undefined;
 }
 
-export function sanitizeSubagentToolArgs(toolName: string, value: unknown): Record<string, unknown> {
+export function sanitizeSubagentToolArgs(
+  toolName: string,
+  value: unknown,
+): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const args = value as Record<string, unknown>;
   const safeText = (input: unknown, maxBytes = MAX_METADATA_BYTES): string | undefined => {
@@ -298,7 +328,9 @@ function sanitizeCompletedTool(value: unknown): SubagentCompletedTool | undefine
     args,
     isError: source.isError === true,
     path,
-    resultPreview: resultPreview ? truncateByBytes(resultPreview, MAX_TOOL_PREVIEW_BYTES) : undefined,
+    resultPreview: resultPreview
+      ? truncateByBytes(resultPreview, MAX_TOOL_PREVIEW_BYTES)
+      : undefined,
   };
 }
 
@@ -311,9 +343,20 @@ function rememberPath(paths: string[], value: unknown) {
   if (paths.length > MAX_RETAINED_PATHS) paths.splice(0, paths.length - MAX_RETAINED_PATHS);
 }
 
-function recordProtocolDiagnostic(state: SubagentStreamState, kind: SubagentProtocolDiagnostic["kind"], detail?: string) {
-  state.protocolDiagnostics.push({ kind, detail: detail ? truncateByBytes(detail, 256) : undefined });
-  if (state.protocolDiagnostics.length > MAX_PROTOCOL_DIAGNOSTICS) state.protocolDiagnostics.splice(0, state.protocolDiagnostics.length - MAX_PROTOCOL_DIAGNOSTICS);
+function recordProtocolDiagnostic(
+  state: SubagentStreamState,
+  kind: SubagentProtocolDiagnostic["kind"],
+  detail?: string,
+) {
+  state.protocolDiagnostics.push({
+    kind,
+    detail: detail ? truncateByBytes(detail, 256) : undefined,
+  });
+  if (state.protocolDiagnostics.length > MAX_PROTOCOL_DIAGNOSTICS)
+    state.protocolDiagnostics.splice(
+      0,
+      state.protocolDiagnostics.length - MAX_PROTOCOL_DIAGNOSTICS,
+    );
 }
 
 function sanitizeAssistantPart(part: unknown): Record<string, unknown> | undefined {
@@ -321,7 +364,10 @@ function sanitizeAssistantPart(part: unknown): Record<string, unknown> | undefin
   const source = part as Record<string, unknown>;
   const type = String(source.type ?? "");
   if (type === "text" || type === "markdown" || type === "text_delta") {
-    const text = truncateByBytes(stripSubagentTerminalControls(String(source.text ?? source.delta ?? "")), MAX_RETAINED_TEXT_BYTES);
+    const text = truncateByBytes(
+      stripSubagentTerminalControls(String(source.text ?? source.delta ?? "")),
+      MAX_RETAINED_TEXT_BYTES,
+    );
     return text ? { type: "text", text } : undefined;
   }
   if (type === "toolCall") {
@@ -340,7 +386,10 @@ function sanitizeToolResultPart(part: unknown): Record<string, unknown> | undefi
     return text ? { type: "text", text } : undefined;
   }
   if (source.type === "image") {
-    const sourceMetadata = source.source && typeof source.source === "object" ? source.source as Record<string, unknown> : undefined;
+    const sourceMetadata =
+      source.source && typeof source.source === "object"
+        ? (source.source as Record<string, unknown>)
+        : undefined;
     const mimeType = boundedString(source.mimeType ?? sourceMetadata?.media_type, 128) ?? "unknown";
     return { type: "text", text: `[image: ${mimeType}]` };
   }
@@ -352,10 +401,16 @@ function sanitizeMessage(value: unknown): RetainedSubagentMessage | undefined {
   const source = value as Record<string, unknown>;
   if (source.role !== "assistant" && source.role !== "toolResult") return undefined;
 
-  const rawContent = Array.isArray(source.content) ? source.content : typeof source.content === "string" ? [{ type: "text", text: source.content }] : [];
+  const rawContent = Array.isArray(source.content)
+    ? source.content
+    : typeof source.content === "string"
+      ? [{ type: "text", text: source.content }]
+      : [];
   const content = rawContent
     .slice(0, MAX_RETAINED_CONTENT_PARTS)
-    .map((part) => source.role === "assistant" ? sanitizeAssistantPart(part) : sanitizeToolResultPart(part))
+    .map((part) =>
+      source.role === "assistant" ? sanitizeAssistantPart(part) : sanitizeToolResultPart(part),
+    )
     .filter((part): part is Record<string, unknown> => part !== undefined);
   const result: RetainedSubagentMessage = { role: source.role, content };
 
@@ -377,15 +432,24 @@ function cloneMessage(message: RetainedSubagentMessage): RetainedSubagentMessage
     ...message,
     content: message.content.map((part) => {
       const clone = { ...part };
-      if (clone.arguments && typeof clone.arguments === "object") clone.arguments = { ...(clone.arguments as Record<string, unknown>) };
+      if (clone.arguments && typeof clone.arguments === "object")
+        clone.arguments = { ...(clone.arguments as Record<string, unknown>) };
       return clone;
     }),
-    usage: message.usage ? { ...message.usage, ...(message.usage.cost && typeof message.usage.cost === "object" ? { cost: { ...(message.usage.cost as Record<string, unknown>) } } : {}) } : undefined,
+    usage: message.usage
+      ? {
+          ...message.usage,
+          ...(message.usage.cost && typeof message.usage.cost === "object"
+            ? { cost: { ...(message.usage.cost as Record<string, unknown>) } }
+            : {}),
+        }
+      : undefined,
   };
 }
 
 function updateUsageFromAssistantMessage(usage: SubagentUsage, msg: unknown) {
-  if (!msg || typeof msg !== "object" || (msg as Record<string, unknown>).role !== "assistant") return;
+  if (!msg || typeof msg !== "object" || (msg as Record<string, unknown>).role !== "assistant")
+    return;
   const source = msg as Record<string, unknown>;
   usage.turns++;
   const msgUsage = source.usage as Record<string, unknown> | undefined;
@@ -400,14 +464,23 @@ function updateUsageFromAssistantMessage(usage: SubagentUsage, msg: unknown) {
 }
 
 function toolResultText(value: unknown): string {
-  const source = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
-  const content = Array.isArray(source?.content) ? source.content : Array.isArray(value) ? value : undefined;
-  if (!content) return typeof value === "string" ? truncateByBytes(value, MAX_RETAINED_TOOL_RESULT_BYTES) : "";
-  return truncateByBytes(content
-    .map((part) => sanitizeToolResultPart(part))
-    .map((part) => part?.text ? String(part.text) : "")
-    .filter(Boolean)
-    .join("\n"), MAX_RETAINED_TOOL_RESULT_BYTES);
+  const source =
+    value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+  const content = Array.isArray(source?.content)
+    ? source.content
+    : Array.isArray(value)
+      ? value
+      : undefined;
+  if (!content)
+    return typeof value === "string" ? truncateByBytes(value, MAX_RETAINED_TOOL_RESULT_BYTES) : "";
+  return truncateByBytes(
+    content
+      .map((part) => sanitizeToolResultPart(part))
+      .map((part) => (part?.text ? String(part.text) : ""))
+      .filter(Boolean)
+      .join("\n"),
+    MAX_RETAINED_TOOL_RESULT_BYTES,
+  );
 }
 
 function safeCompactionReason(value: unknown): string | undefined {
@@ -425,7 +498,10 @@ function sanitizeCompactionResult(value: unknown): SubagentCompactionResult | un
   return Object.keys(result).length ? result : undefined;
 }
 
-function sanitizeCompactionEvent(event: unknown, eventType?: string): SubagentCompactionEvent | undefined {
+function sanitizeCompactionEvent(
+  event: unknown,
+  eventType?: string,
+): SubagentCompactionEvent | undefined {
   if (!event || typeof event !== "object") return undefined;
   const source = event as Record<string, unknown>;
   const type = eventType ?? source.type;
@@ -445,13 +521,17 @@ function cloneCompactionEvent(event: SubagentCompactionEvent): SubagentCompactio
   return { ...event, result: event.result ? { ...event.result } : undefined };
 }
 
-function cloneCompactionState(value: SubagentCompactionState | undefined): SubagentCompactionState | undefined {
+function cloneCompactionState(
+  value: SubagentCompactionState | undefined,
+): SubagentCompactionState | undefined {
   if (!value) return undefined;
   return {
     active: value.active === true,
     reason: safeCompactionReason(value.reason),
     count: Math.max(0, usageNumber(value.count)),
-    events: Array.isArray(value.events) ? value.events.slice(-MAX_RETAINED_COMPACTION_EVENTS).map(cloneCompactionEvent) : [],
+    events: Array.isArray(value.events)
+      ? value.events.slice(-MAX_RETAINED_COMPACTION_EVENTS).map(cloneCompactionEvent)
+      : [],
     lastResult: value.lastResult ? { ...value.lastResult } : undefined,
     aborted: value.aborted,
     willRetry: value.willRetry,
@@ -465,32 +545,59 @@ function safeEventSummary(event: unknown, eventType: string): Record<string, unk
   }
   if (!event || typeof event !== "object") return { type: eventType || "unknown" };
   const source = event as Record<string, unknown>;
-  if (eventType === "message_start" || eventType === "message_update" || eventType === "message_end" || eventType === "tool_result_end") {
-    const message = source.message && typeof source.message === "object" ? source.message as Record<string, unknown> : undefined;
-    return { type: eventType, ...(typeof message?.role === "string" ? { role: message.role } : {}) };
+  if (
+    eventType === "message_start" ||
+    eventType === "message_update" ||
+    eventType === "message_end" ||
+    eventType === "tool_result_end"
+  ) {
+    const message =
+      source.message && typeof source.message === "object"
+        ? (source.message as Record<string, unknown>)
+        : undefined;
+    return {
+      type: eventType,
+      ...(typeof message?.role === "string" ? { role: message.role } : {}),
+    };
   }
   if (eventType.startsWith("tool_execution_")) {
     return {
       type: eventType,
-      ...(boundedString(source.toolName, 128) ? { toolName: boundedString(source.toolName, 128) } : {}),
+      ...(boundedString(source.toolName, 128)
+        ? { toolName: boundedString(source.toolName, 128) }
+        : {}),
       ...(eventType === "tool_execution_end" ? { isError: source.isError === true } : {}),
     };
   }
   return { type: eventType || "unknown" };
 }
 
-export function createSubagentStreamState(initial: SubagentStreamInitialState): SubagentStreamState {
-  const messages = (initial.messages ?? []).map(sanitizeMessage).filter((message): message is RetainedSubagentMessage => message !== undefined).slice(-MAX_RETAINED_MESSAGES);
+export function createSubagentStreamState(
+  initial: SubagentStreamInitialState,
+): SubagentStreamState {
+  const messages = (initial.messages ?? [])
+    .map(sanitizeMessage)
+    .filter((message): message is RetainedSubagentMessage => message !== undefined)
+    .slice(-MAX_RETAINED_MESSAGES);
   const usage = usageZero();
-  for (const key of Object.keys(usage) as Array<keyof SubagentUsage>) usage[key] = usageNumber(initial.usage?.[key]);
+  for (const key of Object.keys(usage) as Array<keyof SubagentUsage>)
+    usage[key] = usageNumber(initial.usage?.[key]);
   return {
     label: boundedString(initial.label, 256) ?? "subagent",
-    child: Number.isSafeInteger(initial.child) && Number(initial.child) >= 1 && Number(initial.child) <= 8
-      ? Number(initial.child)
-      : undefined,
+    child:
+      Number.isSafeInteger(initial.child) &&
+      Number(initial.child) >= 1 &&
+      Number(initial.child) <= 8
+        ? Number(initial.child)
+        : undefined,
     task: boundedString(initial.task, MAX_RETAINED_TEXT_BYTES),
     cwd: boundedString(initial.cwd, MAX_METADATA_BYTES),
-    tools: Array.isArray(initial.tools) ? initial.tools.slice(0, 32).map((tool) => boundedString(tool, 128)).filter((tool): tool is string => tool !== undefined) : undefined,
+    tools: Array.isArray(initial.tools)
+      ? initial.tools
+          .slice(0, 32)
+          .map((tool) => boundedString(tool, 128))
+          .filter((tool): tool is string => tool !== undefined)
+      : undefined,
     prefix: truncateByBytes(initial.prefix ?? "", MAX_SUBAGENT_RESULT_BYTES),
     liveText: truncateByBytes(initial.liveText ?? "", MAX_RETAINED_TEXT_BYTES),
     rawText: truncateByBytes(initial.rawText ?? "", MAX_SUBAGENT_RESULT_BYTES),
@@ -503,18 +610,53 @@ export function createSubagentStreamState(initial: SubagentStreamInitialState): 
     model: boundedString(initial.model, 256),
     modelStopReason: boundedString(initial.modelStopReason, 128),
     messages,
-    activeMessageIndex: initial.activeMessageIndex !== undefined && initial.activeMessageIndex >= 0 && initial.activeMessageIndex < messages.length ? initial.activeMessageIndex : undefined,
-    lastEvent: initial.lastEvent && typeof initial.lastEvent === "object" ? safeEventSummary(initial.lastEvent, String((initial.lastEvent as Record<string, unknown>).type ?? "unknown")) : undefined,
-    lastToolCall: initial.lastToolCall ? sanitizeToolCall(initial.lastToolCall.name, initial.lastToolCall.args) : undefined,
-    lastToolResult: initial.lastToolResult ? truncateByBytes(initial.lastToolResult, MAX_RETAINED_TOOL_RESULT_BYTES) : undefined,
-    toolStatus: initial.toolStatus ? truncateByBytes(initial.toolStatus, MAX_METADATA_BYTES) : undefined,
-    completedTools: (initial.completedTools ?? []).map(sanitizeCompletedTool).filter((tool): tool is SubagentCompletedTool => tool !== undefined).slice(-MAX_RETAINED_TOOLS),
-    readFiles: (initial.readFiles ?? []).map((path) => boundedString(path, MAX_METADATA_BYTES)).filter((path): path is string => path !== undefined).slice(-MAX_RETAINED_PATHS),
-    modifiedFiles: (initial.modifiedFiles ?? []).map((path) => boundedString(path, MAX_METADATA_BYTES)).filter((path): path is string => path !== undefined).slice(-MAX_RETAINED_PATHS),
-    protocolDiagnostics: (initial.protocolDiagnostics ?? []).slice(-MAX_PROTOCOL_DIAGNOSTICS).map((diagnostic) => ({ kind: diagnostic.kind, detail: boundedString(diagnostic.detail, 256) })),
+    activeMessageIndex:
+      initial.activeMessageIndex !== undefined &&
+      initial.activeMessageIndex >= 0 &&
+      initial.activeMessageIndex < messages.length
+        ? initial.activeMessageIndex
+        : undefined,
+    lastEvent:
+      initial.lastEvent && typeof initial.lastEvent === "object"
+        ? safeEventSummary(
+            initial.lastEvent,
+            String((initial.lastEvent as Record<string, unknown>).type ?? "unknown"),
+          )
+        : undefined,
+    lastToolCall: initial.lastToolCall
+      ? sanitizeToolCall(initial.lastToolCall.name, initial.lastToolCall.args)
+      : undefined,
+    lastToolResult: initial.lastToolResult
+      ? truncateByBytes(initial.lastToolResult, MAX_RETAINED_TOOL_RESULT_BYTES)
+      : undefined,
+    toolStatus: initial.toolStatus
+      ? truncateByBytes(initial.toolStatus, MAX_METADATA_BYTES)
+      : undefined,
+    completedTools: (initial.completedTools ?? [])
+      .map(sanitizeCompletedTool)
+      .filter((tool): tool is SubagentCompletedTool => tool !== undefined)
+      .slice(-MAX_RETAINED_TOOLS),
+    readFiles: (initial.readFiles ?? [])
+      .map((path) => boundedString(path, MAX_METADATA_BYTES))
+      .filter((path): path is string => path !== undefined)
+      .slice(-MAX_RETAINED_PATHS),
+    modifiedFiles: (initial.modifiedFiles ?? [])
+      .map((path) => boundedString(path, MAX_METADATA_BYTES))
+      .filter((path): path is string => path !== undefined)
+      .slice(-MAX_RETAINED_PATHS),
+    protocolDiagnostics: (initial.protocolDiagnostics ?? [])
+      .slice(-MAX_PROTOCOL_DIAGNOSTICS)
+      .map((diagnostic) => ({
+        kind: diagnostic.kind,
+        detail: boundedString(diagnostic.detail, 256),
+      })),
     compaction: cloneCompactionState(initial.compaction),
     protocolSettled: initial.protocolSettled === true,
-    terminal: normalizeSubagentTerminal(initial.terminal, { exitCode: initial.exitCode, stopReason: initial.stopReason, error: initial.errorMessage }),
+    terminal: normalizeSubagentTerminal(initial.terminal, {
+      exitCode: initial.exitCode,
+      stopReason: initial.stopReason,
+      error: initial.errorMessage,
+    }),
     exitCode: usageNumber(initial.exitCode ?? -1),
     stopReason: boundedString(initial.stopReason, 128),
     final: initial.final ? truncateByBytes(initial.final, MAX_SUBAGENT_RESULT_BYTES) : undefined,
@@ -523,7 +665,11 @@ export function createSubagentStreamState(initial: SubagentStreamInitialState): 
   };
 }
 
-export function appendUtf8LineChunk(buffer: string, decoder: TextDecoder | undefined, chunk: string | Uint8Array): Utf8LineChunkResult {
+export function appendUtf8LineChunk(
+  buffer: string,
+  decoder: TextDecoder | undefined,
+  chunk: string | Uint8Array,
+): Utf8LineChunkResult {
   let text: string;
   if (typeof chunk === "string") {
     text = `${decoder ? decoder.decode() : ""}${chunk}`;
@@ -536,7 +682,10 @@ export function appendUtf8LineChunk(buffer: string, decoder: TextDecoder | undef
   return { lines: lines.slice(0, -1), buffer: lines.at(-1) ?? "", decoder };
 }
 
-export function flushUtf8LineChunk(buffer: string, decoder: TextDecoder | undefined): Utf8LineChunkResult {
+export function flushUtf8LineChunk(
+  buffer: string,
+  decoder: TextDecoder | undefined,
+): Utf8LineChunkResult {
   const text = `${buffer}${decoder ? decoder.decode() : ""}`;
   return { lines: text ? [text] : [], buffer: "", decoder: undefined };
 }
@@ -550,7 +699,9 @@ export function parseSubagentPiJsonStdout(stdout: string) {
     model: state.model,
     modelStopReason: state.modelStopReason,
     lastEvent: state.lastEvent ? { ...state.lastEvent } : undefined,
-    lastToolCall: state.lastToolCall ? { name: state.lastToolCall.name, args: { ...state.lastToolCall.args } } : undefined,
+    lastToolCall: state.lastToolCall
+      ? { name: state.lastToolCall.name, args: { ...state.lastToolCall.args } }
+      : undefined,
     lastToolResult: state.lastToolResult,
     completedTools: state.completedTools.map((tool) => ({ ...tool, args: { ...tool.args } })),
     readFiles: [...state.readFiles],
@@ -588,18 +739,29 @@ const PI_JSON_EVENT_TYPES = new Set([
 function textFromPiMessageContent(content: unknown): string {
   if (typeof content === "string") return truncateByBytes(content, MAX_RETAINED_TEXT_BYTES);
   if (!Array.isArray(content)) return "";
-  return truncateByBytes(content
-    .map((part) => sanitizeAssistantPart(part))
-    .map((part) => part?.type === "text" ? String(part.text ?? "") : "")
-    .join(""), MAX_RETAINED_TEXT_BYTES);
+  return truncateByBytes(
+    content
+      .map((part) => sanitizeAssistantPart(part))
+      .map((part) => (part?.type === "text" ? String(part.text ?? "") : ""))
+      .join(""),
+    MAX_RETAINED_TEXT_BYTES,
+  );
 }
 
 function assistantTextFromPiJsonEvent(event: unknown): string | undefined {
   if (!event || typeof event !== "object") return undefined;
   const source = event as Record<string, unknown>;
-  const assistantEvent = source.assistantMessageEvent && typeof source.assistantMessageEvent === "object" ? source.assistantMessageEvent as Record<string, unknown> : undefined;
+  const assistantEvent =
+    source.assistantMessageEvent && typeof source.assistantMessageEvent === "object"
+      ? (source.assistantMessageEvent as Record<string, unknown>)
+      : undefined;
   const message = source.message ?? assistantEvent?.partial;
-  if (!message || typeof message !== "object" || (message as Record<string, unknown>).role !== "assistant") return undefined;
+  if (
+    !message ||
+    typeof message !== "object" ||
+    (message as Record<string, unknown>).role !== "assistant"
+  )
+    return undefined;
   return textFromPiMessageContent((message as Record<string, unknown>).content);
 }
 
@@ -613,21 +775,29 @@ export function appendSubagentPrefix(state: SubagentStreamState, text: string) {
 }
 
 function summarizeLiveSubagentToolCall(toolName: string, value: unknown): string {
-  const args = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const args =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
   const liveArgument = (argument: unknown): string => {
     const bounded = boundedString(argument, MAX_LIVE_TOOL_STATUS_BYTES);
     return sanitizedDiagnostic(bounded)?.replace(/\s+/g, " ") ?? "...";
   };
   if (toolName === "bash") {
     const command = liveArgument(args.command);
-    return command === "..." ? "$ bash" : `$ ${truncateByBytes(command, MAX_LIVE_TOOL_STATUS_BYTES)}`;
+    return command === "..."
+      ? "$ bash"
+      : `$ ${truncateByBytes(command, MAX_LIVE_TOOL_STATUS_BYTES)}`;
   }
   if (toolName === "read") return `read ${liveArgument(args.path ?? args.file_path)}`;
   if (toolName === "write") return `write ${liveArgument(args.path ?? args.file_path)}`;
   if (toolName === "edit") return `edit ${liveArgument(args.path ?? args.file_path)}`;
-  if (toolName === "ls") return `ls ${liveArgument(args.path) === "..." ? "." : liveArgument(args.path)}`;
-  if (toolName === "find") return `find ${liveArgument(args.pattern) === "..." ? "*" : liveArgument(args.pattern)} in ${liveArgument(args.path) === "..." ? "." : liveArgument(args.path)}`;
-  if (toolName === "grep") return `grep /${liveArgument(args.pattern) === "..." ? "" : liveArgument(args.pattern)}/ in ${liveArgument(args.path) === "..." ? "." : liveArgument(args.path)}`;
+  if (toolName === "ls")
+    return `ls ${liveArgument(args.path) === "..." ? "." : liveArgument(args.path)}`;
+  if (toolName === "find")
+    return `find ${liveArgument(args.pattern) === "..." ? "*" : liveArgument(args.pattern)} in ${liveArgument(args.path) === "..." ? "." : liveArgument(args.path)}`;
+  if (toolName === "grep")
+    return `grep /${liveArgument(args.pattern) === "..." ? "" : liveArgument(args.pattern)}/ in ${liveArgument(args.path) === "..." ? "." : liveArgument(args.path)}`;
   return toolName;
 }
 
@@ -649,7 +819,7 @@ function rememberSubagentToolCallFromMessage(state: SubagentStreamState, msg: un
 
 function upsertSubagentStreamMessage(state: SubagentStreamState, msg: unknown, final: boolean) {
   rememberSubagentToolCallFromMessage(state, msg);
-  const source = msg && typeof msg === "object" ? msg as Record<string, unknown> : undefined;
+  const source = msg && typeof msg === "object" ? (msg as Record<string, unknown>) : undefined;
   if (source?.role === "toolResult") state.lastToolResult = toolResultText(source.content);
   const retained = sanitizeMessage(msg);
   if (retained) {
@@ -657,7 +827,8 @@ function upsertSubagentStreamMessage(state: SubagentStreamState, msg: unknown, f
       state.messages[state.activeMessageIndex] = retained;
     } else {
       state.messages.push(retained);
-      if (state.messages.length > MAX_RETAINED_MESSAGES) state.messages.splice(0, state.messages.length - MAX_RETAINED_MESSAGES);
+      if (state.messages.length > MAX_RETAINED_MESSAGES)
+        state.messages.splice(0, state.messages.length - MAX_RETAINED_MESSAGES);
       state.activeMessageIndex = state.messages.length - 1;
     }
   }
@@ -673,12 +844,17 @@ function upsertSubagentStreamMessage(state: SubagentStreamState, msg: unknown, f
   }
 }
 
-function recordCompactionEvent(state: SubagentStreamState, event: unknown, eventType: "compaction_start" | "compaction_end") {
+function recordCompactionEvent(
+  state: SubagentStreamState,
+  event: unknown,
+  eventType: "compaction_start" | "compaction_end",
+) {
   const safeEvent = sanitizeCompactionEvent(event, eventType);
   if (!safeEvent) return;
   const compaction = state.compaction ?? { active: false, count: 0, events: [] };
   compaction.events.push(safeEvent);
-  if (compaction.events.length > MAX_RETAINED_COMPACTION_EVENTS) compaction.events.splice(0, compaction.events.length - MAX_RETAINED_COMPACTION_EVENTS);
+  if (compaction.events.length > MAX_RETAINED_COMPACTION_EVENTS)
+    compaction.events.splice(0, compaction.events.length - MAX_RETAINED_COMPACTION_EVENTS);
   if (eventType === "compaction_start") {
     compaction.active = true;
     compaction.count++;
@@ -714,7 +890,9 @@ export function subagentStreamResult(state: SubagentStreamState) {
     tools: state.tools ? [...state.tools] : undefined,
     cwd: state.cwd,
     lastEvent: state.lastEvent ? { ...state.lastEvent } : undefined,
-    lastToolCall: state.lastToolCall ? { name: state.lastToolCall.name, args: { ...state.lastToolCall.args } } : undefined,
+    lastToolCall: state.lastToolCall
+      ? { name: state.lastToolCall.name, args: { ...state.lastToolCall.args } }
+      : undefined,
     lastToolResult: state.lastToolResult,
     completedTools: state.completedTools.map((tool) => ({ ...tool, args: { ...tool.args } })),
     readFiles: [...state.readFiles],
@@ -729,14 +907,20 @@ export function subagentStreamResult(state: SubagentStreamState) {
 }
 
 const PI_JSON_AGGREGATE_EVENT_TYPES = new Set(["agent_end", "turn_end"]);
-const PI_JSON_RELEVANT_LARGE_EVENT_TYPES = new Set(["message_end", "compaction_end", "agent_settled"]);
+const PI_JSON_RELEVANT_LARGE_EVENT_TYPES = new Set([
+  "message_end",
+  "compaction_end",
+  "agent_settled",
+]);
 
 function piJsonEventTypePrefix(line: string): string {
   return /"type"\s*:\s*"([^"\\]+)"/.exec(line.slice(0, 4096))?.[1] ?? "";
 }
 
 function piJsonLineLimit(eventType: string): number {
-  return PI_JSON_RELEVANT_LARGE_EVENT_TYPES.has(eventType) ? MAX_SUBAGENT_RELEVANT_LINE_BYTES : MAX_SUBAGENT_LINE_BYTES;
+  return PI_JSON_RELEVANT_LARGE_EVENT_TYPES.has(eventType)
+    ? MAX_SUBAGENT_RELEVANT_LINE_BYTES
+    : MAX_SUBAGENT_LINE_BYTES;
 }
 
 export function processSubagentStdoutLine(state: SubagentStreamState, line: string) {
@@ -749,8 +933,15 @@ export function processSubagentStdoutLine(state: SubagentStreamState, line: stri
   const lineBytes = byteLength(trimmed);
   if (lineBytes > piJsonLineLimit(prefixedEventType)) {
     if (PI_JSON_AGGREGATE_EVENT_TYPES.has(prefixedEventType)) return;
-    appendSubagentRawText(state, `[oversized child output line omitted: ${formatByteCount(lineBytes)}]\n`);
-    recordProtocolDiagnostic(state, "oversized_line", `${prefixedEventType ? `${prefixedEventType}: ` : ""}${formatByteCount(lineBytes)}`);
+    appendSubagentRawText(
+      state,
+      `[oversized child output line omitted: ${formatByteCount(lineBytes)}]\n`,
+    );
+    recordProtocolDiagnostic(
+      state,
+      "oversized_line",
+      `${prefixedEventType ? `${prefixedEventType}: ` : ""}${formatByteCount(lineBytes)}`,
+    );
     return;
   }
 
@@ -763,10 +954,13 @@ export function processSubagentStdoutLine(state: SubagentStreamState, line: stri
     return;
   }
 
-  const source = event && typeof event === "object" ? event as Record<string, unknown> : {};
+  const source = event && typeof event === "object" ? (event as Record<string, unknown>) : {};
   const eventType = typeof source.type === "string" ? source.type : "";
   if (!PI_JSON_EVENT_TYPES.has(eventType)) {
-    appendSubagentRawText(state, `[unrecognized child event${eventType ? `: ${truncateByBytes(eventType, 128)}` : ""}]\n`);
+    appendSubagentRawText(
+      state,
+      `[unrecognized child event${eventType ? `: ${truncateByBytes(eventType, 128)}` : ""}]\n`,
+    );
     recordProtocolDiagnostic(state, "unknown_event", eventType || undefined);
     state.lastEvent = safeEventSummary(event, eventType);
     return;
@@ -774,25 +968,44 @@ export function processSubagentStdoutLine(state: SubagentStreamState, line: stri
 
   state.sawPiJsonStdout = true;
   state.lastEvent = safeEventSummary(event, eventType);
-  if ((eventType === "message_start" || eventType === "message_update" || eventType === "message_end") && source.message) {
+  if (
+    (eventType === "message_start" ||
+      eventType === "message_update" ||
+      eventType === "message_end") &&
+    source.message
+  ) {
     upsertSubagentStreamMessage(state, source.message, eventType === "message_end");
   } else if (eventType === "tool_execution_start") {
     const call = sanitizeToolCall(source.toolName, source.args);
     state.lastToolCall = call;
     state.toolStatus = `[running ${call.name}]`;
-    liveToolStatuses.set(state, `${state.toolStatus} ${truncateByBytes(summarizeLiveSubagentToolCall(call.name, call.args), MAX_LIVE_TOOL_STATUS_BYTES)}`);
+    liveToolStatuses.set(
+      state,
+      `${state.toolStatus} ${truncateByBytes(summarizeLiveSubagentToolCall(call.name, call.args), MAX_LIVE_TOOL_STATUS_BYTES)}`,
+    );
   } else if (eventType === "tool_execution_update" && source.partialResult) {
     const text = toolResultText(source.partialResult);
     if (text) state.lastToolResult = text;
   } else if (eventType === "tool_execution_end") {
     const toolName = boundedString(source.toolName, 128) ?? state.lastToolCall?.name ?? "unknown";
-    const args = source.args ?? (state.lastToolCall?.name === toolName ? state.lastToolCall.args : {});
+    const args =
+      source.args ?? (state.lastToolCall?.name === toolName ? state.lastToolCall.args : {});
     state.lastToolCall = sanitizeToolCall(toolName, args);
     const text = toolResultText(source.result);
     if (text) state.lastToolResult = text;
-    const path = typeof state.lastToolCall.args.path === "string" ? state.lastToolCall.args.path : undefined;
-    state.completedTools.push({ name: toolName, args: { ...state.lastToolCall.args }, isError: source.isError === true, path, resultPreview: text ? truncateByBytes(sanitizedDiagnostic(text) ?? "", MAX_TOOL_PREVIEW_BYTES) || undefined : undefined });
-    if (state.completedTools.length > MAX_RETAINED_TOOLS) state.completedTools.splice(0, state.completedTools.length - MAX_RETAINED_TOOLS);
+    const path =
+      typeof state.lastToolCall.args.path === "string" ? state.lastToolCall.args.path : undefined;
+    state.completedTools.push({
+      name: toolName,
+      args: { ...state.lastToolCall.args },
+      isError: source.isError === true,
+      path,
+      resultPreview: text
+        ? truncateByBytes(sanitizedDiagnostic(text) ?? "", MAX_TOOL_PREVIEW_BYTES) || undefined
+        : undefined,
+    });
+    if (state.completedTools.length > MAX_RETAINED_TOOLS)
+      state.completedTools.splice(0, state.completedTools.length - MAX_RETAINED_TOOLS);
     if (toolName === "read") rememberPath(state.readFiles, path);
     if (toolName === "write" || toolName === "edit") rememberPath(state.modifiedFiles, path);
     state.toolStatus = undefined;
@@ -838,8 +1051,15 @@ export function appendSubagentStdoutChunk(state: SubagentStreamState, chunk: str
   const bufferedLimit = piJsonLineLimit(bufferedEventType);
   if (byteLength(state.stdoutBuffer) > bufferedLimit) {
     if (!PI_JSON_AGGREGATE_EVENT_TYPES.has(bufferedEventType)) {
-      appendSubagentRawText(state, `[oversized child output line omitted: more than ${formatByteCount(bufferedLimit)}]\n`);
-      recordProtocolDiagnostic(state, "oversized_line", `${bufferedEventType ? `${bufferedEventType}: ` : ""}more than ${formatByteCount(bufferedLimit)}`);
+      appendSubagentRawText(
+        state,
+        `[oversized child output line omitted: more than ${formatByteCount(bufferedLimit)}]\n`,
+      );
+      recordProtocolDiagnostic(
+        state,
+        "oversized_line",
+        `${bufferedEventType ? `${bufferedEventType}: ` : ""}more than ${formatByteCount(bufferedLimit)}`,
+      );
     }
     state.stdoutBuffer = "";
     state.stdoutDiscardingOversizeLine = true;

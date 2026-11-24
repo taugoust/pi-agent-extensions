@@ -1,12 +1,19 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerWorktreeCommand } from "./command.js";
-import { createWorktreeSettingsRuntime, settingsFilePath, type WorktreeSettingsRuntime } from "./settings.js";
+import {
+  createWorktreeSettingsRuntime,
+  settingsFilePath,
+  type WorktreeSettingsRuntime,
+} from "./settings.js";
 
 interface WorktreeExtensionOptions {
   settings?: WorktreeSettingsRuntime;
 }
 
-export default function worktreeExtension(pi: ExtensionAPI, options: WorktreeExtensionOptions = {}): void {
+export default function worktreeExtension(
+  pi: ExtensionAPI,
+  options: WorktreeExtensionOptions = {},
+): void {
   const settings = options.settings ?? createWorktreeSettingsRuntime({ path: settingsFilePath });
   let sessionGeneration = 0;
   let menuController = new AbortController();

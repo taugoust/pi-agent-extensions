@@ -37,7 +37,9 @@ export class DetachableForegroundExecution<TUpdate, TResult, TDetached> {
       this.resolveDecision = resolve;
       this.rejectDecision = reject;
     });
-    this.completionPromise = Promise.resolve().then(() => run(this.controller.signal, (value) => this.emit(value)));
+    this.completionPromise = Promise.resolve().then(() =>
+      run(this.controller.signal, (value) => this.emit(value)),
+    );
     this.completionPromise.then(
       (result) => this.onSettled({ ok: true, result }),
       (error) => this.onSettled({ ok: false, error }),
@@ -58,10 +60,16 @@ export class DetachableForegroundExecution<TUpdate, TResult, TDetached> {
 
   abort(reason?: unknown): void {
     if (this.controller.signal.aborted) return;
-    this.controller.abort(reason instanceof Error ? reason : new Error(typeof reason === "string" ? reason : "Foreground subagent cancelled"));
+    this.controller.abort(
+      reason instanceof Error
+        ? reason
+        : new Error(typeof reason === "string" ? reason : "Foreground subagent cancelled"),
+    );
   }
 
-  detach(adopt: (execution: ForegroundAdoption<TUpdate, TResult>) => Promise<TDetached>): Promise<TDetached | undefined> {
+  detach(
+    adopt: (execution: ForegroundAdoption<TUpdate, TResult>) => Promise<TDetached>,
+  ): Promise<TDetached | undefined> {
     if (this.state === "completed") return Promise.resolve(undefined);
     if (this.state === "detached") return Promise.resolve(this.detachedValue);
     if (this.detachAttempt) return this.detachAttempt;
@@ -94,17 +102,29 @@ export class DetachableForegroundExecution<TUpdate, TResult, TDetached> {
   private emit(value: TUpdate): void {
     this.latest = value;
     if (this.state === "active") {
-      try { this.foregroundUpdate?.(value); } catch { /* Rendering failures must not stop execution. */ }
+      try {
+        this.foregroundUpdate?.(value);
+      } catch {
+        /* Rendering failures must not stop execution. */
+      }
     }
     for (const listener of this.backgroundListeners) {
-      try { listener(value); } catch { /* Persistence failures are handled by the adopter. */ }
+      try {
+        listener(value);
+      } catch {
+        /* Persistence failures are handled by the adopter. */
+      }
     }
   }
 
   private subscribe(listener: (update: TUpdate) => void): () => void {
     this.backgroundListeners.add(listener);
     if (this.latest !== undefined) {
-      try { listener(this.latest); } catch { /* The next update can retry. */ }
+      try {
+        listener(this.latest);
+      } catch {
+        /* The next update can retry. */
+      }
     }
     return () => this.backgroundListeners.delete(listener);
   }

@@ -80,18 +80,33 @@ export function registerWorktreeCommand(
     description: "Interactively manage Git worktrees and their default root",
     handler: async (args, ctx) => {
       if (args.trim()) {
-        const request = /^(complete|cleanup)\s+(subagent-task-[a-f0-9]{24})(?:\s+([\s\S]+))?$/.exec(args.trim());
+        const request = /^(complete|cleanup)\s+(subagent-task-[a-f0-9]{24})(?:\s+([\s\S]+))?$/.exec(
+          args.trim(),
+        );
         if (!request || (request[1] === "cleanup" && request[3])) {
-          safeNotify(ctx, "Usage: /worktree, /worktree complete <task-id> <rationale>, or /worktree cleanup <task-id>", "warning");
+          safeNotify(
+            ctx,
+            "Usage: /worktree, /worktree complete <task-id> <rationale>, or /worktree cleanup <task-id>",
+            "warning",
+          );
           return;
         }
         try {
           const owner = getMenuOwner();
           await ctx.waitForIdle();
-          await completionFlow(ctx, request[1] as "complete" | "cleanup", request[2], request[3], () => {
-            if (owner.signal.aborted || !owner.isCurrent()) throw new Error("Worktree command session changed");
-          });
-        } catch (error) { safeNotify(ctx, formatError(error), "error"); }
+          await completionFlow(
+            ctx,
+            request[1] as "complete" | "cleanup",
+            request[2],
+            request[3],
+            () => {
+              if (owner.signal.aborted || !owner.isCurrent())
+                throw new Error("Worktree command session changed");
+            },
+          );
+        } catch (error) {
+          safeNotify(ctx, formatError(error), "error");
+        }
         return;
       }
       if (!ctx.hasUI) {
@@ -151,7 +166,12 @@ export function registerWorktreeCommand(
             status: async ({ signal }) => {
               try {
                 const statusRecords = await listWorktrees(pi, ctx.cwd, signal);
-                state.statusCards = await loadWorktreeStatusCards(pi, statusRecords, currentPath, signal);
+                state.statusCards = await loadWorktreeStatusCards(
+                  pi,
+                  statusRecords,
+                  currentPath,
+                  signal,
+                );
                 if (signal.aborted || !owner.isCurrent()) return { kind: "close" };
                 return { kind: "to", screen: "status" };
               } catch (error) {
@@ -161,8 +181,10 @@ export function registerWorktreeCommand(
               }
             },
             add: async () => runFlow(() => addFlow(pi, ctx, records, root.effectiveRoot)),
-            switch: async ({ signal }) => runFlow(() => switchFlow(pi, ctx, records, currentPath, signal)),
-            remove: async ({ signal }) => runFlow(() => removeFlow(pi, ctx, records, currentPath, signal)),
+            switch: async ({ signal }) =>
+              runFlow(() => switchFlow(pi, ctx, records, currentPath, signal)),
+            remove: async ({ signal }) =>
+              runFlow(() => removeFlow(pi, ctx, records, currentPath, signal)),
             prune: async () => runFlow(() => pruneFlow(pi, ctx, records)),
             configure: async () => runFlow(() => configureRootFlow(ctx, settings)),
           },
@@ -179,10 +201,15 @@ export function registerWorktreeCommand(
   });
 }
 
-async function configureRootFlow(ctx: ExtensionCommandContext, settings: WorktreeSettingsRuntime): Promise<void> {
+async function configureRootFlow(
+  ctx: ExtensionCommandContext,
+  settings: WorktreeSettingsRuntime,
+): Promise<void> {
   const current = await settings.reload();
   if (!current.canSave) {
-    throw new Error(current.warning ?? `Fix ${settings.getPath()} before changing pi-worktree settings.`);
+    throw new Error(
+      current.warning ?? `Fix ${settings.getPath()} before changing pi-worktree settings.`,
+    );
   }
   const requested = await ctx.ui.input(
     "Worktree root (blank restores declarative/default root)",
@@ -213,7 +240,9 @@ export async function addFlow(
     throw new Error("The main worktree is bare; pi-worktree cannot derive a safe default path.");
   }
   if (!existsSync(main.path)) {
-    throw new Error(`The registered main worktree path is stale: ${main.path}. Repair it with Git first.`);
+    throw new Error(
+      `The registered main worktree path is stale: ${main.path}. Repair it with Git first.`,
+    );
   }
 
   const requestedBranch = await ctx.ui.input("Branch for the new worktree", "feat/my-change");
@@ -263,7 +292,9 @@ export async function addFlow(
     stripTerminalControls(suggestedPath),
   );
   if (requestedPath === undefined) return;
-  const targetPath = pathIdentity(requestedPath.trim() ? resolve(ctx.cwd, requestedPath.trim()) : suggestedPath);
+  const targetPath = pathIdentity(
+    requestedPath.trim() ? resolve(ctx.cwd, requestedPath.trim()) : suggestedPath,
+  );
   assertTargetFilesystemAvailable(targetPath);
   const pathCollision = records.find((record) => pathsEqual(record.path, targetPath));
   if (pathCollision) {
@@ -277,11 +308,15 @@ export async function addFlow(
   const latestRecords = await listWorktrees(pi, ctx.cwd, ctx.signal);
   const latestOccupied = worktreeForBranch(latestRecords, branch);
   if (latestOccupied) {
-    throw new Error(`Branch ${branch} is now checked out at ${latestOccupied.path}; select it again.`);
+    throw new Error(
+      `Branch ${branch} is now checked out at ${latestOccupied.path}; select it again.`,
+    );
   }
   const latestPathCollision = latestRecords.find((record) => pathsEqual(record.path, targetPath));
   if (latestPathCollision) {
-    throw new Error(`The target path is now registered as a worktree: ${latestPathCollision.path}. Select it again.`);
+    throw new Error(
+      `The target path is now registered as a worktree: ${latestPathCollision.path}. Select it again.`,
+    );
   }
   const branchStillExists = await localBranchExists(pi, ctx.cwd, branch, ctx.signal);
   if (branchStillExists !== branchExists) {
@@ -301,7 +336,9 @@ export async function addFlow(
     const updated = await listWorktrees(pi, ctx.cwd, ctx.signal);
     const verified = updated.find((record) => pathsEqual(record.path, targetPath));
     if (!verified || verified.branch !== branch || verified.head !== provenance.oid) {
-      throw new Error("the expected path, branch, and approved HEAD were not present in Git porcelain output");
+      throw new Error(
+        "the expected path, branch, and approved HEAD were not present in Git porcelain output",
+      );
     }
     created = verified;
   } catch (error) {
@@ -309,7 +346,14 @@ export async function addFlow(
       `Git add completed, so the worktree was retained at ${targetPath}, but verification failed: ${formatError(error)}. Inspect git worktree list before retrying.`,
     );
   }
-  const commonDir = (await runGit(pi, ["rev-parse", "--path-format=absolute", "--git-common-dir"], targetPath, ctx.signal)).stdout.trim();
+  const commonDir = (
+    await runGit(
+      pi,
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      targetPath,
+      ctx.signal,
+    )
+  ).stdout.trim();
   const gitDir = await worktreeAdministrativeDirectory(pi, targetPath, ctx.signal);
   const gitStat = await stat(gitDir);
   pi.appendEntry("workflow-worktree-created", {
@@ -318,13 +362,21 @@ export async function addFlow(
     path: created.path,
     commonDir,
     gitDir,
-    identity: { dev: String(gitStat.dev), ino: String(gitStat.ino), birthtimeMs: String(gitStat.birthtimeMs) },
+    identity: {
+      dev: String(gitStat.dev),
+      ino: String(gitStat.ino),
+      birthtimeMs: String(gitStat.birthtimeMs),
+    },
     createdAt: new Date().toISOString(),
   });
   safeNotify(ctx, `Created worktree ${targetPath} on branch ${branch}.`, "info");
 
   if (
-    offerSessionSwitch && await ctx.ui.confirm("Switch Pi workspace?", stripTerminalControls(`Continue this conversation in ${targetPath}?`))
+    offerSessionSwitch &&
+    (await ctx.ui.confirm(
+      "Switch Pi workspace?",
+      stripTerminalControls(`Continue this conversation in ${targetPath}?`),
+    ))
   ) {
     const latest = await revalidateWorktreeIdentity(pi, ctx, created);
     if (latest.prunableReason !== undefined || !existsSync(latest.path)) {
@@ -375,7 +427,9 @@ function assertTargetFilesystemAvailable(targetPath: string): void {
   }
   const unsafeAncestor = unresolvableSymlinkAncestor(targetPath);
   if (unsafeAncestor) {
-    throw new Error(`The target path has an unresolvable symbolic-link ancestor: ${unsafeAncestor}.`);
+    throw new Error(
+      `The target path has an unresolvable symbolic-link ancestor: ${unsafeAncestor}.`,
+    );
   }
 }
 
@@ -419,7 +473,8 @@ export async function removeFlow(
   const candidates = records.filter(
     (record) => !record.isMain && !record.bare && !pathsEqual(record.path, currentPath),
   );
-  const selected = selectedPath ? candidates.find(record => pathsEqual(record.path, selectedPath))
+  const selected = selectedPath
+    ? candidates.find((record) => pathsEqual(record.path, selectedPath))
     : await selectWorktree(ctx, "Remove linked worktree", candidates, currentPath, signal);
   if (selectedPath && !selected) throw new Error("Selected worktree cannot be removed");
   if (!selected) return;
@@ -433,7 +488,9 @@ export async function removeFlow(
     throw new Error("The selected worktree path is stale. Use prune instead of remove.");
   }
 
-  const inventory = classifyRemovalInventory(await worktreeInventory(pi, selected.path, ctx.signal));
+  const inventory = classifyRemovalInventory(
+    await worktreeInventory(pi, selected.path, ctx.signal),
+  );
   if (inventory.protected.length > 0) {
     throw new Error(
       `Removal refused because ${selected.path} contains tracked, untracked, index-flagged, or submodule data:\n${inventory.protected.join("\n")}`,
@@ -468,7 +525,13 @@ export async function removeFlow(
     return;
   }
 
-  await assertAdministrativeHistoryUnchanged(pi, ctx, selected.path, administrativePath, approvedHistoryRisks);
+  await assertAdministrativeHistoryUnchanged(
+    pi,
+    ctx,
+    selected.path,
+    administrativePath,
+    approvedHistoryRisks,
+  );
 
   const beforeRemoval = await listWorktrees(pi, ctx.cwd, ctx.signal);
   const latest = beforeRemoval.find((record) => pathsEqual(record.path, selected.path));
@@ -477,9 +540,13 @@ export async function removeFlow(
     throw new Error(`Worktree ${selected.path} changed identity; select it again.`);
   }
   if (latest.isMain || latest.lockedReason !== undefined || latest.prunableReason !== undefined) {
-    throw new Error(`Worktree ${selected.path} changed state after confirmation; removal was refused.`);
+    throw new Error(
+      `Worktree ${selected.path} changed state after confirmation; removal was refused.`,
+    );
   }
-  const latestInventory = classifyRemovalInventory(await worktreeInventory(pi, latest.path, ctx.signal));
+  const latestInventory = classifyRemovalInventory(
+    await worktreeInventory(pi, latest.path, ctx.signal),
+  );
   if (latestInventory.protected.length > 0) {
     throw new Error(
       `Removal refused because new protected local data appeared after confirmation:\n${latestInventory.protected.join("\n")}`,
@@ -491,7 +558,13 @@ export async function removeFlow(
     );
   }
   await assertDetachedHeadIsDurable(pi, ctx, latest);
-  await assertAdministrativeHistoryUnchanged(pi, ctx, latest.path, administrativePath, approvedHistoryRisks);
+  await assertAdministrativeHistoryUnchanged(
+    pi,
+    ctx,
+    latest.path,
+    administrativePath,
+    approvedHistoryRisks,
+  );
   await removeWorktree(pi, ctx.cwd, latest.path, ctx.signal);
   const updated = await listWorktrees(pi, ctx.cwd, ctx.signal);
   if (updated.some((record) => pathsEqual(record.path, selected.path))) {
@@ -505,7 +578,9 @@ export async function pruneFlow(
   ctx: ExtensionCommandContext,
   records: readonly WorktreeRecord[],
 ): Promise<void> {
-  for (const record of records.filter((candidate) => candidate.prunableReason !== undefined && candidate.detached)) {
+  for (const record of records.filter(
+    (candidate) => candidate.prunableReason !== undefined && candidate.detached,
+  )) {
     await assertDetachedHeadIsDurable(pi, ctx, record);
   }
   const preview = await prunePreview(pi, ctx.cwd, ctx.signal);
@@ -519,14 +594,18 @@ export async function pruneFlow(
   ctx.ui.notify(`git worktree prune --dry-run --verbose\n${safePreview}`, "warning");
   if (
     !(await ctx.ui.confirm(
-      recoveryWarning ? "Prune metadata and discard recovery history" : "Prune stale worktree metadata",
+      recoveryWarning
+        ? "Prune metadata and discard recovery history"
+        : "Prune stale worktree metadata",
       stripTerminalControls(`${safePreview}${recoveryWarning}`),
     ))
   ) {
     return;
   }
   const latest = await listWorktrees(pi, ctx.cwd, ctx.signal);
-  for (const record of latest.filter((candidate) => candidate.prunableReason !== undefined && candidate.detached)) {
+  for (const record of latest.filter(
+    (candidate) => candidate.prunableReason !== undefined && candidate.detached,
+  )) {
     await assertDetachedHeadIsDurable(pi, ctx, record);
   }
   const beforePreviewHistoryRisks = await inspectAdministrativePruneCandidates(pi, ctx);
@@ -535,11 +614,18 @@ export async function pruneFlow(
   }
   const latestPreview = await prunePreview(pi, ctx.cwd, ctx.signal);
   const finalHistoryRisks = await inspectAdministrativePruneCandidates(pi, ctx);
-  if (latestPreview !== preview || !sameAdministrativeHistoryRisks(approvedHistoryRisks, finalHistoryRisks)) {
+  if (
+    latestPreview !== preview ||
+    !sameAdministrativeHistoryRisks(approvedHistoryRisks, finalHistoryRisks)
+  ) {
     throw new Error("Stale worktree metadata changed after confirmation; run prune again.");
   }
   const output = await pruneWorktrees(pi, ctx.cwd, ctx.signal);
-  safeNotify(ctx, output ? `Pruned stale worktree metadata:\n${output}` : "Pruned stale worktree metadata.", "info");
+  safeNotify(
+    ctx,
+    output ? `Pruned stale worktree metadata:\n${output}` : "Pruned stale worktree metadata.",
+    "info",
+  );
 }
 
 async function assertAdministrativeHistoryUnchanged(
@@ -549,7 +635,11 @@ async function assertAdministrativeHistoryUnchanged(
   approvedAdministrativePath: string,
   approvedHistoryRisks: readonly AdministrativeHistoryRisk[],
 ): Promise<void> {
-  const latestAdministrativePath = await worktreeAdministrativeDirectory(pi, selectedPath, ctx.signal);
+  const latestAdministrativePath = await worktreeAdministrativeDirectory(
+    pi,
+    selectedPath,
+    ctx.signal,
+  );
   const latestHistoryRisks = historyRisks(
     selectedPath,
     await unreachableAdministrativeHistoryOids(pi, ctx, latestAdministrativePath),
@@ -582,13 +672,19 @@ async function inspectAdministrativePruneCandidates(
           `Prune refused because administrative worktree ${candidate.id} has detached HEAD ${candidate.head}, which is not reachable from a durable ref.`,
         );
       }
-    } else if (!candidate.branchRef || !(await durableRefExists(pi, ctx.cwd, candidate.branchRef, ctx.signal))) {
+    } else if (
+      !candidate.branchRef ||
+      !(await durableRefExists(pi, ctx.cwd, candidate.branchRef, ctx.signal))
+    ) {
       throw new Error(
         `Prune refused because administrative worktree ${candidate.id} does not resolve to a durable ref.`,
       );
     }
     risks.push(
-      ...historyRisks(candidate.id, await unreachableAdministrativeHistoryOids(pi, ctx, candidate.administrativePath)),
+      ...historyRisks(
+        candidate.id,
+        await unreachableAdministrativeHistoryOids(pi, ctx, candidate.administrativePath),
+      ),
     );
   }
   return normalizeAdministrativeHistoryRisks(risks);
@@ -611,7 +707,9 @@ function historyRisks(label: string, oids: string[]): AdministrativeHistoryRisk[
   return oids.length > 0 ? [{ label, oids }] : [];
 }
 
-function normalizeAdministrativeHistoryRisks(risks: readonly AdministrativeHistoryRisk[]): AdministrativeHistoryRisk[] {
+function normalizeAdministrativeHistoryRisks(
+  risks: readonly AdministrativeHistoryRisk[],
+): AdministrativeHistoryRisk[] {
   return risks
     .map((risk) => ({ label: risk.label, oids: [...new Set(risk.oids)].sort() }))
     .filter((risk) => risk.oids.length > 0)
@@ -631,7 +729,10 @@ function sameAdministrativeHistoryRisks(
 function formatAdministrativeRecoveryWarning(risks: readonly AdministrativeHistoryRisk[]): string {
   if (risks.length === 0) return "";
   const entries = risks
-    .map((risk) => `${stripTerminalControls(risk.label)}: ${risk.oids.map(stripTerminalControls).join(", ")}`)
+    .map(
+      (risk) =>
+        `${stripTerminalControls(risk.label)}: ${risk.oids.map(stripTerminalControls).join(", ")}`,
+    )
     .join("; ");
   return ` Administrative recovery warning: these commits are not reachable from a branch, tag, or remote ref: ${entries}. Discarding their recovery pointers means they may later be garbage-collected.`;
 }
@@ -672,7 +773,8 @@ async function assertDetachedHeadIsDurable(
   record: WorktreeRecord,
 ): Promise<void> {
   if (!record.detached) return;
-  if (!record.head) throw new Error(`Detached worktree ${record.path} has no HEAD object; refusing.`);
+  if (!record.head)
+    throw new Error(`Detached worktree ${record.path} has no HEAD object; refusing.`);
   const refs = await durableRefsContaining(pi, ctx.cwd, record.head, ctx.signal);
   if (refs.length === 0) {
     throw new Error(
@@ -741,7 +843,11 @@ async function selectWorktree(
   return selected;
 }
 
-function safeNotify(ctx: ExtensionCommandContext, message: string, level: "info" | "warning" | "error"): void {
+function safeNotify(
+  ctx: ExtensionCommandContext,
+  message: string,
+  level: "info" | "warning" | "error",
+): void {
   try {
     ctx.ui.notify(stripTerminalControls(message), level);
   } catch {

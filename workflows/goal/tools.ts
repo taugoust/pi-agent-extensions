@@ -9,7 +9,9 @@ import {
 import { Markdown } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
-  completeVerifiedGoal, completionSummaryRejection, MAX_COMPLETION_SUMMARY_LENGTH,
+  completeVerifiedGoal,
+  completionSummaryRejection,
+  MAX_COMPLETION_SUMMARY_LENGTH,
 } from "./completion.js";
 import { registerGoalManagement } from "./model-control.js";
 import { registerGoalPrTool, unmergedPrs } from "./pr-tool.ts";
@@ -153,14 +155,23 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       }
 
       // The merge gate: every PR the goal recorded is merged with green CI.
-      const unmerged = await unmergedPrs(runtime, ctx, signal)
-        .catch(error => `its PRs could not be checked (${error instanceof Error ? error.message : String(error)})`);
+      const unmerged = await unmergedPrs(runtime, ctx, signal).catch(
+        (error) =>
+          `its PRs could not be checked (${error instanceof Error ? error.message : String(error)})`,
+      );
       const finalGoal = runtime.activeGoal;
-      const prRejection = unmerged ?? (finalGoal?.id === completedGoal.id ? undefined : "the goal changed while its PRs were checked");
+      const prRejection =
+        unmerged ??
+        (finalGoal?.id === completedGoal.id
+          ? undefined
+          : "the goal changed while its PRs were checked");
       if (prRejection) {
         const rejection = `Goal completion rejected: ${prRejection}.`;
         notifyTerminal(ctx.ui, rejection, "warning");
-        return { content: toolContent(rejection), details: completionDetails(goal, requestedGoalId, summary) };
+        return {
+          content: toolContent(rejection),
+          details: completionDetails(goal, requestedGoalId, summary),
+        };
       }
 
       completeVerifiedGoal(runtime, ctx, finalGoal!, summary);
@@ -206,9 +217,8 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       const requestedGoalId = blockedGoal?.id ?? "";
       const reason = typeof params.reason === "string" ? params.reason.trim() : "";
       const evidence = typeof params.evidence === "string" ? params.evidence.trim() : "";
-      const repeatedTurns = typeof params.repeated_turns === "number"
-        ? params.repeated_turns
-        : Number.NaN;
+      const repeatedTurns =
+        typeof params.repeated_turns === "number" ? params.repeated_turns : Number.NaN;
       const reject = (rejectionReason: string, terminate = false) => {
         const rejection = `goal_blocked rejected: ${rejectionReason}.`;
         notifyTerminal(ctx.ui, rejection, "warning");
@@ -298,9 +308,8 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       const goal = activeGoal?.text ?? "unknown goal";
       const requestedGoalId = activeGoal?.id ?? "";
       const reason = typeof params.reason === "string" ? params.reason.trim() : "";
-      const resumeAfterMs = typeof params.resume_after_ms === "number"
-        ? params.resume_after_ms
-        : undefined;
+      const resumeAfterMs =
+        typeof params.resume_after_ms === "number" ? params.resume_after_ms : undefined;
       const reject = (rejectionReason: string) => {
         const rejection = `goal_wait rejected: ${rejectionReason}.`;
         notifyTerminal(ctx.ui, rejection, "warning");
@@ -324,20 +333,22 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       }
       if (!reason) return reject("reason is empty");
       if (reason.length > MAX_GOAL_WAIT_REASON_LENGTH) return reject("reason is too long");
-      const validDelay = Number.isInteger(resumeAfterMs)
-        && resumeAfterMs! >= 1 && resumeAfterMs! <= MAX_GOAL_WAIT_DELAY_MS;
+      const validDelay =
+        Number.isInteger(resumeAfterMs) &&
+        resumeAfterMs! >= 1 &&
+        resumeAfterMs! <= MAX_GOAL_WAIT_DELAY_MS;
       if (resumeAfterMs !== undefined && !validDelay) {
         return reject(`resume_after_ms must be a whole number from 1 to ${MAX_GOAL_WAIT_DELAY_MS}`);
       }
 
       const { requestedMs, effectiveMs } = resolveGoalWaitDelay(resumeAfterMs);
       const previous = activeGoal.waiting;
-      const waiting = previous && resumeAfterMs === undefined
-        ? { ...previous, reason }
-        : createGoalWait(reason, resumeAfterMs);
-      const changed = !previous
-        || previous.reason !== waiting.reason
-        || previous.resumeAt !== waiting.resumeAt;
+      const waiting =
+        previous && resumeAfterMs === undefined
+          ? { ...previous, reason }
+          : createGoalWait(reason, resumeAfterMs);
+      const changed =
+        !previous || previous.reason !== waiting.reason || previous.resumeAt !== waiting.resumeAt;
       const waitingGoal = runtime.enterGoalWait(ctx, activeGoal.id, waiting);
       if (!waitingGoal) return reject("active goal changed before waiting transition");
       runtime.markGoalSeen(waitingGoal);
@@ -357,7 +368,14 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       };
       return {
         // The model and Paseo read this text. The structured state stays in details.
-        content: toolContent(goalWaitText(waiting.resumeAt, deadline, requestedMs, clampedFrom === undefined ? undefined : effectiveMs)),
+        content: toolContent(
+          goalWaitText(
+            waiting.resumeAt,
+            deadline,
+            requestedMs,
+            clampedFrom === undefined ? undefined : effectiveMs,
+          ),
+        ),
         details,
         terminate: true,
       };
@@ -385,8 +403,10 @@ export function goalCompletionMarkdown(result: GoalCompletionRenderResult) {
 
   const details = result.details;
   const summary =
-    details && typeof details === "object" && "summary" in details
-      && typeof details.summary === "string"
+    details &&
+    typeof details === "object" &&
+    "summary" in details &&
+    typeof details.summary === "string"
       ? details.summary
       : content.slice(completionPrefix.length);
   const safeSummary = safeTerminalText(summary);
@@ -440,12 +460,22 @@ export function goalWaitText(
   requestedMs?: number,
   clampedMs?: number,
 ): string {
-  const hours = (ms: number) => ms >= 3_600_000 ? `${+(ms / 3_600_000).toFixed(1)} h`
-    : ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : ms >= 1000 ? `${Math.round(ms / 1000)} s` : `${ms} ms`;
-  if (resumeAt === undefined) return "Waiting. No deadline: only a wake event, user input or resume continues the goal.";
+  const hours = (ms: number) =>
+    ms >= 3_600_000
+      ? `${+(ms / 3_600_000).toFixed(1)} h`
+      : ms >= 60_000
+        ? `${Math.round(ms / 60_000)} min`
+        : ms >= 1000
+          ? `${Math.round(ms / 1000)} s`
+          : `${ms} ms`;
+  if (resumeAt === undefined)
+    return "Waiting. No deadline: only a wake event, user input or resume continues the goal.";
   const at = new Date(resumeAt).toISOString().slice(11, 16);
   const kept = deadline === "preserved" ? "earlier deadline kept" : "deadline set";
-  const clamp = requestedMs !== undefined && clampedMs !== undefined ? ` Requested ${hours(requestedMs)}; clamped to ${hours(clampedMs)}.` : "";
+  const clamp =
+    requestedMs !== undefined && clampedMs !== undefined
+      ? ` Requested ${hours(requestedMs)}; clamped to ${hours(clampedMs)}.`
+      : "";
   return `Waiting. Continues by itself at ${at} UTC (${kept}) if nothing wakes it sooner.${clamp}`;
 }
 

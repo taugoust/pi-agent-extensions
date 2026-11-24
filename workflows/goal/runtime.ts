@@ -1,17 +1,28 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-  checkpointGoalActiveTime, formatDuration, formatTokenCount, updateGoalUsage,
+  checkpointGoalActiveTime,
+  formatDuration,
+  formatTokenCount,
+  updateGoalUsage,
 } from "./accounting.js";
 import {
-  createGoalRecord, goalControlFingerprint, isGoalExecutionStopped as goalStatusIsTerminal,
+  createGoalRecord,
+  goalControlFingerprint,
+  isGoalExecutionStopped as goalStatusIsTerminal,
   transitionGoalRecord,
 } from "../../shared/goal-model.ts";
 import {
-  resolveGoalLimits, validateGoalLimitOverrides, type GoalContinuationLimits,
+  resolveGoalLimits,
+  validateGoalLimitOverrides,
+  type GoalContinuationLimits,
 } from "../../shared/delegated-goal-policy.ts";
 import {
-  formatError, isStaleContextError, notifyTerminal, safeGoalMenuText, truncateNotification,
+  formatError,
+  isStaleContextError,
+  notifyTerminal,
+  safeGoalMenuText,
+  truncateNotification,
 } from "./errors.js";
 import {
   createGoalContextContract,
@@ -22,7 +33,9 @@ import {
   hasInactiveGoalContextContract,
 } from "./goal-contract.js";
 import {
-  appendGoalPromptMarker, extractContinuationMarker, extractGoalPromptMarker,
+  appendGoalPromptMarker,
+  extractContinuationMarker,
+  extractGoalPromptMarker,
 } from "./markers.js";
 import {
   type ActiveGoal,
@@ -38,12 +51,21 @@ import { nextToolFreeRepeatState, resetGoalSafetyEpoch } from "./safety.js";
 export { queueGoalSafetyReset, resetGoalSafetyEpoch } from "./safety.js";
 
 import {
-  DEFAULT_GOAL_SETTINGS, type GoalSettings, type GoalSettingsLoadIssue,
+  DEFAULT_GOAL_SETTINGS,
+  type GoalSettings,
+  type GoalSettingsLoadIssue,
 } from "./settings.js";
 import { assertGoalToolsAvailable, goalToolsAvailable } from "./tool-policy.js";
 import { type GoalWait, type GoalWake, GoalWaitTimer } from "./wait.js";
 import { WorkflowMutex, type WorkflowMutexOwner } from "./workflow-mutex.js";
-import { applyPrEvent, isWakeEvent, openPrRefs, PrWatchers, type GoalPr, type PrEvent } from "./prs.ts";
+import {
+  applyPrEvent,
+  isWakeEvent,
+  openPrRefs,
+  PrWatchers,
+  type GoalPr,
+  type PrEvent,
+} from "./prs.ts";
 
 export {
   GOAL_BLOCKED_TOOL,
@@ -165,7 +187,9 @@ function buildGoalStateSnapshot(
   reason: string | undefined,
 ): GoalStateSnapshot {
   const snapshot: GoalStateSnapshot = {
-    goalId: goal.id, activationId: goal.activationId ?? goal.id, status: goal.status,
+    goalId: goal.id,
+    activationId: goal.activationId ?? goal.id,
+    status: goal.status,
   };
   if (goal.status === "complete" && summary) snapshot.summary = summary;
   else if (goal.status !== "complete" && isTerminalGoalStatus(goal.status) && reason) {
@@ -236,7 +260,7 @@ const BUDGET_WRAP_UP_PROMPT = [
   "Weak, indirect, or missing evidence is not enough.",
   "Budget exhaustion is not completion.",
 ].join(" ");
-export { isContradictoryCompletionSummary } from './completion-summary.ts';
+export { isContradictoryCompletionSummary } from "./completion-summary.ts";
 // One instance belongs to one extension factory. It owns all mutable session state
 // and the cross-cutting invariants used by command and lifecycle orchestration.
 // Keep this state machine cohesive despite its size: prompt ownership, continuation,
@@ -249,7 +273,9 @@ export class GoalRuntime {
   settings: GoalSettings = DEFAULT_GOAL_SETTINGS;
   settingsLoadIssue?: GoalSettingsLoadIssue;
   private currentGoal?: ActiveGoal;
-  get activeGoal() { return this.currentGoal; }
+  get activeGoal() {
+    return this.currentGoal;
+  }
   set activeGoal(goal: ActiveGoal | undefined) {
     const previous = this.currentGoal;
     if (previous && !sameGoalActivation(previous, goal)) {
@@ -361,9 +387,11 @@ export class GoalRuntime {
   }
 
   ownsWorkflow(goal: ActiveGoal | undefined = this.activeGoal) {
-    return goal?.status === "active"
-      && sameGoalActivation(goal, this.activeGoal)
-      && this.workflowMutex.isOwner(this.workflowOwner);
+    return (
+      goal?.status === "active" &&
+      sameGoalActivation(goal, this.activeGoal) &&
+      this.workflowMutex.isOwner(this.workflowOwner)
+    );
   }
 
   releaseWorkflow() {
@@ -402,8 +430,8 @@ export class GoalRuntime {
   canRecordGoalUsage(goalId?: string) {
     return (
       this.agentRunGoalId !== null &&
-      (this.agentRunActivationId === undefined
-        || this.agentRunActivationId === activationIdOf(this.activeGoal)) &&
+      (this.agentRunActivationId === undefined ||
+        this.agentRunActivationId === activationIdOf(this.activeGoal)) &&
       (goalId === undefined || this.agentRunGoalId === undefined || this.agentRunGoalId === goalId)
     );
   }
@@ -419,9 +447,9 @@ export class GoalRuntime {
 
   hasActiveGoalRecovery() {
     return Boolean(
-      this.activeGoal
-        && this.goalRecovery?.goalId === this.activeGoal.id
-        && this.goalRecovery.activationId === activationIdOf(this.activeGoal),
+      this.activeGoal &&
+      this.goalRecovery?.goalId === this.activeGoal.id &&
+      this.goalRecovery.activationId === activationIdOf(this.activeGoal),
     );
   }
 
@@ -436,9 +464,10 @@ export class GoalRuntime {
   beginRecoveryRunIfNeeded() {
     if (this.agentRunGoalId !== undefined || !this.activeGoal) return;
     const recovery = this.goalRecovery;
-    const recoversActiveGoal = recovery
-      && recovery.goalId === this.activeGoal.id
-      && recovery.activationId === activationIdOf(this.activeGoal);
+    const recoversActiveGoal =
+      recovery &&
+      recovery.goalId === this.activeGoal.id &&
+      recovery.activationId === activationIdOf(this.activeGoal);
     if (!recoversActiveGoal) return;
     this.beginAgentRun(recovery.goalId, recovery.automaticOwner ? "automatic" : "manual");
   }
@@ -541,9 +570,10 @@ export class GoalRuntime {
       if (this.continuationDelivery?.marker === intent.marker) {
         this.continuationDelivery = undefined;
       }
-      const intentStillActive = this.activeGoal?.id === intent.goalId
-        && activationIdOf(this.activeGoal) === intent.activationId
-        && this.activeGoal.status === "active";
+      const intentStillActive =
+        this.activeGoal?.id === intent.goalId &&
+        activationIdOf(this.activeGoal) === intent.activationId &&
+        this.activeGoal.status === "active";
       if (intentStillActive) {
         this.continuationIntent = intent;
       }
@@ -553,8 +583,9 @@ export class GoalRuntime {
   }
 
   hasContinuationWorkForGoal(goalId: string) {
-    return this.continuationIntent?.goalId === goalId
-      || this.continuationDelivery?.goalId === goalId;
+    return (
+      this.continuationIntent?.goalId === goalId || this.continuationDelivery?.goalId === goalId
+    );
   }
 
   enterGoalWait(ctx: StatusContext, goalId: string, waiting: GoalWait) {
@@ -585,11 +616,17 @@ export class GoalRuntime {
   }
 
   clearGoalWait(
-    ctx: StatusContext, goalId: string, wake: Omit<GoalWake, "at"> = { reason: "explicit_resume" },
+    ctx: StatusContext,
+    goalId: string,
+    wake: Omit<GoalWake, "at"> = { reason: "explicit_resume" },
   ) {
     const goal = this.activeGoal;
-    const waitingActiveGoal = goal && goal.id === goalId && goal.status === "active"
-      && this.ownsWorkflow(goal) && goal.waiting;
+    const waitingActiveGoal =
+      goal &&
+      goal.id === goalId &&
+      goal.status === "active" &&
+      this.ownsWorkflow(goal) &&
+      goal.waiting;
     if (!waitingActiveGoal) return false;
     this.clearGoalWaitTimer();
     const { waiting: _waiting, ...nextGoal } = goal;
@@ -633,8 +670,8 @@ export class GoalRuntime {
     if (retryAttempt) this.goalWaitDeadlineRetry = undefined;
     if (!this.clearGoalWait(ctx, goal.id, { reason: "deadline" })) return false;
     const resumedGoal = this.activeGoal;
-    const resumed = resumedGoal && sameGoalActivation(resumedGoal, goal)
-      && resumedGoal.status === "active";
+    const resumed =
+      resumedGoal && sameGoalActivation(resumedGoal, goal) && resumedGoal.status === "active";
     if (!resumed) return false;
     this.requestContinuation(resumedGoal);
     const dispatched = this.dispatchContinuationIfSettled(ctx);
@@ -658,11 +695,14 @@ export class GoalRuntime {
 
   private handlePrEvent(ref: string, event: PrEvent) {
     const goal = this.activeGoal;
-    const pr = goal?.prs?.find(candidate => candidate.ref === ref);
+    const pr = goal?.prs?.find((candidate) => candidate.ref === ref);
     if (!goal || !pr) return;
     const next = applyPrEvent(pr, event);
     if (next) {
-      this.activeGoal = { ...goal, prs: goal.prs!.map(candidate => candidate.ref === ref ? next : candidate) };
+      this.activeGoal = {
+        ...goal,
+        prs: goal.prs!.map((candidate) => (candidate.ref === ref ? next : candidate)),
+      };
       this.persistGoal(this.activeGoal);
     }
     if (isWakeEvent(event)) this.onPrEvent?.(this.prContext, next ?? pr, event);
@@ -674,7 +714,8 @@ export class GoalRuntime {
   }
 
   private scheduleGoalWaitTimer(ctx: StatusContext, goalId: string, wakeAt: number) {
-    const generation = this.menuGeneration, activation = this.activeGoal;
+    const generation = this.menuGeneration,
+      activation = this.activeGoal;
     this.goalWaitTimer.schedule(wakeAt, () => {
       if (!this.timerStillCurrent(generation, activation, goalId)) return;
       try {
@@ -727,12 +768,16 @@ export class GoalRuntime {
 
   /** A timer armed for `goalId` still applies: same menu session, activation and owner. */
   private timerStillCurrent(
-    generation: number, activation: ActiveGoal | undefined, goalId: string,
+    generation: number,
+    activation: ActiveGoal | undefined,
+    goalId: string,
   ) {
-    return generation === this.menuGeneration
-      && sameGoalActivation(activation, this.activeGoal)
-      && this.activeGoal?.id === goalId
-      && this.ownsWorkflow(this.activeGoal);
+    return (
+      generation === this.menuGeneration &&
+      sameGoalActivation(activation, this.activeGoal) &&
+      this.activeGoal?.id === goalId &&
+      this.ownsWorkflow(this.activeGoal)
+    );
   }
 
   stopActiveGoal(ctx: StatusContext, request: GoalStopRequest) {
@@ -900,9 +945,10 @@ export class GoalRuntime {
   queueBudgetWrapUp(ctx: StatusContext, goal: ActiveGoal) {
     if (!this.ownsWorkflow(goal)) return false;
     const activationId = activationIdOf(goal)!;
-    const wrapUpForGoal = this.budgetWrapUp
-      && this.budgetWrapUp.goalId === goal.id
-      && this.budgetWrapUp.activationId === activationId;
+    const wrapUpForGoal =
+      this.budgetWrapUp &&
+      this.budgetWrapUp.goalId === goal.id &&
+      this.budgetWrapUp.activationId === activationId;
     if (!wrapUpForGoal) this.budgetWrapUp = { goalId: goal.id, activationId, delivered: false };
     if (this.budgetWrapUp.delivered) return true;
     this.budgetWrapUp.delivered = true;
@@ -928,9 +974,10 @@ export class GoalRuntime {
     const goal = this.activeGoal;
     // A live edit is enforced after the entire tool turn, not between parallel tools.
     if (goal && this.pendingLimitBoundary === goal.id) return false;
-    const overBudget = goal?.status === "active"
-      && goal.tokenBudget !== undefined
-      && goal.tokensUsed >= goal.tokenBudget;
+    const overBudget =
+      goal?.status === "active" &&
+      goal.tokenBudget !== undefined &&
+      goal.tokensUsed >= goal.tokenBudget;
     if (!overBudget) return false;
 
     const stoppedGoal = this.stopActiveGoal(ctx, {
@@ -960,7 +1007,10 @@ export class GoalRuntime {
   }
 
   recordAutomaticRunProgress(
-    ctx: StatusContext, goalId: string, messages: readonly unknown[], toolAttempted: boolean,
+    ctx: StatusContext,
+    goalId: string,
+    messages: readonly unknown[],
+    toolAttempted: boolean,
   ) {
     const goal = this.activeGoal;
     if (goal?.id !== goalId || goal.status !== "active") return false;
@@ -1011,9 +1061,10 @@ export class GoalRuntime {
     if (!stoppedGoal) return false;
     const tokens = formatTokenCount(stoppedGoal.tokensUsed);
     const reviewHint = "Open /goal to review and continue.";
-    const limitReached = `Automatic-work limit reached: ${stoppedGoal.automaticModelTurns} of `
-      + `${automaticLimit} responses. Goal progress is saved with ${tokens} cumulative tokens. `
-      + reviewHint;
+    const limitReached =
+      `Automatic-work limit reached: ${stoppedGoal.automaticModelTurns} of ` +
+      `${automaticLimit} responses. Goal progress is saved with ${tokens} cumulative tokens. ` +
+      reviewHint;
     const paused = `Goal paused: ${count}; ${tokens} cumulative tokens. ${reviewHint}`;
     notifyTerminal(ctx.ui, cause === "continuation_limit" ? limitReached : paused, "warning");
     return true;
@@ -1034,10 +1085,11 @@ export class GoalRuntime {
     if (!recovery) return false;
     this.goalRecovery = undefined;
     const goal = this.activeGoal;
-    const recoversGoal = goal?.id === recovery.goalId
-      && activationIdOf(goal) === recovery.activationId
-      && goal.status === "active"
-      && this.ownsWorkflow(goal);
+    const recoversGoal =
+      goal?.id === recovery.goalId &&
+      activationIdOf(goal) === recovery.activationId &&
+      goal.status === "active" &&
+      this.ownsWorkflow(goal);
     if (!recoversGoal) return false;
     const details = recovery.errorMessage ? `: ${truncateNotification(recovery.errorMessage)}` : "";
     if (recovery.kind === "provider_retry") {
@@ -1047,8 +1099,8 @@ export class GoalRuntime {
       if (!waitingGoal) return false;
       notifyTerminal(
         ctx.ui,
-        `Goal waiting after provider retries were exhausted${details}. `
-          + "Run /goal resume to retry; user input interrupts the wait.",
+        `Goal waiting after provider retries were exhausted${details}. ` +
+          "Run /goal resume to retry; user input interrupts the wait.",
         "warning",
       );
       return true;
@@ -1061,8 +1113,8 @@ export class GoalRuntime {
     if (!stoppedGoal) return false;
     notifyTerminal(
       ctx.ui,
-      `Goal blocked after agent error retries were exhausted${details}. `
-        + "Resolve the blocker or run /goal resume to retry.",
+      `Goal blocked after agent error retries were exhausted${details}. ` +
+        "Resolve the blocker or run /goal resume to retry.",
       "warning",
     );
     return true;
@@ -1119,7 +1171,8 @@ export class GoalRuntime {
     const pending = { content: contract.content, publicationId: randomUUID() };
     this.pendingGoalContract = pending;
     const message = {
-      ...contract, details: { ...contract.details, publicationId: pending.publicationId },
+      ...contract,
+      details: { ...contract.details, publicationId: pending.publicationId },
     };
     try {
       // Reserve before sending: a synchronous listener can re-enter publication. Pi does not
@@ -1148,15 +1201,17 @@ export class GoalRuntime {
       return this.pendingGoalContract.content === expected.content ? undefined : expected;
     }
     if (goal) return hasGoalContextContract(contextEntries, goal) ? undefined : expected;
-    const hasHistory = hasGoalContextContractHistory(contextEntries)
-      || hasGoalContextContractHistory(historyEntries);
+    const hasHistory =
+      hasGoalContextContractHistory(contextEntries) ||
+      hasGoalContextContractHistory(historyEntries);
     return !hasHistory || hasInactiveGoalContextContract(contextEntries) ? undefined : expected;
   }
 
   hasGoalContextContractHistory(ctx: StatusContext) {
     const { contextEntries, historyEntries } = goalContractEntries(ctx);
-    return hasGoalContextContractHistory(contextEntries)
-      || hasGoalContextContractHistory(historyEntries);
+    return (
+      hasGoalContextContractHistory(contextEntries) || hasGoalContextContractHistory(historyEntries)
+    );
   }
 
   async sendOwnedGoalPrompt(
@@ -1193,7 +1248,8 @@ export class GoalRuntime {
 
   scheduleContinuationDispatch(ctx: StatusContext, goalId: string) {
     this.clearContinuationDispatchTimer();
-    const generation = this.menuGeneration, activation = this.activeGoal;
+    const generation = this.menuGeneration,
+      activation = this.activeGoal;
     this.continuationDispatchTimer = setTimeout(() => {
       this.continuationDispatchTimer = undefined;
       if (!this.timerStillCurrent(generation, activation, goalId)) return;
@@ -1335,8 +1391,9 @@ export class GoalRuntime {
     // Skills, templates, and later input handlers can transform the raw text after
     // pi-goal records it. Fall back to Pi's delivery priority as a bounded marker:
     // steers drain before follow-ups, and settlement clears stale entries.
-    const fallbackSteerIndex =
-      this.pendingNonGoalInputs.findIndex((pending) => pending.behavior === "steer");
+    const fallbackSteerIndex = this.pendingNonGoalInputs.findIndex(
+      (pending) => pending.behavior === "steer",
+    );
     const fallbackIndex =
       fallbackSteerIndex >= 0
         ? fallbackSteerIndex
@@ -1396,7 +1453,10 @@ export class GoalRuntime {
   /** Bumps the policy version when the goal's limits or identity changed. */
   private trackPolicySignature(goal: ActiveGoal | undefined) {
     const signature = JSON.stringify([
-      goal?.id, goal?.activationId, goal?.tokenBudget, goal?.continuationLimits,
+      goal?.id,
+      goal?.activationId,
+      goal?.tokenBudget,
+      goal?.continuationLimits,
       this.settings.continuationLimits,
     ]);
     if (signature === this.policySignature) return;
@@ -1418,8 +1478,8 @@ export class GoalRuntime {
     if (!sameGoal || this.policyRevision !== revision) {
       throw new Error("Goal identity or policy revision changed");
     }
-    const validBudget = Number.isSafeInteger(tokenBudget)
-      && tokenBudget! >= 1 && tokenBudget! <= MAX_TOKEN_BUDGET;
+    const validBudget =
+      Number.isSafeInteger(tokenBudget) && tokenBudget! >= 1 && tokenBudget! <= MAX_TOKEN_BUDGET;
     if (tokenBudget !== null && !validBudget) throw new Error("Invalid token budget");
     if (continuationLimits === undefined) throw new Error("Explicit continuation limits required");
     validateGoalLimitOverrides(continuationLimits);
@@ -1440,9 +1500,11 @@ export class GoalRuntime {
   enforceGoalLimitsAtBoundary(ctx: StatusContext) {
     if (!this.activeGoal || this.pendingLimitBoundary !== this.activeGoal.id) return false;
     this.pendingLimitBoundary = undefined;
-    return this.limitActiveGoalForBudget(ctx, false)
-      || this.enforceAutomaticTurnLimit(ctx, true)
-      || this.enforceNoProgressLimit(ctx, true);
+    return (
+      this.limitActiveGoalForBudget(ctx, false) ||
+      this.enforceAutomaticTurnLimit(ctx, true) ||
+      this.enforceNoProgressLimit(ctx, true)
+    );
   }
 
   markGoalSeen(goal: ActiveGoal | undefined = this.activeGoal) {
@@ -1457,10 +1519,14 @@ export class GoalRuntime {
   staleGoalReason(goal: ActiveGoal): string | undefined {
     const seen = this.modelSeenGoal;
     if (!seen) return undefined;
-    const reason = seen.id !== goal.id ? "the goal was replaced"
-      : seen.activationId !== activationIdOf(goal)
-        ? "the goal was resumed or its objective changed"
-      : seen.revision !== (goal.revision ?? 0) ? "the goal changed" : undefined;
+    const reason =
+      seen.id !== goal.id
+        ? "the goal was replaced"
+        : seen.activationId !== activationIdOf(goal)
+          ? "the goal was resumed or its objective changed"
+          : seen.revision !== (goal.revision ?? 0)
+            ? "the goal changed"
+            : undefined;
     if (!reason) return undefined;
     this.markGoalSeen(goal);
     const now = `now: ${goal.status}, objective "${goal.text}", revision ${goal.revision ?? 0}`;
@@ -1475,12 +1541,15 @@ export class GoalRuntime {
     // and some lifecycle paths mutate that object in place. SDK message_end usage
     // and earlier sibling tool checkpoints must not stale a model's task revision.
     const session = this.workflowSession as GoalStateBranch | undefined;
-    const previous = session?.getBranch?.()
-      .findLast(entry => entry.type === "custom" && entry.customType === GOAL_STATE_ENTRY_TYPE)
+    const previous = session
+      ?.getBranch?.()
+      .findLast((entry) => entry.type === "custom" && entry.customType === GOAL_STATE_ENTRY_TYPE)
       ?.data?.goal;
     const sameGoal = previous?.id === goal.id;
-    const tasksChanged = sameGoal && Array.isArray(previous.tasks)
-      && taskFingerprint(previous.tasks) !== taskFingerprint(goal.tasks);
+    const tasksChanged =
+      sameGoal &&
+      Array.isArray(previous.tasks) &&
+      taskFingerprint(previous.tasks) !== taskFingerprint(goal.tasks);
     const firstTasks = goal.tasks?.length && !sameGoal;
     if (firstTasks || tasksChanged) goal.lastTaskUpdateAt = Date.now();
     const changed = !previous || goalControlFingerprint(previous) !== goalControlFingerprint(goal);
@@ -1601,8 +1670,8 @@ export class GoalRuntime {
     if (!stoppedGoal) return false;
     notifyTerminal(
       ctx.ui,
-      "Goal tools are unavailable, so the active goal was paused. "
-        + "Restore the tools and run /goal resume.",
+      "Goal tools are unavailable, so the active goal was paused. " +
+        "Restore the tools and run /goal resume.",
       "warning",
     );
     return true;
@@ -1640,9 +1709,10 @@ export class GoalRuntime {
     const marker = extractGoalPromptMarker(prompt);
     if (!marker) return undefined;
     const pending = this.pendingGoalPromptMarkers.get(marker);
-    const claimable = pending
-      && pending.activationId === activationIdOf(this.activeGoal)
-      && preservesOwnedPromptAtTerminalBoundary(prompt, pending.prompt);
+    const claimable =
+      pending &&
+      pending.activationId === activationIdOf(this.activeGoal) &&
+      preservesOwnedPromptAtTerminalBoundary(prompt, pending.prompt);
     if (!claimable) return undefined;
     this.pendingGoalPromptMarkers.delete(marker);
     this.rememberClaimedGoalPromptMarker(marker, inputFingerprint(prompt));
@@ -1697,10 +1767,12 @@ export function transitionGoal(goal: ActiveGoal, requestedStatus: GoalStatus): A
 }
 
 export function sameGoalActivation(
-  left: ActiveGoal | undefined, right: ActiveGoal | undefined,
+  left: ActiveGoal | undefined,
+  right: ActiveGoal | undefined,
 ): boolean {
-  return !!left && !!right && left.id === right.id
-    && activationIdOf(left) === activationIdOf(right);
+  return (
+    !!left && !!right && left.id === right.id && activationIdOf(left) === activationIdOf(right)
+  );
 }
 
 /** Goals created before activation IDs use their goal ID as the activation. */
@@ -1709,7 +1781,7 @@ function activationIdOf(goal: ActiveGoal | undefined): string | undefined {
 }
 
 function taskFingerprint(tasks: ActiveGoal["tasks"]) {
-  return JSON.stringify(tasks?.map(task => [task.id, task.text, task.status]));
+  return JSON.stringify(tasks?.map((task) => [task.id, task.text, task.status]));
 }
 
 function cloneIfSet<T>(value: T | undefined): T | undefined {
@@ -1730,7 +1802,9 @@ export function incrementGoal(goal: ActiveGoal): ActiveGoal {
 }
 
 export function formatFooterStatus(
-  goal: ActiveGoal | undefined, limit: number | null, theme?: StatusContext["ui"]["theme"],
+  goal: ActiveGoal | undefined,
+  limit: number | null,
+  theme?: StatusContext["ui"]["theme"],
 ) {
   const text = formatStatus(goal, limit);
   if (!goal || text === undefined) return undefined;
@@ -1779,9 +1853,9 @@ export function goalSummary(
   if (goal.safetyPauseCause) {
     summary.push(
       goal.safetyPauseCause === "continuation_limit"
-        ? `Safety pause: automatic-work limit reached (${goal.automaticModelTurns} of `
-          + `${automaticTurnLimit ?? "Unlimited"} responses). `
-          + "Progress is saved; open /goal to review and continue."
+        ? `Safety pause: automatic-work limit reached (${goal.automaticModelTurns} of ` +
+            `${automaticTurnLimit ?? "Unlimited"} responses). ` +
+            "Progress is saved; open /goal to review and continue."
         : "Safety pause: no progress. Progress is saved; open /goal to review and continue.",
     );
   }
@@ -1802,8 +1876,12 @@ export function abortCurrentTurn(ctx: StatusContext) {
 }
 
 export function blocksStaleGoalToolCalls(status: GoalStatus) {
-  return status === "paused" || status === "blocked"
-    || status === "usage_limited" || status === "budget_limited";
+  return (
+    status === "paused" ||
+    status === "blocked" ||
+    status === "usage_limited" ||
+    status === "budget_limited"
+  );
 }
 
 export function isResumableGoalStatus(status: GoalStatus) {
@@ -1840,15 +1918,19 @@ function goalContractEntries(ctx: StatusContext) {
     | undefined;
   const historyEntries = sessionManager?.getBranch?.() ?? sessionManager?.getEntries?.() ?? [];
   return {
-    contextEntries: sessionManager?.buildSessionContext?.().messages
-      ?? sessionManager?.buildContextEntries?.()
-      ?? historyEntries,
+    contextEntries:
+      sessionManager?.buildSessionContext?.().messages ??
+      sessionManager?.buildContextEntries?.() ??
+      historyEntries,
     historyEntries,
   };
 }
 
 async function sendPrompt(
-  pi: ExtensionAPI, ctx: StatusContext, prompt: string, isCurrent?: () => boolean,
+  pi: ExtensionAPI,
+  ctx: StatusContext,
+  prompt: string,
+  isCurrent?: () => boolean,
 ) {
   try {
     await pi.sendUserMessage(prompt, { deliverAs: "followUp" });
@@ -1866,7 +1948,9 @@ async function sendPrompt(
 // dead session's UI must not turn into another throw inside a timer or a catch
 // block.
 function notifyWhenSessionAlive(
-  ctx: StatusContext, message: string, level?: "info" | "warning" | "error",
+  ctx: StatusContext,
+  message: string,
+  level?: "info" | "warning" | "error",
 ) {
   try {
     notifyTerminal(ctx.ui, message, level);

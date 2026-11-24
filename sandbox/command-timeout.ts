@@ -1,7 +1,7 @@
 export const BUILTIN_COMMAND_EXECUTION_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 export const MAX_NODE_TIMER_MS = 2_147_483_647;
 /** floor(math.MaxInt64 / time.Millisecond), matching AgentSH's Go wire limit. */
-export const MAX_AGENTSH_DURATION_MS = Number(((2n ** 63n) - 1n) / 1_000_000n);
+export const MAX_AGENTSH_DURATION_MS = Number((2n ** 63n - 1n) / 1_000_000n);
 
 export type CommandTimeoutMetadata = {
   defaultMs: number;
@@ -39,7 +39,7 @@ type UnknownObject = Record<string, unknown>;
 
 function objectValue(value: unknown): UnknownObject | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as UnknownObject
+    ? (value as UnknownObject)
     : undefined;
 }
 
@@ -57,7 +57,9 @@ function positiveSafeInteger(value: unknown, label: string): number {
 function positiveAgentSHDurationMilliseconds(value: unknown, label: string): number {
   const milliseconds = positiveSafeInteger(value, label);
   if (milliseconds > MAX_AGENTSH_DURATION_MS) {
-    throw new Error(`${label} must not exceed the AgentSH/Go time.Duration limit of ${MAX_AGENTSH_DURATION_MS}ms`);
+    throw new Error(
+      `${label} must not exceed the AgentSH/Go time.Duration limit of ${MAX_AGENTSH_DURATION_MS}ms`,
+    );
   }
   return milliseconds;
 }
@@ -72,17 +74,21 @@ function nonNegativeSafeInteger(value: unknown, label: string): number {
 function nonNegativeAgentSHDurationMilliseconds(value: unknown, label: string): number {
   const milliseconds = nonNegativeSafeInteger(value, label);
   if (milliseconds > MAX_AGENTSH_DURATION_MS) {
-    throw new Error(`${label} must not exceed the AgentSH/Go time.Duration limit of ${MAX_AGENTSH_DURATION_MS}ms`);
+    throw new Error(
+      `${label} must not exceed the AgentSH/Go time.Duration limit of ${MAX_AGENTSH_DURATION_MS}ms`,
+    );
   }
   return milliseconds;
 }
 
-function optionalEnvironmentInteger(raw: string | undefined, label: string, allowZero: boolean): number | undefined {
+function optionalEnvironmentInteger(
+  raw: string | undefined,
+  label: string,
+  allowZero: boolean,
+): number | undefined {
   if (raw === undefined || !raw.trim()) return undefined;
   const value = Number(raw.trim());
-  return allowZero
-    ? nonNegativeSafeInteger(value, label)
-    : positiveSafeInteger(value, label);
+  return allowZero ? nonNegativeSafeInteger(value, label) : positiveSafeInteger(value, label);
 }
 
 /**
@@ -90,7 +96,11 @@ function optionalEnvironmentInteger(raw: string | undefined, label: string, allo
  * session/project environment refresh can occur.
  */
 export function configuredCommandExecutionTimeout(raw: string | undefined): CommandTimeoutFallback {
-  const configured = optionalEnvironmentInteger(raw, "PI_AGENTSH_COMMAND_EXECUTION_TIMEOUT_MS", false);
+  const configured = optionalEnvironmentInteger(
+    raw,
+    "PI_AGENTSH_COMMAND_EXECUTION_TIMEOUT_MS",
+    false,
+  );
   if (configured !== undefined) return { defaultMs: configured, source: "compatibility_env" };
   return { defaultMs: BUILTIN_COMMAND_EXECUTION_TIMEOUT_MS, source: "builtin_default" };
 }
@@ -113,7 +123,9 @@ export function configuredCommandTransportSlack(
   const connect = nonNegativeSafeInteger(connectTimeoutMs, "PI_AGENTSH_CONNECT_TIMEOUT_MS");
   const combined = approval + connect;
   if (!Number.isSafeInteger(combined)) {
-    throw new Error("default AgentSH command transport slack exceeds the JavaScript safe-integer range");
+    throw new Error(
+      "default AgentSH command transport slack exceeds the JavaScript safe-integer range",
+    );
   }
   return combined;
 }
@@ -162,7 +174,9 @@ export function parseCommandTimeoutMetadata(metadata: unknown): CommandTimeoutMe
       malformedCommandTimeoutMetadata(error instanceof Error ? error.message : String(error));
     }
     if (defaultMs > maximumMs) {
-      malformedCommandTimeoutMetadata("command_timeout.default_ms must not exceed command_timeout.maximum_ms");
+      malformedCommandTimeoutMetadata(
+        "command_timeout.default_ms must not exceed command_timeout.maximum_ms",
+      );
     }
   }
 
@@ -186,11 +200,17 @@ export function parseCommandTimeoutMetadata(metadata: unknown): CommandTimeoutMe
   };
 }
 
-export function resolveCommandTimeoutPolicy(metadata: unknown, fallback: CommandTimeoutFallback): CommandTimeoutPolicy {
+export function resolveCommandTimeoutPolicy(
+  metadata: unknown,
+  fallback: CommandTimeoutFallback,
+): CommandTimeoutPolicy {
   const live = parseCommandTimeoutMetadata(metadata);
   if (live) return { ...live, origin: "metadata" };
 
-  const defaultMs = positiveAgentSHDurationMilliseconds(fallback.defaultMs, "AgentSH command execution fallback");
+  const defaultMs = positiveAgentSHDurationMilliseconds(
+    fallback.defaultMs,
+    "AgentSH command execution fallback",
+  );
   return {
     defaultMs,
     // The compatibility value mirrors the older downstream policy ceiling, so
@@ -202,15 +222,24 @@ export function resolveCommandTimeoutPolicy(metadata: unknown, fallback: Command
 }
 
 /** Convert either public seconds or global-API milliseconds into one exact request value. */
-export function requestedCommandTimeoutMs(input: { timeoutSeconds?: unknown; timeoutMs?: unknown }): number | undefined {
+export function requestedCommandTimeoutMs(input: {
+  timeoutSeconds?: unknown;
+  timeoutMs?: unknown;
+}): number | undefined {
   let secondsMilliseconds: number | undefined;
   if (input.timeoutSeconds !== undefined) {
-    if (typeof input.timeoutSeconds !== "number" || !Number.isFinite(input.timeoutSeconds) || input.timeoutSeconds <= 0) {
+    if (
+      typeof input.timeoutSeconds !== "number" ||
+      !Number.isFinite(input.timeoutSeconds) ||
+      input.timeoutSeconds <= 0
+    ) {
       throw new Error("AgentSH Bash timeout must be a finite positive number of seconds");
     }
     const milliseconds = input.timeoutSeconds * 1000;
     if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0) {
-      throw new Error("AgentSH Bash timeout must resolve to a positive safe integer number of milliseconds");
+      throw new Error(
+        "AgentSH Bash timeout must resolve to a positive safe integer number of milliseconds",
+      );
     }
     secondsMilliseconds = positiveAgentSHDurationMilliseconds(milliseconds, "AgentSH Bash timeout");
   }
@@ -235,7 +264,10 @@ export function deriveCommandTimeoutBudget(input: {
     timeoutSeconds: input.timeoutSeconds,
     timeoutMs: input.timeoutMs,
   });
-  const configuredTransportSlackMs = nonNegativeSafeInteger(input.transportSlackMs, "AgentSH command transport slack");
+  const configuredTransportSlackMs = nonNegativeSafeInteger(
+    input.transportSlackMs,
+    "AgentSH command transport slack",
+  );
   const terminalResponseMarginMs = nonNegativeSafeInteger(
     input.terminalResponseMarginMs,
     "AgentSH command terminal/cleanup response margin",
@@ -243,7 +275,9 @@ export function deriveCommandTimeoutBudget(input: {
   let transportSlackMs = configuredTransportSlackMs;
   if (policy.approvalExtensionMs !== undefined) {
     if (policy.approvalExtensionMs > Number.MAX_SAFE_INTEGER - terminalResponseMarginMs) {
-      throw new Error("AgentSH approval extension plus terminal/cleanup response margin exceeds the JavaScript safe-integer range");
+      throw new Error(
+        "AgentSH approval extension plus terminal/cleanup response margin exceeds the JavaScript safe-integer range",
+      );
     }
     transportSlackMs = Math.max(
       configuredTransportSlackMs,
@@ -265,11 +299,15 @@ export function deriveCommandTimeoutBudget(input: {
   }
 
   if (executionTimeoutMs > Number.MAX_SAFE_INTEGER - transportSlackMs) {
-    throw new Error("AgentSH command execution timeout plus transport slack exceeds the JavaScript safe-integer range");
+    throw new Error(
+      "AgentSH command execution timeout plus transport slack exceeds the JavaScript safe-integer range",
+    );
   }
   const transportTimeoutMs = executionTimeoutMs + transportSlackMs;
   if (transportTimeoutMs > MAX_NODE_TIMER_MS) {
-    throw new Error(`AgentSH command transport timeout must not exceed the Node.js timer limit of ${MAX_NODE_TIMER_MS}ms`);
+    throw new Error(
+      `AgentSH command transport timeout must not exceed the Node.js timer limit of ${MAX_NODE_TIMER_MS}ms`,
+    );
   }
 
   return {
@@ -335,14 +373,26 @@ function reportedEffectiveTimeout(objects: UnknownObject[]): ReportedEffectiveTi
   for (const object of objects) {
     // Generic timeout_ms/timeoutMs can describe the request. Only fields whose
     // names explicitly say "effective" are server-effective evidence.
-    const values = [object.effective_timeout_ms, object.effectiveTimeoutMs, object.effective_ms, object.effectiveMs];
+    const values = [
+      object.effective_timeout_ms,
+      object.effectiveTimeoutMs,
+      object.effective_ms,
+      object.effectiveMs,
+    ];
     for (const value of values) {
-      if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 || value > MAX_AGENTSH_DURATION_MS) continue;
-      const source = stringValue(object.effective_timeout_source)
-        || stringValue(object.effectiveTimeoutSource)
-        || stringValue(object.timeout_source)
-        || stringValue(object.timeoutSource)
-        || stringValue(object.source);
+      if (
+        typeof value !== "number" ||
+        !Number.isSafeInteger(value) ||
+        value <= 0 ||
+        value > MAX_AGENTSH_DURATION_MS
+      )
+        continue;
+      const source =
+        stringValue(object.effective_timeout_source) ||
+        stringValue(object.effectiveTimeoutSource) ||
+        stringValue(object.timeout_source) ||
+        stringValue(object.timeoutSource) ||
+        stringValue(object.source);
       return {
         effectiveTimeoutMs: value,
         ...(source ? { source } : {}),
@@ -363,10 +413,13 @@ export function commandExecutionTimeoutDetails(
   _clientBudget?: { executionTimeoutMs: number; executionTimeoutSource: string },
 ): CommandExecutionTimeoutDetails | undefined {
   const objects = responseObjects(raw);
-  const structured = objects.some((object) => object.code === "E_COMMAND_TIMEOUT"
-    || object.error_code === "E_COMMAND_TIMEOUT"
-    || object.termination_reason === "command_timeout"
-    || object.terminationReason === "command_timeout");
+  const structured = objects.some(
+    (object) =>
+      object.code === "E_COMMAND_TIMEOUT" ||
+      object.error_code === "E_COMMAND_TIMEOUT" ||
+      object.termination_reason === "command_timeout" ||
+      object.terminationReason === "command_timeout",
+  );
   if (!structured) return undefined;
 
   const reported = reportedEffectiveTimeout(objects);
@@ -385,7 +438,9 @@ export class CommandTransportTimeoutError extends Error {
     readonly transportTimeoutMs: number,
     readonly transportSlackMs: number,
   ) {
-    super(`AgentSH command transport timed out after ${transportTimeoutMs}ms while waiting for the buffered exec_bash response (derived execution budget ${executionTimeoutMs}ms; selected transport slack ${transportSlackMs}ms)`);
+    super(
+      `AgentSH command transport timed out after ${transportTimeoutMs}ms while waiting for the buffered exec_bash response (derived execution budget ${executionTimeoutMs}ms; selected transport slack ${transportSlackMs}ms)`,
+    );
     this.name = "CommandTransportTimeoutError";
   }
 }
@@ -413,14 +468,23 @@ export class CommandExecutionTimeoutError extends Error {
   toolDetails?: unknown;
 
   constructor(options: CommandExecutionTimeoutErrorOptions) {
-    const effectiveTimeoutMs = options.effectiveTimeoutMs === undefined
-      ? undefined
-      : positiveAgentSHDurationMilliseconds(options.effectiveTimeoutMs, "AgentSH effective command timeout");
+    const effectiveTimeoutMs =
+      options.effectiveTimeoutMs === undefined
+        ? undefined
+        : positiveAgentSHDurationMilliseconds(
+            options.effectiveTimeoutMs,
+            "AgentSH effective command timeout",
+          );
     const timeoutSource = stringValue(options.timeoutSource);
-    const clientExecutionTimeoutMs = positiveSafeInteger(options.clientExecutionTimeoutMs, "client-derived AgentSH command execution budget");
+    const clientExecutionTimeoutMs = positiveSafeInteger(
+      options.clientExecutionTimeoutMs,
+      "client-derived AgentSH command execution budget",
+    );
     const clientExecutionTimeoutSource = stringValue(options.clientExecutionTimeoutSource);
     if (!clientExecutionTimeoutSource) {
-      throw new Error("client-derived AgentSH command execution budget source must be a non-empty string");
+      throw new Error(
+        "client-derived AgentSH command execution budget source must be a non-empty string",
+      );
     }
 
     const clientBudget = `client-derived execution budget ${clientExecutionTimeoutMs}ms (source: ${clientExecutionTimeoutSource})`;

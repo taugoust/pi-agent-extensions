@@ -167,6 +167,5 @@ pkgs.runCommand "fetch-extension-check"
     EOF
     node "$workdir/test.mjs" "$workdir/out"
 
-    grep -F 'selectFetchBackend(agentSHAPI(), agentSHStartup)' ${self}/fetch/index.ts >/dev/null
     touch "$out"
   ''

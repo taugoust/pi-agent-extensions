@@ -24,6 +24,11 @@
       url = "github:johncmunson/pi-openai-fast-mode/v0.3.0";
       flake = false;
     };
+
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -34,6 +39,7 @@
       llm-agents-nix,
       pi-mcp-adapter,
       pi-openai-fast-mode,
+      treefmt-nix,
       ...
     }:
     let
@@ -44,6 +50,7 @@
         "x86_64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
+      treefmtFor = system: treefmt-nix.lib.evalModule nixpkgs.legacyPackages.${system} ./nix/treefmt.nix;
       registry = import ./nix/extension-registry.nix { inherit self pi-mcp-adapter pi-openai-fast-mode; };
     in
     {
@@ -135,6 +142,8 @@
         }
       );
 
+      formatter = forAllSystems (system: (treefmtFor system).config.build.wrapper);
+
       devShells = forAllSystems (
         system:
         let
@@ -166,6 +175,7 @@
             ;
         })
         // {
+          format = (treefmtFor system).config.build.check self;
           openai-fast-mode = import ./nix/openai-fast-mode-check.nix {
             inherit self pkgs pi-openai-fast-mode;
           };

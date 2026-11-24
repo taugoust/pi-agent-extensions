@@ -19,11 +19,16 @@ export function registerGoalCommand(
   commands: GoalCommandController,
   options: GoalCommandRegistrationOptions = {},
 ) {
-  const loadGoalManager = cachedModuleLoader(options.loadGoalManager ?? (() => import("./menu.js")));
-  const loadGoalSettings = cachedModuleLoader(options.loadGoalSettings ?? (() => import("./settings-ui.js")));
+  const loadGoalManager = cachedModuleLoader(
+    options.loadGoalManager ?? (() => import("./menu.js")),
+  );
+  const loadGoalSettings = cachedModuleLoader(
+    options.loadGoalSettings ?? (() => import("./settings-ui.js")),
+  );
 
   pi.registerCommand("goal", {
-    description: "Create a concise outcome goal: /goal [--tokens 100k] <outcome>; token budgets are opt-in",
+    description:
+      "Create a concise outcome goal: /goal [--tokens 100k] <outcome>; token budgets are opt-in",
     getArgumentCompletions: (prefix) => completeGoalArguments(prefix),
     handler: async (args, ctx) => {
       try {
@@ -114,7 +119,9 @@ function captureMenuOwnership(runtime: GoalRuntime): () => boolean {
   const generation = runtime.menuGeneration;
   const controller = runtime.menuController;
   return () =>
-    runtime.menuGeneration === generation && runtime.menuController === controller && !controller.signal.aborted;
+    runtime.menuGeneration === generation &&
+    runtime.menuController === controller &&
+    !controller.signal.aborted;
 }
 
 function cachedModuleLoader<Module>(load: () => Promise<Module>): () => Promise<Module> {

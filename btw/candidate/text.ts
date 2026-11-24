@@ -20,7 +20,9 @@ export function formatKeyLabel(key: string): string {
       if (lower === "ctrl") return "Ctrl";
       if (lower === "alt") return "Alt";
       if (lower === "super") return "Super";
-      return part.length === 1 ? part.toUpperCase() : `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`;
+      return part.length === 1
+        ? part.toUpperCase()
+        : `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`;
     })
     .join("+");
 }

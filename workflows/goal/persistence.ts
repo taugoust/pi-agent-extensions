@@ -1,6 +1,13 @@
-import { isNonNegativeFiniteNumber, nonNegativeFiniteNumber, normalizeTokenBudget } from "./accounting.js";
+import {
+  isNonNegativeFiniteNumber,
+  nonNegativeFiniteNumber,
+  normalizeTokenBudget,
+} from "./accounting.js";
 import type { GoalRecord } from "../../shared/goal-model.ts";
-import { validateGoalLimitOverrides, type GoalContinuationLimits } from "../../shared/delegated-goal-policy.ts";
+import {
+  validateGoalLimitOverrides,
+  type GoalContinuationLimits,
+} from "../../shared/delegated-goal-policy.ts";
 import type { GoalStatus } from "./prompts.js";
 import { createHash } from "node:crypto";
 import { readScopedProgress, validateProgressArguments } from "../../progress/progress-state.js";
@@ -69,9 +76,13 @@ export function loadGoalStateFromSession(ctx: SessionContext): LoadedGoalState {
   if (canonicalEntry) return migrateTasks(loadCanonicalGoalState(canonicalEntry.data), entries);
 
   const legacyEntry = entries
-    .filter((entry) => entry.type === "custom" && entry.customType === LEGACY_GOALS_STATE_ENTRY_TYPE)
+    .filter(
+      (entry) => entry.type === "custom" && entry.customType === LEGACY_GOALS_STATE_ENTRY_TYPE,
+    )
     .pop();
-  return legacyEntry ? migrateTasks(loadLegacyGoalsState(legacyEntry.data), entries) : emptyGoalState();
+  return legacyEntry
+    ? migrateTasks(loadLegacyGoalsState(legacyEntry.data), entries)
+    : emptyGoalState();
 }
 
 function migrateTasks(loaded: LoadedGoalState, entries: SessionEntry[]): LoadedGoalState {
@@ -79,10 +90,17 @@ function migrateTasks(loaded: LoadedGoalState, entries: SessionEntry[]): LoadedG
   if (goal && goal.tasks === undefined) {
     // Only an explicit legacy scope key establishes ownership. Never associate
     // standalone history by text, timing, or the mere presence of a goal.
-    goal.tasks = readScopedProgress(entries as any, goal.progressId ?? goal.id).map((step, index) => ({
-      ...step,
-      id: step.id ?? `legacy-${createHash("sha256").update(JSON.stringify([goal.progressId ?? goal.id, index, step])).digest("hex").slice(0, 32)}`,
-    }));
+    goal.tasks = readScopedProgress(entries as any, goal.progressId ?? goal.id).map(
+      (step, index) => ({
+        ...step,
+        id:
+          step.id ??
+          `legacy-${createHash("sha256")
+            .update(JSON.stringify([goal.progressId ?? goal.id, index, step]))
+            .digest("hex")
+            .slice(0, 32)}`,
+      }),
+    );
   }
   return loaded;
 }
@@ -106,7 +124,8 @@ function loadCanonicalGoalState(data: unknown): LoadedGoalState {
     });
   }
 
-  let goal = rawGoal === null || !isCanonicalGoal(rawGoal) ? undefined : normalizeLoadedGoal(rawGoal);
+  let goal =
+    rawGoal === null || !isCanonicalGoal(rawGoal) ? undefined : normalizeLoadedGoal(rawGoal);
   if (goal?.status === "complete") goal = undefined;
   return { goal, legacyQueueState: undefined };
 }
@@ -179,16 +198,12 @@ export function normalizeLoadedGoal(goal: ActiveGoal): ActiveGoal {
   // value as implicit; old budget-limited goals become paused, never auto-resumed. New explicit
   // budgets carry the marker and survive reloads.
   const wasLegacyImplicitBudget =
-    goal.tokenBudgetExplicit === undefined &&
-    storedTokenBudget === LEGACY_IMPLICIT_TOKEN_BUDGET;
+    goal.tokenBudgetExplicit === undefined && storedTokenBudget === LEGACY_IMPLICIT_TOKEN_BUDGET;
   const tokenBudgetExplicit =
     goal.tokenBudgetExplicit ??
-    (storedTokenBudget !== undefined &&
-      storedTokenBudget !== LEGACY_IMPLICIT_TOKEN_BUDGET);
+    (storedTokenBudget !== undefined && storedTokenBudget !== LEGACY_IMPLICIT_TOKEN_BUDGET);
   const status =
-    wasLegacyImplicitBudget && goal.status === "budget_limited"
-      ? "paused"
-      : goal.status;
+    wasLegacyImplicitBudget && goal.status === "budget_limited" ? "paused" : goal.status;
   const prs = normalizeGoalPrs(goal.prs);
   const checks = normalizeGoalChecks(goal.checks);
   return {
@@ -198,7 +213,12 @@ export function normalizeLoadedGoal(goal: ActiveGoal): ActiveGoal {
     status,
     activationId: goal.activationId ?? goal.id,
     revision: goal.revision ?? 0,
-    progressId: typeof goal.progressId === "string" && goal.progressId.length > 0 && goal.progressId.length <= 128 ? goal.progressId : goal.id,
+    progressId:
+      typeof goal.progressId === "string" &&
+      goal.progressId.length > 0 &&
+      goal.progressId.length <= 128
+        ? goal.progressId
+        : goal.id,
     startedAt: isNonNegativeFiniteNumber(goal.startedAt) ? goal.startedAt : now,
     updatedAt: isNonNegativeFiniteNumber(goal.updatedAt) ? goal.updatedAt : now,
     iteration: Math.max(0, Math.floor(nonNegativeFiniteNumber(goal.iteration))),
@@ -214,17 +234,31 @@ export function normalizeLoadedGoal(goal: ActiveGoal): ActiveGoal {
     safetyPauseCause: normalizeSafetyPauseCause(goal.safetyPauseCause),
     safetyResetPending: goal.safetyResetPending === true ? true : undefined,
     waiting,
-    lastTaskUpdateAt: isNonNegativeFiniteNumber(goal.lastTaskUpdateAt) ? goal.lastTaskUpdateAt : undefined,
+    lastTaskUpdateAt: isNonNegativeFiniteNumber(goal.lastTaskUpdateAt)
+      ? goal.lastTaskUpdateAt
+      : undefined,
     lastWake: normalizeGoalWake(goal.lastWake),
     lastBlocker: normalizeGoalBlocker(goal.lastBlocker),
   };
 }
 
 function normalizeGoalBlocker(value: unknown): ActiveGoal["lastBlocker"] {
-  if (!isRecord(value) || !Number.isSafeInteger(value.at) || (value.at as number) < 0 ||
-      typeof value.reason !== "string" || typeof value.evidence !== "string" ||
-      !Number.isSafeInteger(value.repeatedTurns) || (value.repeatedTurns as number) < 3) return undefined;
-  return { at: value.at as number, reason: value.reason.slice(0, 1_000), evidence: value.evidence.slice(0, 4_000), repeatedTurns: value.repeatedTurns as number };
+  if (
+    !isRecord(value) ||
+    !Number.isSafeInteger(value.at) ||
+    (value.at as number) < 0 ||
+    typeof value.reason !== "string" ||
+    typeof value.evidence !== "string" ||
+    !Number.isSafeInteger(value.repeatedTurns) ||
+    (value.repeatedTurns as number) < 3
+  )
+    return undefined;
+  return {
+    at: value.at as number,
+    reason: value.reason.slice(0, 1_000),
+    evidence: value.evidence.slice(0, 4_000),
+    repeatedTurns: value.repeatedTurns as number,
+  };
 }
 
 function normalizeSafetyCounter(value: unknown) {
@@ -250,19 +284,41 @@ function isStoredGoal(value: unknown): value is LegacyStoredGoal {
     validateGoalLimitOverrides(value.continuationLimits);
     if (value.tasks !== undefined) {
       const tasks = validateProgressArguments({ steps: value.tasks }).steps;
-      if (tasks.some(step => !step.id) || new Set(tasks.map(step => step.id)).size !== tasks.length) return false;
+      if (
+        tasks.some((step) => !step.id) ||
+        new Set(tasks.map((step) => step.id)).size !== tasks.length
+      )
+        return false;
     }
-  } catch { return false; }
-  if (value.activationId !== undefined && (typeof value.activationId !== "string" || !value.activationId || value.activationId.length > 128)) return false;
-  if (value.revision !== undefined && (!Number.isSafeInteger(value.revision) || (value.revision as number) < 0)) return false;
+  } catch {
+    return false;
+  }
+  if (
+    value.activationId !== undefined &&
+    (typeof value.activationId !== "string" ||
+      !value.activationId ||
+      value.activationId.length > 128)
+  )
+    return false;
+  if (
+    value.revision !== undefined &&
+    (!Number.isSafeInteger(value.revision) || (value.revision as number) < 0)
+  )
+    return false;
   return (
     typeof value.id === "string" &&
     Boolean(value.id) &&
     value.id === value.id.trim() &&
     validObjective(value.text) &&
-    ["active", "queued", "paused", "blocked", "usage_limited", "budget_limited", "complete"].includes(
-      String(value.status),
-    ) &&
+    [
+      "active",
+      "queued",
+      "paused",
+      "blocked",
+      "usage_limited",
+      "budget_limited",
+      "complete",
+    ].includes(String(value.status)) &&
     typeof value.startedAt === "number" &&
     typeof value.updatedAt === "number" &&
     typeof value.iteration === "number" &&
