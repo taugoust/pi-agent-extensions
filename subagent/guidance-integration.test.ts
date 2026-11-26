@@ -14,6 +14,8 @@ import {
 } from "./guidance.ts";
 import { workerInteractionsService, WORKER_INTERACTIONS_KEY } from "../shared/foreground-tasks.ts";
 import guidanceWorker from "./guidance-worker.ts";
+import { currentGuidanceScope, rebindGuidance } from "./guidance-binding.ts";
+import { guidanceRebinding } from "./guidance.ts";
 import { installGuidance } from "./guidance-extension.ts";
 
 // Repository legacy imports normally resolve through Pi's loader. Use installed
@@ -149,6 +151,46 @@ test("registered worker guidance tool awaits real coordinator tool reply, not pr
     }),
     /no model answer/,
   );
+});
+
+/** Restart the owner runtime without letting it inherit the worker's binding. */
+async function restartOwner(owner: ReturnType<typeof harness>) {
+  const workerBinding = process.env[GUIDANCE_ENV];
+  delete process.env[GUIDANCE_ENV];
+  try {
+    await owner.event("session_start");
+  } finally {
+    process.env[GUIDANCE_ENV] = workerBinding;
+  }
+}
+
+test("a live worker gets guidance again after its owner restarts and rebinds it", async (t) => {
+  const { worker, owner, notices, execute } = await setup(t);
+  await restartOwner(owner);
+  await assert.rejects(
+    execute(worker, "request_guidance", { prompt: "Still there?" }),
+    /restarted; guidance binding is stale/,
+  );
+  const binding = guidanceRebinding(currentGuidanceScope()!);
+  assert.ok(binding);
+  rebindGuidance(binding);
+  assert.equal(guidanceRebinding(currentGuidanceScope()!), undefined);
+  const waiting = execute(worker, "request_guidance", { prompt: "Still there?" });
+  const record = await notices.next();
+  await execute(owner, "guidance", {
+    operation: "reply",
+    target: guidanceTarget(record),
+    replyId: "after-restart",
+    guidance: "Yes.",
+  });
+  assert.equal((await waiting).content[0].text, "Yes.");
+});
+
+test("a worker refuses a rebinding for a different worker", async (t) => {
+  await setup(t);
+  const scope = currentGuidanceScope()!;
+  const foreign = { socket: "/tmp/x", token: "a".repeat(64), scope: { ...scope, taskId: "other" } };
+  assert.throws(() => rebindGuidance(foreign), /does not match this worker/);
 });
 
 for (const cancelled of [false, true])

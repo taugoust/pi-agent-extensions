@@ -416,7 +416,7 @@ test("parent replacement, worker restart, attempt replacement, absent owner neve
       restored.reply(guidanceTarget(record), "old-owner", { kind: "guidance", guidance: "old" }),
     /identity/,
   );
-  await assert.rejects(requestGuidance(replaced, "runtime-2", input), /ENOENT|unavailable/);
+  await assert.rejects(requestGuidance(replaced, "runtime-2", input), /stale|unavailable/);
   await restored.close();
 });
 
@@ -548,4 +548,32 @@ test("closing the owner while it is still starting rejects start instead of hang
     await assert.rejects(starting, /closed during startup/);
     assert.throws(() => broker.bind(identity(broker.ownerSessionId)), /unavailable/);
   }
+});
+
+test("a restarted owner removes the socket directory its crashed runtime left behind", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "guidance-crash-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const first = new GuidanceBroker("crashed", root);
+  const lockFile = (first as any).lockFile as string;
+  await first.close();
+  const leftover = await mkdtemp(join(tmpdir(), "pi-guidance-"));
+  t.after(() => rm(leftover, { recursive: true, force: true }));
+  const deadOwner = { pid: 2 ** 22 + 1, token: "gone", socketDirectory: leftover };
+  await writeFile(lockFile, JSON.stringify(deadOwner), { mode: 0o600 });
+  const second = new GuidanceBroker("crashed", root);
+  await second.close();
+  await assert.rejects(readdir(leftover), { code: "ENOENT" });
+});
+
+test("a stale socket directory outside the guidance prefix is left alone", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "guidance-crash-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const first = new GuidanceBroker("foreign", root);
+  const lockFile = (first as any).lockFile as string;
+  await first.close();
+  const deadOwner = { pid: 2 ** 22 + 1, token: "gone", socketDirectory: root };
+  await writeFile(lockFile, JSON.stringify(deadOwner), { mode: 0o600 });
+  const second = new GuidanceBroker("foreign", root);
+  await second.close();
+  assert.ok((await readdir(root)).length > 0);
 });
