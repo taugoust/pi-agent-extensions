@@ -4,6 +4,8 @@
  * process launch remains a trusted-launcher responsibility, while this protocol
  * provides the child-hosted control socket and durable receipts/interactions.
  */
+import type { GuidanceBinding } from "../subagent/guidance.ts";
+
 export const TUI_WORKER_PROTOCOL = 1 as const;
 export const TUI_WORKER_MAX_FRAME_BYTES = 128 * 1024;
 export const TUI_WORKER_MAX_MESSAGE_BYTES = 64 * 1024;
@@ -160,7 +162,7 @@ export type TuiWorkerOperation =
   | { operation: "prepare_reap"; force?: boolean; reason?: string }
   | { operation: "promote"; placement: TuiWorkerPlacement }
   /** A restarted owner hands a live worker a fresh guidance socket and token. */
-  | { operation: "rebind_guidance"; binding: import("../subagent/guidance.ts").GuidanceBinding }
+  | { operation: "rebind_guidance"; binding: GuidanceBinding }
   | {
       operation: "respond_interaction";
       interactionId: string;
@@ -404,7 +406,7 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
 }
 
 /** Shape check only. The worker checks that the scope names itself. */
-function parseGuidanceBinding(value: any): import("../subagent/guidance.ts").GuidanceBinding {
+function parseGuidanceBinding(value: any): GuidanceBinding {
   if (!value || typeof value !== "object") throw new Error("Invalid guidance binding");
   exactKeys(value, ["socket", "token", "scope"]);
   const socket = text(value.socket, 1024);

@@ -550,7 +550,7 @@ test("closing the owner while it is still starting rejects start instead of hang
   }
 });
 
-test("a restarted owner removes the socket directory its crashed runtime left behind", async (t) => {
+test("a restarted owner removes its crashed runtime's socket directory", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "guidance-crash-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const first = new GuidanceBroker("crashed", root);
