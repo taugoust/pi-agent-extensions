@@ -4,6 +4,8 @@
  * process launch remains a trusted-launcher responsibility, while this protocol
  * provides the child-hosted control socket and durable receipts/interactions.
  */
+import type { GuidanceBinding } from "../subagent/guidance.ts";
+
 export const TUI_WORKER_PROTOCOL = 1 as const;
 export const TUI_WORKER_MAX_FRAME_BYTES = 128 * 1024;
 export const TUI_WORKER_MAX_MESSAGE_BYTES = 64 * 1024;
@@ -159,6 +161,8 @@ export type TuiWorkerOperation =
   // verified pane. It must reject a busy child; cancel is never implicit.
   | { operation: "prepare_reap"; force?: boolean; reason?: string }
   | { operation: "promote"; placement: TuiWorkerPlacement }
+  /** A restarted owner hands a live worker a fresh guidance socket and token. */
+  | { operation: "rebind_guidance"; binding: GuidanceBinding }
   | {
       operation: "respond_interaction";
       interactionId: string;
@@ -307,6 +311,7 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
     jobs: ["params"],
     prepare_reap: [],
     promote: ["placement"],
+    rebind_guidance: ["binding"],
     respond_interaction: ["interactionId", "answer"],
     idle_decision: ["decisionRequestId", "choice"],
   };
@@ -354,6 +359,8 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
     }
     case "promote":
       return { ...identity, operation, placement: parseTuiWorkerPlacement(data.placement) };
+    case "rebind_guidance":
+      return { ...identity, operation, binding: parseGuidanceBinding(data.binding) };
     case "idle_decision": {
       const decisionRequestId = text(data.decisionRequestId, 128, /^idle:[a-f0-9]{32}$/);
       const choice = data.choice;
@@ -396,6 +403,21 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
     default:
       throw new Error("Unknown worker operation");
   }
+}
+
+/** Shape check only. The worker checks that the scope names itself. */
+function parseGuidanceBinding(value: any): GuidanceBinding {
+  if (!value || typeof value !== "object") throw new Error("Invalid guidance binding");
+  exactKeys(value, ["socket", "token", "scope"]);
+  const socket = text(value.socket, 1024);
+  const token = text(value.token, 64, /^[a-f0-9]{64}$/);
+  if (!value.scope || typeof value.scope !== "object") throw new Error("Invalid guidance scope");
+  const scope = structuredClone(value.scope);
+  for (const key of ["ownerSessionId", "ownerRuntimeEpoch", "taskId", "childId", "workerEpoch"])
+    text(scope[key], 512);
+  integer(scope.attempt, 1);
+  if (scope.goalId !== undefined) text(scope.goalId, 512);
+  return { socket, token, scope };
 }
 
 /** One bounded JSONL frame. Framing/backpressure is a transport responsibility. */

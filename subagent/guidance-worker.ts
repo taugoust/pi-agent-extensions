@@ -1,47 +1,60 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { randomBytes } from "node:crypto";
+import { currentGuidanceScope, readBinding, sameWorker } from "./guidance-binding.ts";
 import {
-  GUIDANCE_ENV,
   GUIDANCE_HUMAN_KEY,
   requestGuidance,
-  type GuidanceBinding,
   type GuidanceInput,
+  type GuidanceScope,
   type GuidanceUpstream,
 } from "./guidance.ts";
 
 /** One physical worker runtime, shared by its tools and its descendant broker. */
 const runtimeEpoch = randomBytes(16).toString("hex");
+const UNAVAILABLE =
+  "Owning coordinator guidance unavailable; no child-to-human fallback or answer replay";
+
+/** A rebind keeps the worker identity. Any other change makes the service stale. */
+function sameBinding(launchScope: GuidanceScope | undefined): boolean {
+  try {
+    const current = readBinding();
+    if (!launchScope) return current === "unavailable";
+    return typeof current === "object" && sameWorker(launchScope, current.scope);
+  } catch {
+    return false;
+  }
+}
+
 export function upstreamGuidance(): GuidanceUpstream | undefined {
-  const raw = process.env[GUIDANCE_ENV];
-  if (!raw) return undefined;
-  const parsed = JSON.parse(raw);
-  if (parsed?.unavailable === true && Object.keys(parsed).length === 1)
+  const launch = readBinding();
+  if (!launch) return undefined;
+  if (launch === "unavailable")
     return async () => {
-      throw new Error(
-        "Owning coordinator guidance unavailable; no child-to-human fallback or answer replay",
-      );
+      throw new Error(UNAVAILABLE);
     };
-  const binding = parsed as GuidanceBinding;
-  if (!binding?.socket || !binding.token || !binding.scope?.ownerRuntimeEpoch)
-    throw new Error("Invalid trusted guidance launch binding");
-  return Object.assign(
-    (input: GuidanceInput, signal?: AbortSignal, requestId?: string) =>
-      requestGuidance(binding, runtimeEpoch, input, signal, requestId),
-    { scope: binding.scope },
-  );
+  const request = (input: GuidanceInput, signal?: AbortSignal, requestId?: string) => {
+    const binding = readBinding();
+    if (typeof binding !== "object" || !sameWorker(launch.scope, binding.scope))
+      throw new Error("Stale or foreign guidance binding");
+    return requestGuidance(binding, runtimeEpoch, input, signal, requestId);
+  };
+  return Object.defineProperty(request, "scope", {
+    enumerable: true,
+    get: () => currentGuidanceScope() ?? launch.scope,
+  }) as GuidanceUpstream;
 }
 export default function guidanceWorker(pi: ExtensionAPI) {
   const upstream = upstreamGuidance();
   if (!upstream) return;
   let lifetime = new AbortController();
-  const launchBinding = process.env[GUIDANCE_ENV];
+  const launchScope = currentGuidanceScope();
   let session: { id: string; current(): string } | undefined;
   const isCurrentWorker = () =>
     Boolean(
       session &&
       !lifetime.signal.aborted &&
-      process.env[GUIDANCE_ENV] === launchBinding &&
+      sameBinding(launchScope) &&
       session.current() === session.id,
     );
   const capability = {

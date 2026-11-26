@@ -18,6 +18,7 @@ import type {
   TuiWorkerResponse,
 } from "../shared/tui-worker-protocol.ts";
 import { TuiWorkerStore, readPrivateJson } from "./tui-worker-store.ts";
+import { currentGuidanceScope, rebindGuidance } from "./guidance-binding.ts";
 import { readTaskOutcome, validateTaskOutcome } from "./outcome.ts";
 import {
   validateVerification,
@@ -74,6 +75,12 @@ const MUTATIONS = new Set([
   "respond_interaction",
   "idle_decision",
 ]);
+
+/** Public guidance scope (no token), so a restarted owner can see a stale binding. */
+function guidanceSnapshot() {
+  const scope = currentGuidanceScope();
+  return scope ? { guidance: { scope } } : {};
+}
 
 /** Runs inside the actual TUI process. Observers own no lifetime-critical fd. */
 export class TuiWorkerServer {
@@ -605,6 +612,7 @@ export class TuiWorkerServer {
       pid: process.pid,
       sessionFile: this.manifest.sessionFile,
       presentation: this.manifest.presentation,
+      ...guidanceSnapshot(),
       ...(this.manifest.assignedGoal ? { assignedGoal: this.adapter.goalState?.() } : {}),
       interactions: (this.state.interactions ?? [])
         .filter((item) => !item.answer && !item.cancelledAt)
@@ -682,7 +690,7 @@ export class TuiWorkerServer {
     // bypasses while checks/reap are pending, including the interval before a
     // reap-triggered verification flight is installed.
     if (
-      ["status", "events"].includes(r.operation) ||
+      ["status", "events", "rebind_guidance"].includes(r.operation) ||
       (r.operation === "cancel" &&
         (this.verificationFlight !== undefined || this.pendingNormalReapRequests > 0))
     )
@@ -729,6 +737,14 @@ export class TuiWorkerServer {
         sequence: this.state.sequence,
         data: this.snapshot(),
       });
+    if (r.operation === "rebind_guidance") {
+      try {
+        rebindGuidance(r.binding);
+      } catch (error) {
+        return fail("invalid", error instanceof Error ? error.message : "Guidance rebind failed");
+      }
+      return this.response(r, { ok: true, receipt: "applied", sequence: this.state.sequence });
+    }
     if (r.operation === "events") {
       const events = this.state.events.filter((event) => event.sequence > r.afterSequence);
       // Bound response bytes even if event producers attach large data.

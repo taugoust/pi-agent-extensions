@@ -173,3 +173,25 @@ test("public discovery strips control capability and clones nested placement", (
   exposed.placement.paneId = "%99";
   assert.equal(manifest.placement.paneId, "%3");
 });
+
+test("guidance rebinding carries only a socket, a token and a worker scope", () => {
+  const scope = {
+    ownerSessionId: "owner",
+    ownerRuntimeEpoch: "epoch",
+    taskId: "task",
+    childId: "child",
+    attempt: 1,
+    workerEpoch: "worker",
+  };
+  const binding = { socket: "/tmp/pi-guidance-x/owner.sock", token: "b".repeat(64), scope };
+  const request = { ...identity, operation: "rebind_guidance", binding };
+  assert.deepEqual(parseTuiWorkerRequest(request), request);
+  const invalid = [
+    { ...binding, token: "short" },
+    { ...binding, extra: true },
+    { ...binding, scope: { ...scope, attempt: 0 } },
+    { ...binding, scope: undefined },
+  ];
+  for (const bad of invalid)
+    assert.throws(() => parseTuiWorkerRequest({ ...request, binding: bad }));
+});

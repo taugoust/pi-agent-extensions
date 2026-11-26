@@ -9,7 +9,7 @@ import type { ChildGoalSnapshot } from "./goal-executor.ts";
 import type { DelegatedGoalChild } from "../workflows/delegated-goals.ts";
 import { HeadlessForegroundManager } from "./headless-foreground.ts";
 import { reapOwnedWorktrees, type ReapReport } from "../shared/worktree-reap.ts";
-import { pendingGuidance } from "./guidance.ts";
+import { guidanceRebinding, pendingGuidance } from "./guidance.ts";
 import { nativeResultReport } from "./result-report.ts";
 import {
   validateToolPresentation,
@@ -1091,6 +1091,26 @@ export class TuiNativeManager {
       throw new Error("Worker artifact identity mismatch");
     return readPrivateJson(path);
   }
+  /**
+   * A worker that outlived its owner runtime still holds the old guidance socket.
+   * Hand it a fresh binding. Failure only leaves the worker's clear stale error.
+   */
+  private async rebindStaleGuidance(m: TuiWorkerManifest, scope: unknown): Promise<void> {
+    if (!scope || typeof scope !== "object") return;
+    const guidance = scope as import("./guidance.ts").GuidanceScope;
+    const ownWorker =
+      guidance.taskId === m.taskId &&
+      guidance.childId === m.childId &&
+      guidance.workerEpoch === m.workerEpoch;
+    if (!ownWorker) return;
+    try {
+      const binding = guidanceRebinding(guidance);
+      if (!binding) return;
+      await callTuiWorker(m, { operation: "rebind_guidance", binding }, { timeoutMs: 1000 });
+    } catch {
+      /* The next observation retries. */
+    }
+  }
   private async observe(g: Group, c: Child, observationOnly = false): Promise<void> {
     // Revoke cached acceptance BEFORE awaiting any observation. A disconnect,
     // non-ok response or missing manifest must never leave a prior pass current.
@@ -1177,6 +1197,7 @@ export class TuiNativeManager {
         state.attempt !== (c.attempt ?? 1)
       )
         throw new Error("Worker status identity mismatch");
+      await this.rebindStaleGuidance(m, state.guidance?.scope);
       c.lastOutcome = state.lastOutcome
         ? taskOutcome(
             this.retainedArtifact(c, state.lastOutcome, "outcome"),

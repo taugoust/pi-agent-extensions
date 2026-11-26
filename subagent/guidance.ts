@@ -10,7 +10,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { atomicPrivateJson, privateDirectory, readPrivateJson } from "./tui-worker-store.ts";
 import { validInteractionInput, validInteractionAnswer } from "../shared/task-interactions.ts";
 import type { TaskInteractionInput, TaskInteractionAnswer } from "../shared/foreground-tasks.ts";
@@ -76,6 +76,11 @@ const scopeKeys = [
   "goalId",
 ] as const;
 const nonce = () => randomBytes(16).toString("hex");
+function removeStaleSocketDirectory(directory: unknown) {
+  if (typeof directory !== "string") return;
+  const ours = dirname(directory) === tmpdir() && basename(directory).startsWith("pi-guidance-");
+  if (ours) rmSync(directory, { recursive: true, force: true });
+}
 const canonical = (value: any): string =>
   JSON.stringify(value, (_key, item) =>
     item && typeof item === "object" && !Array.isArray(item)
@@ -169,6 +174,17 @@ export function guidanceLaunchEnvironment(
   };
 }
 
+/**
+ * Fresh binding for a live worker whose binding names an earlier owner runtime.
+ * Undefined when this runtime does not own the scope or the binding is current.
+ */
+export function guidanceRebinding(scope: GuidanceScope): GuidanceBinding | undefined {
+  const owner = owners.get(scope.ownerSessionId);
+  if (!owner || scope.ownerRuntimeEpoch === owner.epoch) return undefined;
+  const { ownerRuntimeEpoch: _stale, ...rest } = scope;
+  return owner.bind(rest);
+}
+
 /** Owner-hosted lane. A connection is the actual worker waiter, not a prompt queue.
  * Journal writes are synchronous/atomic and always precede notification or resolution.
  * Disconnected/restarted promises are never reconstructed or answered by replay.
@@ -225,6 +241,7 @@ export class GuidanceBroker {
           processToken(prior.pid) === prior.token
         )
           throw new Error("Another live runtime owns coordinator guidance");
+        removeStaleSocketDirectory(prior.socketDirectory);
         unlinkSync(this.lockFile);
       }
     }
@@ -255,11 +272,23 @@ export class GuidanceBroker {
   private persist() {
     atomicPrivateJson(this.file, { version: 1, records: this.records });
   }
+  /** A crashed runtime never runs close(), so its successor removes the directory. */
+  private recordSocketDirectory() {
+    const lock = readPrivateJson(this.lockFile) as any;
+    writeFileSync(
+      this.lockFile,
+      JSON.stringify({ ...lock, socketDirectory: this.socketDirectory }),
+      {
+        mode: 0o600,
+      },
+    );
+  }
   async start(): Promise<void> {
     if (this.closed) throw new Error("Guidance owner closed during startup");
     if (owners.has(this.ownerSessionId)) throw new Error("Guidance owner already active");
     this.socketDirectory = mkdtempSync(join(tmpdir(), "pi-guidance-"));
     chmodSync(this.socketDirectory, 0o700);
+    this.recordSocketDirectory();
     this.server = createServer((socket) => {
       if (this.closed || this.sockets.size >= 128) {
         socket.destroy();
@@ -663,6 +692,12 @@ export class GuidanceBroker {
 }
 
 /** No automatic retry: a failed transport cannot reconstruct a promise or replay an answer. */
+const STALE_BINDING =
+  "Owning coordinator restarted; guidance binding is stale until it observes this worker again";
+function connectionError(error: NodeJS.ErrnoException): Error {
+  if (error.code === "ECONNREFUSED" || error.code === "ENOENT") return new Error(STALE_BINDING);
+  return error;
+}
 export function requestGuidance(
   binding: GuidanceBinding,
   workerRuntimeEpoch: string,
@@ -716,7 +751,7 @@ export function requestGuidance(
         }) + "\n",
       );
     });
-    socket.on("error", (error) => finish(error));
+    socket.on("error", (error) => finish(connectionError(error)));
     socket.on("close", () => finish(new Error("Guidance owner unavailable; no answer replay")));
     socket.on("data", (chunk) => {
       data = Buffer.concat([data, chunk]);
