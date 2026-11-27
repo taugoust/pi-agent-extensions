@@ -650,6 +650,13 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
         },
       });
       await worker.start();
+      if (launchManifest?.assignedGoal) {
+        (globalThis as any).__paeGoalParentNotifyV1 = (message: string) => {
+          if (!worker || worker.sealed || !allowed()) return false;
+          worker.notification({ message, requires_guidance: true });
+          return true;
+        };
+      }
       if (nameStore && appliedName) await applyName(appliedName, "pi");
       if (nameStore) {
         nameWatch = setInterval(() => {
@@ -1166,6 +1173,7 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
     if ((globalThis as any).__piIdleContextParentV1 === parentIdleCapability)
       delete (globalThis as any).__piIdleContextParentV1;
     parentIdleCapability = undefined;
+    delete (globalThis as any).__paeGoalParentNotifyV1;
     await worker?.close();
     worker = undefined;
   });

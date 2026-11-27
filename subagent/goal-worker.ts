@@ -18,6 +18,7 @@ import {
   GOAL_REVIEW_ENTRY,
   GOAL_REVIEW_WORKER_KEY,
 } from "../workflows/goal-review-worker.ts";
+import { registerGoalParentNotifications } from "./goal-parent-notification.ts";
 
 type Binding = {
   path: string;
@@ -114,6 +115,7 @@ export default async function goalWorker(pi: ExtensionAPI) {
   let questions: Questions | undefined;
   let reviews: Reviews | undefined;
   let server: Awaited<ReturnType<typeof serveGoalWorker>> | undefined;
+  let disposeGoalParentNotifications: (() => void) | undefined;
 
   function startReviews(ctx: ExtensionContext): Reviews | undefined {
     if (!binding.reviewEnabled) return undefined;
@@ -319,6 +321,8 @@ export default async function goalWorker(pi: ExtensionAPI) {
 
   function stop() {
     current = false;
+    disposeGoalParentNotifications?.();
+    disposeGoalParentNotifications = undefined;
     questions?.dispose();
     reviews?.dispose();
   }
@@ -335,6 +339,11 @@ export default async function goalWorker(pi: ExtensionAPI) {
     if (retained) policy = dedicatedGoalPolicy(retained.policy);
     reviews = startReviews(ctx);
     questions = startQuestions(ctx);
+    disposeGoalParentNotifications = registerGoalParentNotifications(
+      (handler) => pi.on("tool_result", handler),
+      () => globals.__paeGoalParentNotifyV1,
+      () => ctx.sessionManager.getBranch() as unknown[],
+    );
     current = true;
     server = await serveGoalWorker({
       ...binding,

@@ -298,6 +298,7 @@ export default function deterministicWorkerProvider(pi: ExtensionAPI): void {
               name: "goal_wait",
               arguments: { reason: "Await deterministic parent steering" },
             },
+            { type: "text", text: "MANAGED_GOAL_WAIT_REPORT" },
           ];
       }
       const message = {

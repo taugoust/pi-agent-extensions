@@ -195,6 +195,7 @@ runtimeTests=(
   subagent/worktree-reap-manager.test.ts
   subagent/tui-worker-tmux-reap-policy.test.ts
   subagent/tui-worker-extension.test.ts
+  subagent/goal-parent-notification.test.ts
   subagent/model-inactivity.test.ts
   subagent/headless-foreground.test.ts
   subagent/session-source.test.ts
