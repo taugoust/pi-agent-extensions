@@ -24,6 +24,7 @@ import {
   MAX_GOAL_ID_LENGTH,
   truncateNotification,
 } from "./runtime.js";
+import { runGoalCompletionWorkerGate } from "./worker-cleanup.js";
 import {
   createGoalWait,
   GOAL_WAIT_WAKE_SEMANTICS,
@@ -58,6 +59,7 @@ interface GoalWaitDetails {
 
 const MAX_GOAL_TEXT_LENGTH = 4_000;
 const MAX_BLOCKER_REASON_LENGTH = 1_000;
+
 const MAX_BLOCKER_EVIDENCE_LENGTH = 4_000;
 
 export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
@@ -174,14 +176,38 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
         };
       }
 
-      completeVerifiedGoal(runtime, ctx, finalGoal!, summary);
-
-      return {
-        content: toolContent(`Goal complete: ${summary}`),
-        // Rejections are ordinary results too; only this marks an accepted completion.
-        details: { ...completionDetails(goal, requestedGoalId, summary), accepted: true },
-        terminate: true,
-      };
+      return await runGoalCompletionWorkerGate(
+        ctx,
+        () => {
+          const currentGoal = runtime.activeGoal;
+          if (
+            !currentGoal ||
+            currentGoal.id !== finalGoal!.id ||
+            currentGoal.revision !== finalGoal!.revision ||
+            currentGoal.status !== finalGoal!.status
+          ) {
+            const rejection = "Goal completion rejected: the goal changed during worker cleanup.";
+            notifyTerminal(ctx.ui, rejection, "warning");
+            return {
+              content: toolContent(rejection),
+              details: completionDetails(goal, requestedGoalId, summary),
+            };
+          }
+          completeVerifiedGoal(runtime, ctx, currentGoal, summary);
+          return {
+            content: toolContent(`Goal complete: ${summary}`),
+            details: { ...completionDetails(goal, requestedGoalId, summary), accepted: true },
+            terminate: true,
+          };
+        },
+        (workerRejection) => {
+          notifyTerminal(ctx.ui, workerRejection, "warning");
+          return {
+            content: toolContent(workerRejection),
+            details: completionDetails(goal, requestedGoalId, summary),
+          };
+        },
+      );
     },
   });
 

@@ -43,6 +43,11 @@ assert.throws(
   /valid task_id/,
 );
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "tasks", limit: 20 }));
+assert.doesNotThrow(() => validateBackgroundOperation({ operation: "cancel", child_id: childId }));
+assert.doesNotThrow(() =>
+  validateBackgroundOperation({ operation: "cancel", job_id: jobId, child_id: childId }),
+);
+assert.throws(() => validateBackgroundOperation({ operation: "cancel", child_id: "bad" }));
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "verify", job_id: jobId }));
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "verify", child_id: childId }));
 assert.throws(

@@ -127,6 +127,12 @@ test("panel user prompts have a separate authenticated origin from parent instru
 
 test("cancel, explicit verify and idle-reap reservation are distinct operations", () => {
   assert.equal(parseTuiWorkerRequest({ ...identity, operation: "cancel" }).operation, "cancel");
+  assert.deepEqual(parseTuiWorkerRequest({ ...identity, operation: "cancel", idleOnly: true }), {
+    ...identity,
+    operation: "cancel",
+    idleOnly: true,
+  });
+  assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "cancel", idleOnly: false }));
   assert.equal(parseTuiWorkerRequest({ ...identity, operation: "verify" }).operation, "verify");
   assert.equal(
     parseTuiWorkerRequest({ ...identity, operation: "prepare_reap" }).operation,

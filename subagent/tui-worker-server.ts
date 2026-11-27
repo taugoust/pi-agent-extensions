@@ -52,7 +52,7 @@ export type TuiWorkerAdapter = {
    * Return a release callback; failures must release the local reservation. */
   prepareJobReap?(
     preserve: (report: unknown) => Promise<void>,
-    options?: { force?: true; reason?: string },
+    options?: { force?: true; reason?: string; allowFinishedWaiters?: true },
   ): Promise<() => void>;
   /** Trusted profile policy cleanup, after job/descendant reservation and before sealing. */
   prepareWorktreeReap?(options: { force?: true; reason?: string }): Promise<unknown>;
@@ -251,6 +251,7 @@ export class TuiWorkerServer {
       this.state.verificationReport = undefined;
     }
     this.state.active = true;
+    delete this.state.parentCancelledIdle;
     this.state.phase = "running";
     this.event("running");
     return true;
@@ -1006,6 +1007,18 @@ export class TuiWorkerServer {
         break;
       }
       case "cancel":
+        if (r.idleOnly === true) {
+          const pendingInteraction = this.state.interactions?.some(
+            (interaction) => !interaction.answer && !interaction.cancelledAt,
+          );
+          if (this.state.active || !this.adapter.isIdle() || pendingInteraction)
+            return fail("busy", "Idle-only cancellation refused while worker needs attention");
+          this.inhibitAutoContinuation();
+          this.state.parentCancelledIdle = true;
+          this.event("cancelled");
+          data = { ...this.snapshot(), idleOnly: true };
+          break;
+        }
         this.inhibitAutoContinuation();
         const verificationCancellationPending = !!this.verificationFlight;
         this.verificationAbort?.abort();
@@ -1223,6 +1236,11 @@ export class TuiWorkerServer {
         throw new Error(
           "Child-local job cleanup controller unavailable; keep worker alive and reload/recover its controller",
         );
+      const goal = this.adapter.goalState?.();
+      const allowFinishedWaiters =
+        this.manifest.assignedGoal &&
+        goal?.entryId === this.manifest.assignedGoal.entryId &&
+        goal.status === "complete";
       release = await this.adapter.prepareJobReap(
         async (report) => {
           artifact = this.store.artifact("job-cleanup", this.state.sequence + 1, {
@@ -1231,7 +1249,10 @@ export class TuiWorkerServer {
             report,
           });
         },
-        r.force === true ? { force: true, reason: r.reason! } : {},
+        {
+          ...(r.force === true ? { force: true, reason: r.reason! } : {}),
+          ...(allowFinishedWaiters ? { allowFinishedWaiters: true } : {}),
+        },
       );
       if (!artifact)
         throw new Error("Child-local job cleanup did not preserve a verification report");
