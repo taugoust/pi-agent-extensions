@@ -150,6 +150,7 @@ async function fixture(options = {}) {
           return stream;
         },
       });
+    options.beforeIdle?.(pi);
     idle(pi, {
       readSettings: () => ({
         idleMinutes: 1,
@@ -352,6 +353,124 @@ test("bridge preflight Compact preserves notification entries and original promp
       "original message follows the compaction in the active branch",
     );
     assert.equal(f.stats.physical, 1);
+  } finally {
+    await f.close();
+  }
+});
+test("bridge-owned compact result is accepted with either hook registration order", async () => {
+  const bridgeHook = (pi) =>
+    pi.on("session_before_compact", (event) => ({
+      compaction: {
+        summary: "Bridge-owned idle summary",
+        firstKeptEntryId: event.preparation.firstKeptEntryId,
+        tokensBefore: event.preparation.tokensBefore,
+        usage: response().usage,
+        details: { bridgeSummary: true },
+      },
+    }));
+  for (const bridgeRunsLast of [false, true]) {
+    const f = await fixture(bridgeRunsLast ? { register: bridgeHook } : { beforeIdle: bridgeHook });
+    try {
+      const preflight = f.capability.check();
+      await until(() => f.capability.pending);
+      f.capability.decide(f.capability.pending.id, "compact");
+      assert.equal(await preflight, "continue");
+      const compaction = f.manager.getBranch().findLast((entry) => entry.type === "compaction");
+      const branch = f.manager.getBranch();
+      const compactIndex = branch.findIndex((entry) => entry.id === compaction?.id);
+      assert.ok(compaction);
+      assert.equal(compaction.fromHook, true);
+      assert.equal(branch[compactIndex - 1].id, compaction.parentId);
+      assert.ok(branch.some((entry) => entry.id === compaction.firstKeptEntryId));
+      assert.equal(compaction.summary === "Bridge-owned idle summary", bridgeRunsLast);
+      if (bridgeRunsLast) assert.equal(compaction.details.idleContextExplicitAttempt, undefined);
+      else assert.equal(typeof compaction.details.idleContextExplicitAttempt, "string");
+      assert.equal(f.stats.summary, 1, "both registered handlers may prepare a summary");
+    } finally {
+      await f.close();
+    }
+  }
+});
+test("user cancellation during compaction is not retained as a failed prompt", async () => {
+  let f;
+  f = await fixture({
+    duringSummary: () => {
+      const pending = f.capability.pending;
+      if (pending?.state === "compacting") f.capability.decide(pending.id, "cancel");
+    },
+  });
+  try {
+    await f.session.prompt("cancel this held prompt", { source: "rpc" });
+    await until(() => f.capability.pending);
+    f.capability.decide(f.capability.pending.id, "compact");
+    await until(() =>
+      f.manager
+        .getBranch()
+        .some(
+          (entry) =>
+            entry.customType === "idle-context-submission" && entry.data.state === "cancelled",
+        ),
+    );
+    const records = f.manager
+      .getBranch()
+      .filter((entry) => entry.customType === "idle-context-submission");
+    assert.equal(records.at(-1).data.text, "cancel this held prompt");
+    assert.equal(
+      records.some((entry) => entry.data.state === "failed"),
+      false,
+    );
+    assert.equal(f.stats.physical, 0);
+  } finally {
+    await f.close();
+  }
+});
+test("remote preflight errors reject and retain the exact original payload", async () => {
+  const rejectCompaction = (pi) => pi.on("session_before_compact", () => ({ cancel: true }));
+  const f = await fixture({ register: rejectCompaction });
+  try {
+    const preflight = f.capability.check();
+    await until(() => f.capability.pending);
+    f.capability.decide(f.capability.pending.id, "compact");
+    await assert.rejects(preflight, /Idle prompt compaction failed: Compaction cancelled/);
+    const payload = {
+      text: "remote payload after rejection",
+      images: [{ type: "image", data: "exact-image", mimeType: "image/png" }],
+      streamingBehavior: "followUp",
+    };
+    assert.equal(f.capability.retainPrompt(payload, "compaction rejected"), true);
+    const record = f.manager
+      .getBranch()
+      .findLast((entry) => entry.customType === "idle-context-submission").data;
+    assert.equal(record.state, "failed");
+    assert.equal(record.text, payload.text);
+    assert.deepEqual(record.images, payload.images);
+    assert.equal(record.streamingBehavior, "followUp");
+    assert.equal(f.stats.physical, 0);
+  } finally {
+    await f.close();
+  }
+});
+test("terminal held prompt survives a Pi compaction rejection", async () => {
+  const rejectCompaction = (pi) => pi.on("session_before_compact", () => ({ cancel: true }));
+  const f = await fixture({ register: rejectCompaction });
+  try {
+    await f.session.prompt("terminal prompt after rejection", { source: "rpc" });
+    await until(() => f.capability.pending);
+    f.capability.decide(f.capability.pending.id, "compact");
+    await until(() =>
+      f.manager
+        .getBranch()
+        .some(
+          (entry) =>
+            entry.customType === "idle-context-submission" && entry.data.state === "failed",
+        ),
+    );
+    const record = f.manager
+      .getBranch()
+      .findLast((entry) => entry.customType === "idle-context-submission").data;
+    assert.equal(record.text, "terminal prompt after rejection");
+    assert.equal(record.state, "failed");
+    assert.equal(f.stats.physical, 0);
   } finally {
     await f.close();
   }

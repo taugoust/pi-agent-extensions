@@ -10,7 +10,12 @@ By default a warning is needed when the last successful model response on the ac
 - A worker's **owning parent** chooses; the worker never opens its own questionnaire. Native TUI and native RPC-headless controllers use the same parent decision service.
 - Without a usable user/parent channel, the request **stays pending**. Missing or disconnected UI is never approval, nor an automatic Cancel.
 - `/idle-context` shows/resolves a pending root decision. `/idle-context ignore|compact|cancel [request-id]` is explicit user control. Worker commands cannot approve themselves.
-- The existing remote preflight capability (`__piIdleContextPreflightV1`) exposes `ready`, `check(signal)`, read-only `pending`, and request-bound `decide(id, choice)`. A transport can signal `idle-context:decision-channel-ready` after attaching a decision channel; reconnect is not consent.
+- The remote preflight capability (`__piIdleContextPreflightV1`) exposes `ready`,
+  `check(signal)`, read-only `pending`, request-bound `decide(id, choice)`, and
+  `retainPrompt(payload, reason): boolean`. The payload is
+  `{ text, images?, streamingBehavior? }`; retention records failure and never replays.
+  A transport can signal `idle-context:decision-channel-ready` after attaching a
+  decision channel; reconnect is not consent.
 
 An accepted raw submission is consumed before asynchronous decision/compaction. Ignore replays its exact text/images once without command/template expansion. Cancel discards it. One pending submission is retained; a second is explicitly refused rather than overwriting the first. Pending payloads are session custom entries and survive extension reload, but approvals do not: a fresh decision is required. A durable `released` reservation precedes replay to avoid duplicate sends after a crash. A crash between reservation and send may require explicit resubmission; it never silently replays an uncertain request.
 
@@ -28,7 +33,21 @@ Producer-confirmed terminal completions, identity-bound child idle-decision cont
 
 `session_before_compact` retains Pi's public native `compact()` algorithm with current account routing and a configured cheap physical model. Warning context percentage does not govern cheap summary selection: after the idle threshold, a configured cheap model handles native compaction. Warm native compaction remains Pi-owned. Explicit Compact forces the cheap model regardless of current idle threshold.
 
-Replay requires a newly persisted matching compaction receipt, not only a callback. Failed, empty, partial, tool-calling or aborted summaries cancel; they never silently fall back to the expensive conversation model. Conversation model/thinking, instructions, retained boundary, usage and cumulative file tracking are preserved. Branch summarization is a different operation, not owned by this extension.
+A request accepts the sole new compaction from its own `ctx.compact()` only when its
+completion result matches the appended entry and the active branch remains safe.
+Summary authorship and extension markers do not affect that check. Genuine
+compaction/preflight failures reject with an error; intentional Cancel and unsafe
+branch/session changes remain cancellation. Held failures are persisted as `failed`,
+reported as errors, and never auto-replayed.
+
+`/idle-context recover [request-id]` restores only text to an empty editor; it never
+sends the prompt. Without an ID it selects only the latest failed prompt. An explicit ID
+can also select a released prompt, which may already have been delivered; verify before
+resending. Saved images and delivery preferences remain in the record but are not
+reattached or restored. Summaries never silently fall back to the expensive
+conversation model. Conversation model/thinking, instructions, retained boundary, usage
+and cumulative file tracking are preserved. Branch summarization is a different
+operation, not owned by this extension.
 
 ## Supported stock Pi boundary
 
