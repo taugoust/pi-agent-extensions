@@ -35,6 +35,7 @@ tests=(
   workflows/goal-review-worker.test.ts
   questionnaire/goal-attachments.test.mjs
   workflows/delegated-child.test.mjs
+  workflows/delegated-restore.test.mjs
   subagent/goal-policy.test.ts
   subagent/coordinator-role.test.ts
   subagent/goal-executor.test.ts
@@ -46,6 +47,7 @@ for i in "${!tests[@]}"; do
   tests[$i]="$source_root/${tests[$i]}"
 done
 node --experimental-transform-types --test "${tests[@]}"
+timeout 30s node "$source_root/tests/goal-wait-runtime.mjs" "$pi_package"
 probe="$source_root/tests/package-load.mjs"
 timeout 30s node "$probe" "$pi_package/bin/pi" \
   "$bundle/workflows" "$bundle/subagent" --expect goal worktree background
