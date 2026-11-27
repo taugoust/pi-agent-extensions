@@ -2,7 +2,72 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createDelegatedGoalExecutor, type ChildGoalSnapshot } from "./goal-executor.ts";
 import { DelegatedGoalRegistry } from "../workflows/delegated-goals.ts";
+import { randomUUID } from "node:crypto";
 import type { DelegatedGoalEntry } from "../workflows/delegated-goals.ts";
+import { openRetainedSession } from "./retained-session.ts";
+
+async function activeSavedGoal() {
+  const identity = {
+    sessionId: "s",
+    runtimeId: "r",
+    taskId: "task",
+    childId: "child",
+    jobId: "job",
+    attempt: 1,
+    workerEpoch: "epoch",
+  };
+  const executor = createDelegatedGoalExecutor({
+    sessionId: "s",
+    runtimeId: "r",
+    async launch() {
+      return {
+        identity,
+        model: "fixture",
+        async start() {
+          return {
+            goalId: "child-goal",
+            status: "active",
+            executionStopped: false,
+            waiting: "child wait",
+          };
+        },
+        async resume() {
+          throw Error("unexpected resume");
+        },
+        async pause() {
+          throw Error("unexpected pause");
+        },
+        async observe() {
+          throw Error("unexpected observation");
+        },
+        async stop() {},
+      };
+    },
+  });
+  const registry = new DelegatedGoalRegistry("s", executor, () => {});
+  let state = await registry.mutate("s", {
+    action: "goals.create",
+    requestId: "create",
+    expectedGoalId: null,
+    objective: "Verify reaped child output",
+  });
+  let entry = state.entries[0];
+  state = await registry.mutate("s", {
+    action: "goals.add_task",
+    requestId: "task",
+    expectedGoalId: entry.id,
+    expectedEntryRevision: entry.revision,
+    text: "Review the output",
+  });
+  entry = state.entries[0];
+  state = await registry.mutate("s", {
+    action: "goals.start",
+    requestId: "start",
+    expectedGoalId: entry.id,
+    expectedEntryRevision: entry.revision,
+  });
+  return { state, entry: state.entries[0] };
+}
 
 test("Pause racing exact owned completion preserves complete/delivery and never downgrades to paused", async () => {
   let wrongId = true,
@@ -154,6 +219,120 @@ for (const status of ["blocked", "usage_limited", "budget_limited"] as const)
     assert.deepEqual(entry.child, child);
     assert.deepEqual(entry.tasks, snapshot().tasks);
   });
+
+test("reaped active goal pauses without a session and completes with fresh evidence", async () => {
+  const saved = await activeSavedGoal();
+  let opened = 0;
+  const restored = createDelegatedGoalExecutor({
+    sessionId: "s",
+    runtimeId: "restored",
+    async verifyStopped() {},
+    async retainedCompletion() {
+      const manager = await openRetainedSession(
+        `/tmp/missing-retained-session-${randomUUID()}`,
+        "child-session",
+        (file) => {
+          opened++;
+          return { file, getSessionId: () => "child-session" };
+        },
+      );
+      if (!manager) return null;
+      throw Error("unexpected retained manager");
+    },
+    async launch() {
+      throw Error("must not relaunch");
+    },
+  });
+  const registry = new DelegatedGoalRegistry("s", restored, () => {}, saved.state);
+  let state = await registry.mutate("s", {
+    action: "goals.pause",
+    requestId: "pause-reaped",
+    expectedGoalId: saved.entry.id,
+    expectedEntryRevision: saved.entry.revision,
+  });
+  const paused = state.entries[0];
+  assert.equal(paused.status, "paused");
+  assert.equal(opened, 0);
+  state = await registry.mutate("s", {
+    action: "goals.complete",
+    requestId: "complete-reaped",
+    expectedGoalId: paused.id,
+    expectedEntryRevision: paused.revision,
+    user_authorized: true,
+    summary: "Reviewed and verified the child output.",
+    taskEvidence: [{ taskId: paused.tasks[0].id, evidence: "Reviewed the output." }],
+  });
+  assert.equal(state.entries[0].status, "complete");
+  assert.equal(state.entries[0].tasks[0].status, "completed");
+});
+
+test("retained session identity mismatch and other IO errors reject saved Pause", async () => {
+  const saved = await activeSavedGoal();
+  let opened = 0;
+  const wrongId = createDelegatedGoalExecutor({
+    sessionId: "s",
+    runtimeId: "restored",
+    async verifyStopped() {},
+    async retainedCompletion() {
+      await openRetainedSession(
+        "/present-session",
+        "saved-session",
+        () => {
+          opened++;
+          return { getSessionId: () => "foreign-session" };
+        },
+        async () => {},
+      );
+      return null;
+    },
+    async launch() {
+      throw Error("must not relaunch");
+    },
+  });
+  const registry = new DelegatedGoalRegistry("s", wrongId, () => {}, saved.state);
+  await assert.rejects(
+    registry.mutate("s", {
+      action: "goals.pause",
+      requestId: "wrong-id-pause",
+      expectedGoalId: saved.entry.id,
+      expectedEntryRevision: saved.entry.revision,
+    }),
+  );
+  assert.equal(registry.snapshot().entries[0].status, "active");
+  assert.equal(opened, 1);
+
+  const denied = Object.assign(Error("permission denied"), { code: "EACCES" });
+  const ioFailure = createDelegatedGoalExecutor({
+    sessionId: "s",
+    runtimeId: "restored",
+    async verifyStopped() {},
+    async retainedCompletion() {
+      await openRetainedSession(
+        "unreadable-session",
+        "saved-session",
+        () => null,
+        async () => {
+          throw denied;
+        },
+      );
+      return null;
+    },
+    async launch() {
+      throw Error("must not relaunch");
+    },
+  });
+  const ioRegistry = new DelegatedGoalRegistry("s", ioFailure, () => {}, saved.state);
+  await assert.rejects(
+    ioRegistry.mutate("s", {
+      action: "goals.pause",
+      requestId: "io-failure-pause",
+      expectedGoalId: saved.entry.id,
+      expectedEntryRevision: saved.entry.revision,
+    }),
+    (error) => error === denied,
+  );
+  assert.equal(ioRegistry.snapshot().entries[0].status, "active");
+});
 
 for (const action of ["goals.pause", "goals.resume"] as const)
   test(`reload stale ${action} reconciles terminal before intent`, async () => {
