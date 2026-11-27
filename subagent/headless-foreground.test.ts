@@ -857,7 +857,7 @@ test("managed foreground reap resolves physical checkout aliases and skips only 
     alias = join(root, "checkout-alias"),
     retarget = join(root, "retargeted");
   const unrelated = join(root, "unrelated"),
-    loop = join(root, "loop");
+    loop = join(checkout, "loop");
   await mkdir(checkout);
   await mkdir(retarget);
   await mkdir(unrelated);
@@ -967,6 +967,20 @@ test("managed foreground reap resolves physical checkout aliases and skips only 
       await manager.worktreeReapActivity("activity-caller", checkout),
       false,
       "unrelated active inventory permits cleanup",
+    );
+    child.activityCwd = join(root, "removed-foreign-checkout");
+    manager.persist(group);
+    assert.equal(
+      await manager.worktreeReapActivity("activity-caller", checkout),
+      false,
+      "missing foreign checkout does not block cleanup",
+    );
+    child.activityCwd = join(checkout, "removed-in-target-checkout");
+    manager.persist(group);
+    await assert.rejects(
+      manager.worktreeReapActivity("activity-caller", checkout),
+      undefined,
+      "missing checkout inside target blocks cleanup",
     );
     child.spec.cwd = join(root, "removed-worktree");
     child.status = "reaped";
