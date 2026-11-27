@@ -329,7 +329,13 @@ test("worker RPC retains confirmed limits across reload and rejects mismatches",
     const { default: worker } = await import("../subagent/goal-worker.ts");
     const { requestGoalWorker } = await import("../subagent/goal-rpc.ts");
     const startWorker = async () => {
-      await worker({ ...f.pi, on: (name, fn) => workerHandlers.set(name, fn) });
+      await worker({
+        ...f.pi,
+        on(name, handler) {
+          workerHandlers.set(name, handler);
+          return () => workerHandlers.delete(name);
+        },
+      });
       await workerHandlers.get("session_start")({}, ctx);
     };
     const reloadWorker = async () => {
