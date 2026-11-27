@@ -131,6 +131,9 @@ async function setup(t: any) {
 
 test("coordinators reply by opaque handle; duplicates, stale, foreign and malformed handles fail closed", async (t) => {
   const { worker, owner, notices, execute } = await setup(t);
+  const tool = owner.tools.get("guidance");
+  assert.match(tool.description, /reply requires replyId/);
+  assert.match(tool.parameters.properties.replyId.description, /required for operation=reply/i);
   const waiting = execute(worker, "request_guidance", { prompt: "Which branch?" });
   const record = await notices.next();
   const listed = JSON.parse(
@@ -179,6 +182,13 @@ test("coordinators reply by opaque handle; duplicates, stale, foreign and malfor
   await assert.rejects(
     execute(owner, "guidance", { operation: "human", handle, guidance: "model consent" }),
     /no model answer/,
+  );
+  await assert.rejects(
+    execute(owner, "guidance", {
+      operation: "reply",
+      handle,
+      guidance: "Use main.",
+    }),
   );
   await execute(owner, "guidance", {
     operation: "reply",

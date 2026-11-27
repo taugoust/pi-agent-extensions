@@ -83,8 +83,17 @@ export function installGuidance(
   pi.registerTool({
     name: "guidance",
     label: "Coordinator guidance",
-    description:
-      "Resolve structured requests from your exact directly owned workers, not human goals.answer. list returns each request with an opaque handle; pass that handle to reply, escalate or human. reply supplies bounded implementation guidance and resolves the actual waiting tool. For questions outside your assignment use escalate to your direct parent; do not decide human preferences. human invokes the EXISTING questionnaire only at the top level and returns its actual human response to the correct worker; no model answer is accepted. Permission approvals are NEVER guidance. Retained unavailable/cancelled requests must not be replayed.",
+    description: [
+      "Resolve structured requests from your exact directly owned workers, not human goals.answer.",
+      "list returns each request with an opaque handle; pass it to reply, escalate or human.",
+      "reply requires replyId and bounded implementation guidance, then resolves the waiting tool.",
+      "For questions outside your assignment use escalate to your direct parent;",
+      "do not decide human preferences. human invokes the EXISTING questionnaire only at the",
+      "top level and returns its actual human response to the correct worker; no model answer is",
+      "accepted.",
+      "Permission approvals are NEVER guidance. Retained unavailable/cancelled requests must not",
+      "be replayed.",
+    ].join(" "),
     parameters: Type.Object(
       {
         operation: Type.Union([
@@ -100,7 +109,13 @@ export function installGuidance(
           }),
         ),
         target: Type.Optional(targetSchema),
-        replyId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+        replyId: Type.Optional(
+          Type.String({
+            minLength: 1,
+            maxLength: 128,
+            description: "Required for operation=reply. Unique idempotency ID for this answer.",
+          }),
+        ),
         guidance: Type.Optional(Type.String({ minLength: 1, maxLength: 8192 })),
         offset: Type.Optional(Type.Integer({ minimum: 0 })),
         limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 4 })),
@@ -151,7 +166,7 @@ export function installGuidance(
         const target = record ? handleTarget(record) : (params.target as GuidanceTarget);
         if (params.operation === "reply") {
           if (!params.replyId || !params.guidance)
-            throw new Error("Reply requires explicit idempotency ID and guidance");
+            throw new Error("Reply requires replyId and guidance");
           result = broker.reply(target, params.replyId, {
             kind: "guidance",
             guidance: params.guidance,
