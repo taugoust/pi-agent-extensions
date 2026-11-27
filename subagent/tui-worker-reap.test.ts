@@ -189,6 +189,76 @@ test("missing controller and absent preservation verification refuse safely", as
   }
 });
 
+test("idle-only cancellation refuses active work and accepts idle workers", async () => {
+  let aborts = 0;
+  await fixture(
+    {
+      abort() {
+        aborts++;
+      },
+    },
+    async (server, _store, manifest) => {
+      server.running(true);
+      const busy = await callTuiWorker(manifest, {
+        operation: "cancel",
+        idleOnly: true,
+      });
+      assert.equal(busy.ok, false);
+      if (!busy.ok) assert.equal(busy.code, "busy");
+      server.settled({ assistant: { stopReason: "stop", content: "done" } });
+      const idle = await callTuiWorker(manifest, {
+        operation: "cancel",
+        idleOnly: true,
+      });
+      assert.equal(idle.ok, true);
+      assert.equal(aborts, 0);
+    },
+  );
+});
+
+test("idle-only cancellation refuses unresolved worker interactions", async () => {
+  await fixture({}, async (server, _store, manifest) => {
+    server.state.interactions = [
+      {
+        id: "permission:pending",
+        workerEpoch: manifest.workerEpoch,
+        createdAt: new Date().toISOString(),
+        request: { kind: "permission" },
+      },
+    ];
+    const result = await callTuiWorker(manifest, {
+      operation: "cancel",
+      idleOnly: true,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.code, "busy");
+  });
+});
+
+test("finished Goal cleanup passes its narrow waiting-worker allowance", async () => {
+  let received: unknown;
+  await fixture(
+    {
+      goalState: () => ({ entryId: "goal-entry", status: "complete" }),
+      async prepareJobReap(preserve, options) {
+        received = options;
+        await preserve({ jobs: [] });
+        return () => {};
+      },
+    },
+    async (server, _store, manifest) => {
+      server.manifest.assignedGoal = {
+        entryId: "goal-entry",
+        policy: {},
+        goalTools: [],
+      } as any;
+      const result = await callTuiWorker(manifest, { operation: "prepare_reap" });
+      assert.equal(result.ok, true);
+      assert.deepEqual(received, { allowFinishedWaiters: true });
+    },
+  );
+});
+
 test("authentication rejects foreign sessions and sibling epochs before cleanup", async () => {
   let invoked = 0;
   await fixture(

@@ -142,6 +142,8 @@ type Child = {
   verification?: unknown;
   historicalVerification?: unknown;
   acceptedDelivery?: boolean;
+  assignedGoalStatus?: string | null;
+  workerSessionId?: string;
   verificationBypasses?: Array<{
     workerEpoch: string;
     attempt: number;
@@ -182,6 +184,8 @@ type Group = {
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
 const active = (child: Child) =>
   ["pending", "launching", "running", "waiting"].includes(child.state);
+const finishedGoal = (child: Child) =>
+  !!child.spec.assignedGoal && child.assignedGoalStatus === "complete";
 const pathWithin = (root: string, path: string) => {
   const part = relative(root, path);
   return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`));
@@ -608,6 +612,7 @@ export class TuiNativeManager {
             )
               throw new Error("Invalid descendant session header");
             sessionId = header.id;
+            c.workerSessionId = sessionId;
           } finally {
             closeSync(fd);
           }
@@ -687,9 +692,15 @@ export class TuiNativeManager {
   private async reapChild(
     g: Group,
     c: Child,
-    options: { force?: true; reason?: string; cleanupWorktree?: boolean } = {},
+    options: {
+      force?: true;
+      reason?: string;
+      cleanupWorktree?: boolean;
+      allowFinishedWaiters?: true;
+    } = {},
   ): Promise<void> {
-    if (active(c)) throw new Error(`Active child blocks reap: ${g.id}/${c.childId}`);
+    if (active(c) && !this.idleFinishedWaiter(c, options.allowFinishedWaiters))
+      throw new Error(`Active child blocks reap: ${g.id}/${c.childId}`);
     if (options.cleanupWorktree && !c.cleanupWorktreeRequested) {
       c.cleanupWorktreeRequested = true;
       this.save(g);
@@ -725,7 +736,11 @@ export class TuiNativeManager {
     // Ordinary profiles release only the worker lease and retain the Git worktree.
     if (c.spec.worktree) await releaseWorktree(g.owner, c.taskId, c.childId);
   }
-  private async reconcileWorktrees(g: Group, c: Child, options: { force?: true; reason?: string }) {
+  private async reconcileWorktrees(
+    g: Group,
+    c: Child,
+    options: { force?: true; reason?: string; allowFinishedWaiters?: true },
+  ) {
     const owners = new Set<string>();
     const nested = this.descendantGroups(g.owner, [{ ...g, children: [c] }], owners, true);
     const foreground = new HeadlessForegroundManager(
@@ -757,7 +772,7 @@ export class TuiNativeManager {
         ownedSessionIds: [...owners],
         context: {
           cwd: process.cwd(),
-          isIdle: () => !active(c),
+          isIdle: () => !active(c) || this.idleFinishedWaiter(c, options.allowFinishedWaiters),
           hasPendingMessages: () => false,
           managedWorktreeActivity: async (path) => {
             const justReaped = {
@@ -790,7 +805,7 @@ export class TuiNativeManager {
   }
   private async reapStoppedDescendants(
     groups: Group[],
-    options: { force?: true; reason?: string } = {},
+    options: { force?: true; reason?: string; allowFinishedWaiters?: true } = {},
   ): Promise<void> {
     for (let nested of [...groups].reverse()) {
       const release = this.observerLease(nested.owner);
@@ -807,7 +822,7 @@ export class TuiNativeManager {
         nested = fresh;
         for (const c of nested.children) {
           await this.observe(nested, c, true);
-          if (active(c))
+          if (active(c) && !this.idleFinishedWaiter(c, options.allowFinishedWaiters))
             throw new Error(`Active descendant blocks reap: ${nested.id}/${c.childId}`);
           if (c.report) this.retainedArtifact(c, c.report, "report");
           await this.reapChild(nested, c, options);
@@ -1302,6 +1317,7 @@ export class TuiNativeManager {
           state.assignedGoal.entryId !== m.assignedGoal.entryId
         )
           throw new Error("Managed Goal observation changed assignment");
+        c.assignedGoalStatus = state.assignedGoal?.status ?? null;
         if (state.assignedGoal?.status !== "complete") c.state = "waiting";
       }
       // Current-turn state is authoritative even after a replay gap. Only
@@ -1310,6 +1326,7 @@ export class TuiNativeManager {
         c.report = undefined;
         c.requiresCompaction = false;
       }
+      if (!state.active && state.parentCancelledIdle === true) c.state = "cancelled";
       if (observationOnly) return; // Ancestor observation never consumes/reroutes notifications or dispatches work.
       if (state.active) this.notifyActivity(g, c, state.sequence);
       const events = await callTuiWorker(
@@ -1639,6 +1656,38 @@ export class TuiNativeManager {
     } catch {
       return false;
     }
+  }
+  /** A waiting child whose last run finished, when cleanup of finished Goals allows it. */
+  private idleFinishedWaiter(c: Child, allowed?: boolean): boolean {
+    return allowed === true && c.state === "waiting" && this.finishedRun(c);
+  }
+  private async finishedGoalOwner(owner: string): Promise<boolean> {
+    for (const group of this.groups.values())
+      for (const child of group.children) {
+        if (child.workerSessionId !== owner || !child.spec.assignedGoal || child.reaped) continue;
+        try {
+          await this.observe(group, child, true);
+          if (child.observationError || !finishedGoal(child) || !this.finishedRun(child)) continue;
+          const ref = {
+            taskId: child.taskId,
+            childId: child.childId,
+            jobId: group.id,
+            attempt: child.attempt,
+          };
+          const goal = await this.goalRequest(group.owner, ref, child.spec.assignedGoal.entryId, {
+            operation: "observe",
+          });
+          if (
+            goal.entryId === child.spec.assignedGoal.entryId &&
+            goal.status === "complete" &&
+            goal.executionStopped === true
+          )
+            return true;
+        } catch {
+          return false;
+        }
+      }
+    return false;
   }
   private failedTerminalNotification(g: Group, c: Child, token: string, error: string): void {
     const previous = c.terminalNotificationRetry;
@@ -2710,7 +2759,7 @@ export class TuiNativeManager {
   async prepareReap(
     owner: string,
     preserve: (report: unknown) => Promise<void>,
-    options: { force?: true; reason?: string } = {},
+    options: { force?: true; reason?: string; allowFinishedWaiters?: true } = {},
   ): Promise<() => void> {
     if (this.owner !== owner || this.closed || this.reapReserved)
       throw new Error("Subagent cleanup authority unavailable");
@@ -2733,7 +2782,9 @@ export class TuiNativeManager {
           this.save(g);
         }
         const blockers = groups.flatMap((g) =>
-          g.children.filter(active).map((c) => `${g.id}/${c.childId} ${c.state}`),
+          g.children
+            .filter((c) => active(c) && !this.idleFinishedWaiter(c, options.allowFinishedWaiters))
+            .map((c) => `${g.id}/${c.childId} ${c.state}`),
         );
         if (blockers.length)
           throw new Error(
@@ -2935,6 +2986,25 @@ export class TuiNativeManager {
   hasOwnedGroups(owner: string): boolean {
     return [...this.groups.values()].some((g) => g.owner === owner);
   }
+  async completionInventory(owner: string) {
+    if (this.owner !== owner || this.closed || this.reapReserved)
+      throw new Error("Subagent inventory session changed");
+    if (this.inventoryErrors.length) throw new Error("Subagent inventory is unverifiable");
+    await this.serial(async () => {
+      for (const group of this.groups.values()) {
+        if (group.owner !== owner) continue;
+        for (const child of group.children) await this.observe(group, child, true);
+        this.save(group);
+      }
+    });
+    const descendants = await this.observeDescendants(owner);
+    return {
+      groups: [...this.groups.values()]
+        .filter((group) => group.owner === owner)
+        .map((group) => this.publicGroup(group)),
+      descendants: descendants.map((group) => this.publicGroup(group)),
+    };
+  }
   private async reapGroup(
     g: Group,
     owner: string,
@@ -2943,9 +3013,24 @@ export class TuiNativeManager {
   ): Promise<void> {
     let ownsReapFlight = false;
     try {
+      let allowFinishedWaiters = false;
       await this.serial(async () => {
         if (g.reaping) throw new Error("Group reap is already in progress");
-        if (g.children.some((c) => c.state === "running" || c.state === "waiting"))
+        const coordinator =
+          g.children.length === 1 && finishedGoal(g.children[0]) && this.finishedRun(g.children[0])
+            ? g.children[0]
+            : undefined;
+        allowFinishedWaiters =
+          coordinator?.workerSessionId !== undefined &&
+          (await this.finishedGoalOwner(coordinator.workerSessionId));
+        if (
+          g.children.some(
+            (c) =>
+              c.state === "running" ||
+              (c.state === "waiting" &&
+                !(allowFinishedWaiters && finishedGoal(c) && this.finishedRun(c))),
+          )
+        )
           throw new Error("Group is busy; reap never cancels active or waiting work");
         if (g.children.some((c) => c.state === "pending" || c.state === "launching"))
           throw new Error("Pending group work must finish or be explicitly cancelled before reap");
@@ -2953,7 +3038,11 @@ export class TuiNativeManager {
         const blockers = descendants
           .filter((group) => nestedIds.has(group.id))
           .flatMap((group) =>
-            group.children.filter(active).map((c) => `${group.id}/${c.childId} ${c.state}`),
+            group.children
+              .filter(
+                (child) => active(child) && !this.idleFinishedWaiter(child, allowFinishedWaiters),
+              )
+              .map((child) => `${group.id}/${child.childId} ${child.state}`),
           );
         if (blockers.length)
           throw new Error(
@@ -2977,12 +3066,16 @@ export class TuiNativeManager {
       // their own recursive cleanup through prepare_reap instead.
       await this.reapStoppedDescendants(
         descendants.filter((group) => nestedIds.has(group.id)),
-        params.force === true ? { force: true, reason: params.reason } : {},
+        {
+          ...(params.force === true ? { force: true, reason: params.reason } : {}),
+          ...(allowFinishedWaiters ? { allowFinishedWaiters: true } : {}),
+        },
       );
       for (const c of g.children)
         await this.reapChild(g, c, {
           ...(params.force === true ? { force: true, reason: params.reason } : {}),
           ...(params.cleanup_worktree === true ? { cleanupWorktree: true } : {}),
+          ...(allowFinishedWaiters ? { allowFinishedWaiters: true } : {}),
         });
       await this.serial(async () => {
         delete g.reaping;
@@ -3045,7 +3138,7 @@ export class TuiNativeManager {
         : g.children.some((c) => c.childId === params.child_id || c.taskId === params.task_id),
     );
     const descendantRead =
-      ["list", "tasks", "reap"].includes(op) ||
+      ["list", "tasks", "reap", "cancel"].includes(op) ||
       (!directTarget && ["status", "output", "result"].includes(op));
     const descendants = descendantRead ? await this.observeDescendants(owner) : [];
     let descendant = descendants.find((g) =>
@@ -3063,6 +3156,34 @@ export class TuiNativeManager {
         (params.task_id && !descendant.children.some((c) => c.taskId === params.task_id))
       )
         throw new Error("Descendant target identity mismatch");
+      if (op === "cancel") {
+        if (params.task_id !== undefined)
+          throw new Error("Descendant cancellation requires an exact child_id");
+        await this.refresh(owner);
+        if (!(await this.finishedGoalOwner(descendant.owner)))
+          throw new Error("Descendant cancellation requires its finished Goal coordinator");
+        const target = descendant.children.find(
+          (c) => c.childId === params.child_id || c.taskId === params.task_id,
+        );
+        if (!target)
+          throw new Error("Descendant cancellation requires an exact child_id or task_id");
+        await this.observe(descendant, target, true);
+        if (target.needsAttention || !this.finishedRun(target))
+          throw new Error("Running or unfinished descendants cannot be cancelled by their parent");
+        const manifest = this.manifest(target);
+        if (!manifest) throw new Error("Descendant worker identity is unavailable");
+        const stopped = await callTuiWorker(manifest, {
+          operation: "cancel",
+          idleOnly: true,
+        });
+        if (!stopped.ok) throw new Error(`Idle descendant cancellation failed: ${stopped.code}`);
+        return response("Idle descendant cancellation accepted.", {
+          operation: op,
+          job_id: descendant.id,
+          child_id: target.childId,
+          descendant: true,
+        });
+      }
       if (op === "reap") {
         const nestedIds = new Set(
           this.descendantGroups(descendant.owner, [descendant]).map((group) => group.id),
@@ -3152,6 +3273,8 @@ export class TuiNativeManager {
         group: this.publicGroup(descendant),
       });
     }
+    if (op === "cancel" && directTarget && params.child_id)
+      throw new Error("Exact-child cancellation only targets finished Goal descendants");
     let selected: Group | undefined;
     let child: Child | undefined;
     if (params.child_id || params.task_id) {

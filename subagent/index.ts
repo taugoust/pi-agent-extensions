@@ -2226,7 +2226,7 @@ export function validateBackgroundOperation(params: any): void {
 
   if (
     ["message", "control_mode", "wait_for_response"].some((field) => params[field] !== undefined) ||
-    (params.child_id !== undefined && operation !== "result")
+    (params.child_id !== undefined && !["result", "cancel"].includes(operation))
   ) {
     throw new Error("A background subagent operation cannot include child prompt-control fields");
   }
@@ -2260,6 +2260,20 @@ export function validateBackgroundOperation(params: any): void {
     }
     integerField("offset", 0, Number.MAX_SAFE_INTEGER, "Background subagent result offset");
     integerField("limit", 4, MAX_SUBAGENT_RESULT_PAGE_BYTES, "Background subagent result limit");
+    return;
+  }
+  if (operation === "cancel") {
+    if (
+      Object.keys(params).some((key) => !["operation", "job_id", "child_id"].includes(key)) ||
+      (params.job_id !== undefined &&
+        (typeof params.job_id !== "string" ||
+          !BACKGROUND_SUBAGENT_ID_PATTERN.test(params.job_id))) ||
+      (params.child_id !== undefined &&
+        (typeof params.child_id !== "string" ||
+          !SUBAGENT_CHILD_ID_PATTERN.test(params.child_id))) ||
+      (params.job_id === undefined && params.child_id === undefined)
+    )
+      throw new Error("cancel requires a job_id or exact child_id");
     return;
   }
   if (typeof params.job_id !== "string" || !BACKGROUND_SUBAGENT_ID_PATTERN.test(params.job_id)) {
@@ -2539,8 +2553,19 @@ function subagentParams() {
       Type.String({
         pattern:
           "^(list|status|output|yield|result|cancel|reap|promote|prompt|resume|tasks|idle_decision|profiles|verify)$",
-        description:
-          "Omit for new launches/Draft disposition. Accepted fields besides operation: profiles {agentScope?}; resume {task_id, message?, compact?}; prompt {child_id, message, job_id?, control_mode?, wait_for_response?}; verify {job_id?, child_id?}; reap {job_id, cleanup_worktree?, force?, reason?}; idle_decision {child_id, request_id, worker_epoch, choice, job_id?}; list/tasks {limit?}; status/output/cancel/promote {job_id}; yield {job_id?} returns current state immediately and ends only the current run when sole tool (not the conversation); result {job_id?, child_id?, child?, offset?, limit?, diagnostics?} (job_id or child_id required; child and child_id exclusive). No launch fields with operations, except the profiles discovery scope.",
+        description: [
+          "Omit for new launches/Draft disposition. Accepted fields besides operation:",
+          "profiles {agentScope?}; resume {task_id, message?, compact?}; prompt {child_id,",
+          "message, job_id?, control_mode?, wait_for_response?}; verify {job_id?, child_id?};",
+          "reap {job_id, cleanup_worktree?, force?, reason?}; idle_decision {child_id,",
+          "request_id, worker_epoch, choice, job_id?}; list/tasks {limit?};",
+          "status/output/cancel/promote {job_id}; cancel",
+          "also supports an exact child_id for a finished coordinator's idle descendant.",
+          "yield {job_id?} returns current state immediately and ends only the current run when",
+          "sole tool (not the conversation); result {job_id?, child_id?, child?, offset?, limit?,",
+          "diagnostics?} (job_id or child_id required; child and child_id exclusive). No launch",
+          "fields with operations, except the profiles discovery scope.",
+        ].join(" "),
       }),
     ),
     cleanup_worktree: Type.Optional(
@@ -3428,6 +3453,26 @@ export default function (pi: ExtensionAPI) {
       (globalThis as any).__paeLocalSubagentControllerV1 = {
         protocol: 1,
         sessionId,
+        goalCompletionWorkers: async () => {
+          if (lifecycleClosing || activeSessionId !== sessionId)
+            throw new Error("Subagent inventory session changed");
+          const nativeInventory = native ? await native.completionInventory(sessionId) : undefined;
+          const foregroundInventory = foreground
+            ? await foreground.operation({ operation: "list" }, sessionId)
+            : undefined;
+          if (native && !nativeInventory) throw new Error("Native worker inventory is unavailable");
+          if (foreground && !foregroundInventory?.details)
+            throw new Error("Foreground worker inventory is unavailable");
+          const background = await backgroundManager.list(sessionId, 1000);
+          if (background.length === 1000)
+            throw new Error("Background worker inventory exceeds its safe limit");
+          return {
+            groups: nativeInventory?.groups ?? [],
+            descendants: nativeInventory?.descendants ?? [],
+            foregroundTasks: foregroundInventory?.details.tasks ?? [],
+            background: background.map((record) => ({ id: record.id, status: record.status })),
+          };
+        },
         worktreeReapOwners: () => {
           if (lifecycleClosing || activeSessionId !== sessionId)
             throw new Error("Subagent cleanup session changed");

@@ -37,6 +37,7 @@ export type WorkerState = {
   events: TuiWorkerEvent[];
   lastReport?: string;
   lastOutcome?: string;
+  parentCancelledIdle?: true;
   reapReservation?: string;
   verification?: VerificationRecord;
   verificationReport?: string;
@@ -330,6 +331,8 @@ export class TuiWorkerStore {
       !["ready", "running", "settled", "closing"].includes(s.phase)
     )
       throw new Error("Invalid worker state");
+    if (s.parentCancelledIdle !== undefined && s.parentCancelledIdle !== true)
+      throw new Error("Invalid idle cancellation marker");
     if (
       s.autoContinuation !== undefined &&
       (!s.autoContinuation ||

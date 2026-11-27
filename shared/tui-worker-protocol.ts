@@ -152,7 +152,7 @@ export type TuiWorkerOperation =
   | { operation: "prompt"; mode: "steer" | "follow_up" | "interrupt"; message: string }
   /** Parent-panel user input; not exposed in model tool parameters. */
   | { operation: "user_prompt"; message: string }
-  | { operation: "cancel" }
+  | { operation: "cancel"; idleOnly?: true }
   | { operation: "compact" }
   | { operation: "verify" }
   | { operation: "jobs"; params: TuiWorkerJobParams }
@@ -320,7 +320,9 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
   const optionalFields =
     operation === "prepare_reap"
       ? ["force", "reason"].filter((key) => Object.hasOwn(data, key))
-      : [];
+      : operation === "cancel" && data.idleOnly === true
+        ? ["idleOnly"]
+        : [];
   exactKeys(data, [
     ...base,
     ...fields[operation].filter((key) => !optionalFields.includes(key)),
@@ -396,10 +398,13 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
       };
     }
     case "status":
-    case "cancel":
     case "compact":
     case "verify":
       return { ...identity, operation };
+    case "cancel":
+      if (data.idleOnly !== undefined && data.idleOnly !== true)
+        throw new Error("idleOnly must be true when provided");
+      return { ...identity, operation, ...(data.idleOnly ? { idleOnly: true } : {}) };
     default:
       throw new Error("Unknown worker operation");
   }

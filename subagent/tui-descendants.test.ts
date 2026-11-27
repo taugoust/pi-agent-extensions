@@ -8,6 +8,7 @@ import { TuiWorkerStore, atomicPrivateJson, readPrivateJson } from "./tui-worker
 import { TuiWorkerServer } from "./tui-worker-server.ts";
 import { TuiNativeManager } from "./tui-native.ts";
 import { TuiWorkerTmux } from "./tui-worker-tmux.ts";
+import { serveGoalWorker } from "./goal-rpc.ts";
 import { HeadlessForegroundManager } from "./headless-foreground.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 import { taskListText } from "../shared/task-presentation.ts";
@@ -176,6 +177,213 @@ test("ancestry observation waits for a published startup header; strict cleanup 
     await f.close();
   }
 });
+
+test("only finished Goal cleanup may reap idle waiting workers", async () => {
+  const f = await fixture();
+  try {
+    const group = f.groups[0];
+    const child = group.children[0];
+    child.state = "waiting";
+    child.reaped = false;
+    child.spec.assignedGoal = { entryId: "goal", goalTools: [], policy: {} };
+    child.assignedGoalStatus = "complete";
+    f.manager.groups.set(group.id, group);
+    atomicPrivateJson(join(f.root, "groups", `${group.id}.json`), group);
+    f.manager.observe = async () => {};
+    let reaped = 0;
+    f.manager.reapChild = async () => {
+      reaped++;
+    };
+    await assert.rejects(f.manager.prepareReap("session-0", async () => {}));
+    assert.equal(reaped, 0);
+    const release = await f.manager.prepareReap("session-0", async () => {}, {
+      allowFinishedWaiters: true,
+    });
+    assert.equal(reaped, 1);
+    release();
+
+    child.state = "waiting";
+    child.reaped = false;
+    child.report = f.stores[0].report(2, {
+      assistant: { stopReason: "toolUse", content: "still unfinished" },
+    });
+    await assert.rejects(
+      f.manager.prepareReap("session-0", async () => {}, { allowFinishedWaiters: true }),
+    );
+    assert.equal(reaped, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test(
+  "parent cancels and reaps idle descendants only under a fresh final Goal",
+  { timeout: 15_000 },
+  async () => {
+    const f = await fixture();
+    let childServer: TuiWorkerServer | undefined;
+    let coordinatorManager: any;
+    let coordinatorServer: TuiWorkerServer | undefined;
+    let goalServer: Awaited<ReturnType<typeof serveGoalWorker>> | undefined;
+    try {
+      const assignment = {
+        entryId: "11111111-1111-4111-8111-111111111111",
+        policy: { continuationLimits: { automaticTurns: null, noProgressTurns: null } },
+        goalTools: ["goal_manage", "goal_complete", "goal_blocked", "goal_wait", "update_progress"],
+      };
+      const coordinator = {
+        ...f.manifests[0],
+        tools: assignment.goalTools,
+        assignedGoal: assignment,
+      };
+      f.stores[0].writeManifest(coordinator);
+      f.manifests[0].tools = assignment.goalTools;
+      f.manifests[0].assignedGoal = assignment;
+      f.groups[0].children[0].spec.assignedGoal = assignment;
+      f.groups[0].children[0].reaped = false;
+      f.groups[0].children[0].state = "waiting";
+      f.manager.groups.set(f.groups[0].id, f.groups[0]);
+      atomicPrivateJson(join(f.root, "groups", `${f.groups[0].id}.json`), f.groups[0]);
+      let childAborts = 0;
+      let coordinatorAborts = 0;
+      childServer = new TuiWorkerServer(f.stores[1], {
+        isIdle: () => true,
+        send() {},
+        abort() {
+          childAborts++;
+        },
+        shutdown() {},
+        async prepareJobReap(preserve) {
+          await preserve({ jobs: [] });
+          return () => {};
+        },
+      });
+      coordinatorManager = new TuiNativeManager(
+        f.root,
+        () => "native",
+        () => true,
+        16,
+      );
+      coordinatorManager.owner = "session-1";
+      coordinatorManager.tmux.reap = async (manifest: any) => {
+        const result = await callTuiWorker(manifest, { operation: "prepare_reap" });
+        assert.equal(result.ok, true, JSON.stringify(result));
+      };
+      coordinatorServer = new TuiWorkerServer(f.stores[0], {
+        isIdle: () => true,
+        goalState: () => ({ entryId: assignment.entryId, status: goalStatus }),
+        send() {},
+        abort() {
+          coordinatorAborts++;
+        },
+        shutdown() {},
+        async prepareJobReap(preserve, options) {
+          return await coordinatorManager.prepareReap("session-1", preserve, options);
+        },
+      });
+      const identity = {
+        sessionId: coordinator.ownerSessionId,
+        runtimeId: coordinator.runtimeId,
+        taskId: coordinator.taskId,
+        childId: coordinator.childId,
+        jobId: coordinator.groupId,
+        attempt: coordinator.attempt,
+        workerEpoch: coordinator.workerEpoch,
+      };
+      let goalStatus = "active";
+      goalServer = await serveGoalWorker({
+        path: join(f.root, "workers", "1".repeat(24), "goal.sock"),
+        token: coordinator.controlToken,
+        identity,
+        isCurrent: () => true,
+        async handle() {
+          return {
+            entryId: assignment.entryId,
+            goalId: "goal-id",
+            status: goalStatus,
+            executionStopped: true,
+          };
+        },
+      });
+      await childServer.start();
+      childServer.settled({ assistant: { stopReason: "stop", content: "idle" } });
+      f.groups[1].children[0].reaped = false;
+      f.groups[1].children[0].state = "waiting";
+      f.groups[1].children[0].report = childServer.state.lastReport;
+      atomicPrivateJson(join(f.root, "groups", `${f.groups[1].id}.json`), f.groups[1]);
+      f.groups[2].children[0].state = "completed";
+      f.groups[2].children[0].reaped = true;
+      f.groups[2].children[0].report = f.stores[2].report(2, {
+        assistant: { stopReason: "stop", content: "nested worker" },
+      });
+      atomicPrivateJson(join(f.root, "groups", `${f.groups[2].id}.json`), f.groups[2]);
+      coordinatorManager.groups.set(f.groups[1].id, f.groups[1]);
+      await coordinatorServer.start();
+      coordinatorServer.settled({ assistant: { stopReason: "stop", content: "goal done" } });
+      f.manager.tmux.reap = async (manifest: any) => {
+        const result = await callTuiWorker(manifest, { operation: "prepare_reap" });
+        assert.equal(result.ok, true, JSON.stringify(result));
+      };
+      const lock = join(
+        f.root,
+        `owner-${createHash("sha256").update("session-1").digest("hex").slice(0, 32)}.lock`,
+      );
+      await writeFile(
+        lock,
+        JSON.stringify({ pid: process.pid, token: f.manager.processToken(process.pid) }),
+        { mode: 0o600 },
+      );
+      await assert.rejects(
+        f.manager.operation(
+          {
+            operation: "cancel",
+            child_id: f.manifests[1].childId,
+            task_id: f.groups[1].children[0].taskId,
+          },
+          "session-0",
+        ),
+      );
+      assert.equal(childServer.state.parentCancelledIdle, undefined);
+      await assert.rejects(
+        f.manager.operation({ operation: "cancel", child_id: f.manifests[1].childId }, "session-0"),
+      );
+      assert.equal(childServer.state.parentCancelledIdle, undefined);
+      goalStatus = "complete";
+      coordinatorServer.running(true);
+      coordinatorServer.settled({ assistant: { stopReason: "stop", content: "goal done" } });
+      childServer.running(true);
+      await assert.rejects(
+        f.manager.operation({ operation: "cancel", child_id: f.manifests[1].childId }, "session-0"),
+      );
+      await assert.rejects(
+        f.manager.operation({ operation: "reap", job_id: f.groups[0].id }, "session-0"),
+      );
+      assert.equal(coordinatorServer.state.sealed, false);
+      assert.equal(childServer.state.sealed, false);
+      assert.equal(childAborts, 0);
+      assert.equal(coordinatorAborts, 0);
+      childServer.settled({ assistant: { stopReason: "stop", content: "idle" } });
+      const cancelled = await f.manager.operation(
+        { operation: "cancel", child_id: f.manifests[1].childId },
+        "session-0",
+      );
+      assert.equal(cancelled.details.child_id, f.manifests[1].childId);
+      assert.equal(childServer.state.parentCancelledIdle, true);
+      assert.equal(childAborts, 0);
+      assert.equal(coordinatorAborts, 0);
+      await f.manager.operation({ operation: "reap", job_id: f.groups[0].id }, "session-0");
+      assert.equal(coordinatorServer.state.sealed, true);
+      assert.equal(childServer.state.sealed, true);
+      assert.equal(f.manager.groups.get(f.groups[0].id).children[0].reaped, true);
+    } finally {
+      await goalServer?.close();
+      await childServer?.close();
+      await coordinatorServer?.close();
+      await coordinatorManager?.shutdown(false);
+      await f.close();
+    }
+  },
+);
 
 test("reserved worktree inventory follows exact session ancestry including nested headless and excludes foreign owners", async () => {
   const f = await fixture();
