@@ -21,7 +21,9 @@ const within = (root: string, path: string) => {
   const part = relative(root, path);
   return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`));
 };
-/** On-demand same-user process evidence. Unsupported/inaccessible evidence fails closed. */
+const isIgnorableProcReadError = (error: any) =>
+  error.code === "ENOENT" || error.code === "ESRCH" || error.code === "EACCES";
+/** On-demand same-user process evidence; inaccessible cwd/fd reads are skipped. */
 export async function worktreeHasActiveUsers(
   path: string,
   excludeCurrentProcess = false,
@@ -40,21 +42,34 @@ export async function worktreeHasActiveUsers(
     const base = join("/proc", name);
     try {
       if ((await fs.stat(base)).uid !== process.getuid()) continue;
+    } catch (error: any) {
+      if (error.code === "ENOENT" || error.code === "ESRCH") continue;
+      throw new Error(`Cannot verify active users: ${error.message}`);
+    }
+    try {
       if (within(path, (await fs.readlink(join(base, "cwd"))).replace(/ \(deleted\)$/, "")))
         return true;
-      for (const fd of await fs.readdir(join(base, "fd"))) {
-        if (++descriptors > 65536)
-          throw new Error("Active-user descriptor inventory exceeds the safe inspection limit");
-        try {
-          if (within(path, (await fs.readlink(join(base, "fd", fd))).replace(/ \(deleted\)$/, "")))
-            return true;
-        } catch (error: any) {
-          if (error.code !== "ENOENT") throw error;
-        }
-      }
     } catch (error: any) {
-      if (error.code !== "ENOENT" && error.code !== "ESRCH")
-        throw new Error(`Cannot verify active users: ${error.message}`);
+      if (isIgnorableProcReadError(error)) continue;
+      throw new Error(`Cannot verify active users: ${error.message}`);
+    }
+    let fds: string[];
+    try {
+      fds = await fs.readdir(join(base, "fd"));
+    } catch (error: any) {
+      if (isIgnorableProcReadError(error)) continue;
+      throw new Error(`Cannot verify active users: ${error.message}`);
+    }
+    for (const fd of fds) {
+      if (++descriptors > 65536)
+        throw new Error("Active-user descriptor inventory exceeds the safe inspection limit");
+      try {
+        if (within(path, (await fs.readlink(join(base, "fd", fd))).replace(/ \(deleted\)$/, "")))
+          return true;
+      } catch (error: any) {
+        if (!isIgnorableProcReadError(error))
+          throw new Error(`Cannot verify active users: ${error.message}`);
+      }
     }
   }
   return false;
