@@ -15,18 +15,31 @@ registerHooks({
     )
       return { url: "data:text/javascript,export default function(){}", shortCircuit: true };
     const seams = {
-      "@earendil-works/pi-coding-agent":
-        "export const getAgentDir=()=>'/unused-goal-limits-test'; export const buildSessionContext=()=>({messages:[]});",
-      "@earendil-works/pi-ai":
-        "export const isContextOverflow=()=>false; export const isRetryableAssistantError=()=>false; export const StringEnum=values=>({enum:values});",
+      "@earendil-works/pi-coding-agent": [
+        "export const getAgentDir=()=>'/unused-goal-limits-test';",
+        "export const buildSessionContext=()=>({messages:[]});",
+      ].join(" "),
+      "@earendil-works/pi-ai": [
+        "export const isContextOverflow=()=>false;",
+        "export const isRetryableAssistantError=()=>false;",
+        "export const StringEnum=values=>({enum:values});",
+      ].join(" "),
       "@earendil-works/pi-tui": "export const stripTerminalSequences=x=>x;",
       typebox: "export const Type=new Proxy({}, {get:(_,type)=>(...args)=>({type,args})});",
     };
-    if (specifier.endsWith("/shared/goal-progress.ts"))
+    if (specifier.endsWith("/shared/goal-progress.ts")) {
+      const progressSeam = [
+        "export const readGoalTasks=()=>[];",
+        "export const writeProgress=()=>{",
+        "if(globalThis.__goalLimitAllowProgress!==true)",
+        "throw Error('Limit updates cannot write progress');",
+        "globalThis.__goalLimitProgressWrites=(globalThis.__goalLimitProgressWrites??0)+1;};",
+      ].join(" ");
       return {
-        url: `data:text/javascript,${encodeURIComponent("export const readGoalTasks=()=>[]; export const writeProgress=()=>{throw Error('Limit updates cannot write progress')};")}`,
+        url: `data:text/javascript,${encodeURIComponent(progressSeam)}`,
         shortCircuit: true,
       };
+    }
     if (seams[specifier])
       return {
         url: `data:text/javascript,${encodeURIComponent(seams[specifier])}`,
@@ -52,6 +65,7 @@ registerHooks({
     return next(url, context);
   },
 });
+globalThis.__goalLimitProgressWrites = 0;
 const { GoalRuntime, createGoal } = await import("./goal/runtime.ts");
 const { registerGoalLifecycle } = await import("./goal/lifecycle.ts");
 const { loadGoalStateFromSession } = await import("./goal/persistence.ts");
@@ -143,7 +157,7 @@ for (const [label, budget, limits, stopped] of [
     assert.equal(runtime.activeGoal.automaticModelTurns, 8);
     assert.equal(runtime.activeGoal.toolFreeRepeatCount, 3);
   });
-test("paused policy persists on the goal, inherits configured defaults, and never resets allowances", () => {
+test("paused policy persists, inherits defaults, and preserves allowances", () => {
   const f = fixture("paused"),
     { runtime, ctx } = f;
   runtime.settings = {
@@ -182,7 +196,7 @@ test("paused policy persists on the goal, inherits configured defaults, and neve
     /Invalid/,
   );
 });
-test("idle recorded waiting is a safe boundary and higher limits do not resume a paused goal", () => {
+test("waiting is safe and higher limits do not resume paused goals", () => {
   const f = fixture(),
     { runtime, ctx } = f;
   f.setIdle(true);
@@ -194,7 +208,7 @@ test("idle recorded waiting is a safe boundary and higher limits do not resume a
   assert.equal(runtime.activeGoal.status, "paused");
   assert.equal(runtime.activeGoal.automaticModelTurns, 8);
 });
-test("authenticated child seam changes launch policy, including finite to unlimited, without touching progress", async () => {
+test("authenticated child seam confirms finite-to-unlimited limits", async () => {
   const f = fixture(),
     { runtime, ctx } = f;
   const id = "11111111-1111-4111-8111-111111111111";
@@ -258,7 +272,7 @@ test("authenticated child seam changes launch policy, including finite to unlimi
   assert.equal(f.entries.filter((e) => e.customType === "progress").length, 0);
 });
 
-test("real worker socket updates confirmed policy and rejects stale revisions, goals, epochs and capabilities", async () => {
+test("worker RPC retains confirmed limits across reload and rejects mismatches", async () => {
   const directory = await mkdtemp(join(tmpdir(), "live-goal-policy-"));
   const savedEnv = Object.fromEntries(
     ["PI_DEDICATED_GOAL_CHILD", "PI_DEDICATED_GOAL_BINDING", "PI_SUBAGENT_ID"].map((key) => [
@@ -278,7 +292,21 @@ test("real worker socket updates confirmed policy and rejects stale revisions, g
     ...runtime.settings,
     continuationLimits: { automaticTurns: 10, noProgressTurns: 5 },
   };
-  globalThis.__paeDelegatedChildGoalV1 = createDelegatedChildGoalService(f.pi, ctx, runtime, {});
+  const goalCommands = {
+    pauseGoal: () => {
+      runtime.activeGoal.status = "paused";
+    },
+    resumeGoal: () => {
+      runtime.activeGoal.status = "active";
+      runtime.activeGoal.activationId = "resumed-activation";
+    },
+  };
+  globalThis.__paeDelegatedChildGoalV1 = createDelegatedChildGoalService(
+    f.pi,
+    ctx,
+    runtime,
+    goalCommands,
+  );
   const binding = {
     path: join(directory, "worker.sock"),
     token: "t".repeat(48),
@@ -300,8 +328,14 @@ test("real worker socket updates confirmed policy and rejects stale revisions, g
   try {
     const { default: worker } = await import("../subagent/goal-worker.ts");
     const { requestGoalWorker } = await import("../subagent/goal-rpc.ts");
-    await worker({ ...f.pi, on: (name, fn) => workerHandlers.set(name, fn) });
-    await workerHandlers.get("session_start")({}, ctx);
+    const startWorker = async () => {
+      await worker({ ...f.pi, on: (name, fn) => workerHandlers.set(name, fn) });
+      await workerHandlers.get("session_start")({}, ctx);
+    };
+    const reloadWorker = async () => {
+      await workerHandlers.get("session_shutdown")();
+      await startWorker();
+    };
     const request = (request, overrides = {}) =>
       requestGoalWorker(binding.path, {
         token: binding.token,
@@ -309,6 +343,7 @@ test("real worker socket updates confirmed policy and rejects stale revisions, g
         request,
         ...overrides,
       });
+    await startWorker();
     const before = await request({ operation: "observe" });
     assert.equal(before.limitsEditable, true);
     const update = {
@@ -329,7 +364,7 @@ test("real worker socket updates confirmed policy and rejects stale revisions, g
         noProgressTurns: 0,
         summary: null,
         waiting: null,
-        continuationLimits: { automaticTurns: null, noProgressTurns: null },
+        continuationLimits: { automaticTurns: 12, noProgressTurns: 6 },
       },
     };
     await assert.rejects(request(update, { token: "wrong" }), /identity/);
@@ -342,17 +377,125 @@ test("real worker socket updates confirmed policy and rejects stale revisions, g
     assert.deepEqual(after.limits, update.entry.continuationLimits);
     assert.equal(after.tokenBudget, null);
     assert.equal(after.automaticTurns, 8);
+    assert.equal(globalThis.__goalLimitProgressWrites, 0);
     assert.equal(runtime.activeGoal.text, "Keep this objective");
     assert.equal(f.aborts(), 0);
     await assert.rejects(request(update), /revision changed/);
+    await assert.rejects(
+      request({
+        ...update,
+        expectedGoalId: after.goalId,
+        expectedActivationId: after.activationId,
+        expectedPolicyRevision: after.policyRevision,
+        entry: {
+          ...update.entry,
+          continuationLimits: { automaticTurns: 0, noProgressTurns: null },
+        },
+      }),
+    );
     assert.deepEqual(
       (await request({ operation: "observe" })).limits,
       after.limits,
       "new confirmed policy remains observable",
     );
+    await assert.rejects(
+      request({
+        ...update,
+        operation: "resume",
+        expectedGoalId: after.goalId,
+        expectedActivationId: after.activationId,
+        expectedPolicyRevision: after.policyRevision,
+        entry: {
+          ...update.entry,
+          continuationLimits: { automaticTurns: 10, noProgressTurns: 5 },
+        },
+      }),
+    );
+    await assert.rejects(
+      request({
+        ...update,
+        operation: "resume",
+        expectedGoalId: after.goalId,
+        expectedActivationId: after.activationId,
+        expectedPolicyRevision: after.policyRevision,
+        entry: { ...update.entry, id: "foreign-entry" },
+      }),
+    );
+
+    await workerHandlers.get("session_shutdown")();
+    const restoredGoal = loadGoalStateFromSession(ctx).goal;
+    const restoredRuntime = new GoalRuntime(f.pi);
+    restoredRuntime.settings = {
+      ...restoredRuntime.settings,
+      continuationLimits: structuredClone(binding.policy.continuationLimits),
+    };
+    restoredRuntime.activeGoal = restoredGoal;
+    restoredRuntime.acquireWorkflow(ctx.sessionManager);
+    globalThis.__paeDelegatedChildGoalV1 = createDelegatedChildGoalService(
+      f.pi,
+      ctx,
+      restoredRuntime,
+      {
+        pauseGoal: () => {
+          restoredRuntime.activeGoal.status = "paused";
+        },
+        resumeGoal: () => {
+          restoredRuntime.activeGoal.status = "active";
+          restoredRuntime.activeGoal.activationId = "resumed-activation";
+        },
+      },
+    );
+    await startWorker();
+    const reloaded = await request({ operation: "observe" });
+    assert.notEqual(reloaded.policyRevision, after.policyRevision);
+    assert.equal(reloaded.goalId, after.goalId);
+    assert.equal(reloaded.activationId, after.activationId);
+    assert.deepEqual(reloaded.limits, after.limits);
+    const controlled = await request({
+      operation: "pause",
+      expectedGoalId: reloaded.goalId,
+      expectedActivationId: reloaded.activationId,
+    });
+    assert.equal(controlled.status, "paused", "parent can control the same child after reload");
+    assert.deepEqual(controlled.limits, after.limits);
+    f.setIdle(true);
+    globalThis.__goalLimitAllowProgress = true;
+    const resumed = await request({
+      operation: "resume",
+      expectedGoalId: controlled.goalId,
+      expectedActivationId: controlled.activationId,
+      entry: update.entry,
+    });
+    delete globalThis.__goalLimitAllowProgress;
+    assert.equal(globalThis.__goalLimitProgressWrites, 1);
+    assert.equal(resumed.status, "active");
+    assert.deepEqual(resumed.limits, after.limits);
+    assert.deepEqual((await request({ operation: "observe" })).limits, after.limits);
+
+    await reloadWorker();
+    globalThis.__paeDedicatedGoalPolicyV1.sessionId = "other-session";
+    await reloadWorker();
+    await assert.rejects(request({ operation: "observe" }));
+    await workerHandlers.get("session_shutdown")();
+    globalThis.__paeDedicatedGoalPolicyV1.sessionId = ctx.sessionManager.getSessionId();
+    globalThis.__paeDedicatedGoalPolicyV1.identity.childId = "other-child";
+    await startWorker();
+    await assert.rejects(request({ operation: "observe" }));
+    await workerHandlers.get("session_shutdown")();
+    globalThis.__paeDedicatedGoalPolicyV1.identity.childId = "c";
+    globalThis.__paeDedicatedGoalPolicyV1.entryId = "foreign-entry";
+    await startWorker();
+    await assert.rejects(request({ operation: "observe" }));
+    await workerHandlers.get("session_shutdown")();
+    delete globalThis.__paeDedicatedGoalPolicyV1;
+    await startWorker();
+    await assert.rejects(request({ operation: "observe" }), /effective limits differ/);
   } finally {
     await workerHandlers.get("session_shutdown")?.();
     delete globalThis.__paeDelegatedChildGoalV1;
+    delete globalThis.__paeDedicatedGoalPolicyV1;
+    delete globalThis.__goalLimitAllowProgress;
+    delete globalThis.__goalLimitProgressWrites;
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;

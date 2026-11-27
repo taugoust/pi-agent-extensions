@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import workflows from "../workflows/index.ts";
 import progress from "../progress/index.ts";
-import { serveGoalWorker, type GoalWorkerIdentity } from "./goal-rpc.ts";
+import { sameGoalWorker, serveGoalWorker, type GoalWorkerIdentity } from "./goal-rpc.ts";
 import type { DelegatedGoalEntry } from "../workflows/delegated-goals.ts";
 import { dirname, join } from "node:path";
 import { WORKER_INTERACTIONS_KEY } from "../shared/foreground-tasks.ts";
@@ -52,7 +52,32 @@ const PARENT_REQUEST_FIELDS = [
 ];
 
 const globals = globalThis as any;
+type RetainedPolicy = {
+  sessionId: string;
+  entryId: string;
+  identity: GoalWorkerIdentity;
+  policy: DedicatedGoalPolicy;
+};
 const childGoalService = () => globals.__paeDelegatedChildGoalV1 as ChildGoalService | undefined;
+function retainPolicy(binding: Binding, sessionId: string, policy: DedicatedGoalPolicy): void {
+  const retained = {
+    sessionId,
+    entryId: binding.entryId,
+    identity: structuredClone(binding.identity),
+    policy: structuredClone(policy),
+  } satisfies RetainedPolicy;
+  globals.__paeDedicatedGoalPolicyV1 = retained;
+}
+function restoredPolicy(binding: Binding, sessionId: string): RetainedPolicy | undefined {
+  const retained = globals.__paeDedicatedGoalPolicyV1 as RetainedPolicy | undefined;
+  if (
+    retained?.sessionId !== sessionId ||
+    retained.entryId !== binding.entryId ||
+    !sameGoalWorker(retained.identity, binding.identity)
+  )
+    return undefined;
+  return retained;
+}
 
 function readBinding(): Binding {
   if (process.env.PI_DEDICATED_GOAL_CHILD !== "1")
@@ -76,7 +101,7 @@ function readBinding(): Binding {
 export default async function goalWorker(pi: ExtensionAPI) {
   const binding = readBinding();
   const { workerEpoch } = binding.identity;
-  const policy = dedicatedGoalPolicy(binding.policy);
+  let policy = dedicatedGoalPolicy(binding.policy);
   progress(pi, { assignedGoalBootstrap: true });
   if (binding.questionnaireEnabled)
     (await import("../questionnaire/index.ts")).default(pi, { assignedGoalBootstrap: true });
@@ -184,6 +209,7 @@ export default async function goalWorker(pi: ExtensionAPI) {
           r.expectedActivationId!,
         );
         policy.continuationLimits = nextPolicy.continuationLimits;
+        retainPolicy(binding, ctx.sessionManager.getSessionId(), policy);
         return next;
       }
       case "start":
@@ -304,6 +330,9 @@ export default async function goalWorker(pi: ExtensionAPI) {
       server = undefined;
     }
     stop();
+    policy = dedicatedGoalPolicy(binding.policy);
+    const retained = restoredPolicy(binding, ctx.sessionManager.getSessionId());
+    if (retained) policy = dedicatedGoalPolicy(retained.policy);
     reviews = startReviews(ctx);
     questions = startQuestions(ctx);
     current = true;
