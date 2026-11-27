@@ -51,6 +51,58 @@ fs.readdir = async (path, ...args) =>
   path === "/proc" ? [...fixturePids] : realReaddir(path, ...args);
 const task = "subagent-task-" + "a".repeat(24),
   owner = "fixture-owner";
+async function withFakeProcReads(reads, action) {
+  const processes = reads.processes ?? [{ pid: String(process.pid), ...reads }],
+    processAt = (path) =>
+      processes.find(
+        (entry) => path === `/proc/${entry.pid}` || path.startsWith(`/proc/${entry.pid}/`),
+      ),
+    descriptors = (entry) =>
+      entry.descriptors ?? [
+        { fd: "0", target: entry.fd ?? "/outside/fd", error: entry.fdReadlinkError },
+      ],
+    stat = fs.stat,
+    readdir = fs.readdir,
+    readlink = fs.readlink;
+  fs.stat = async (path, ...args) => {
+    const entry = processAt(path);
+    if (entry && path === `/proc/${entry.pid}`) return { uid: process.getuid() };
+    return stat(path, ...args);
+  };
+  fs.readdir = async (path, ...args) => {
+    if (path === "/proc") return processes.map((entry) => String(entry.pid));
+    const entry = processAt(path);
+    if (entry && path === `/proc/${entry.pid}/fd`) {
+      if (entry.fdListingError) throw entry.fdListingError;
+      return descriptors(entry).map((descriptor) => descriptor.fd);
+    }
+    return readdir(path, ...args);
+  };
+  fs.readlink = async (path, ...args) => {
+    const entry = processAt(path);
+    if (entry && path === `/proc/${entry.pid}/cwd`) {
+      if (entry.cwdError) throw entry.cwdError;
+      return entry.cwd ?? "/outside/cwd";
+    }
+    const match = path.match(/^\/proc\/(\d+)\/fd\/(.+)$/);
+    const descriptorEntry = match ? processAt(`/proc/${match[1]}`) : undefined;
+    const descriptor = descriptorEntry
+      ? descriptors(descriptorEntry).find((item) => item.fd === match[2])
+      : undefined;
+    if (descriptor) {
+      if (descriptor.error) throw descriptor.error;
+      return descriptor.target ?? "/outside/fd";
+    }
+    return readlink(path, ...args);
+  };
+  try {
+    return await action();
+  } finally {
+    fs.stat = stat;
+    fs.readdir = readdir;
+    fs.readlink = readlink;
+  }
+}
 async function fixture(action, branch = "pi/fixture") {
   const root = await fs.mkdtemp(join(tmpdir(), "pi-completion-fixture-"));
   process.env.PI_WORKTREE_FIXTURE_AGENT_DIR = join(root, "agent");
@@ -291,20 +343,68 @@ test("production completion flow confirms and uses verified owner session source
       delete globalThis.__paeHarnessReadOnlyV1;
     }
   }));
-test("unavailable active-user evidence is a durable blocked reason, not implicit deletion permission", () =>
+test("EACCES proc reads allow cleanup and do not report an active user", () =>
   fixture(async (f) => {
     await mark(f.host, task, "Reviewed");
-    const readlink = fs.readlink;
-    fs.readlink = async (...args) => {
-      if (args[0] === `/proc/${process.pid}/cwd`)
-        throw Object.assign(new Error("fixture access denied"), { code: "EACCES" });
-      return readlink(...args);
-    };
-    try {
-      assert.match((await cleanup(f.host, task)).blockedReason, /Cannot verify active users/);
-      assert.ok(await fs.stat(f.path));
-    } finally {
-      fs.readlink = readlink;
+    const error = Object.assign(new Error("fixture access denied"), { code: "EACCES" });
+    await withFakeProcReads({ cwdError: error }, async () => {
+      assert.equal(await worktreeHasActiveUsers(f.path), false);
+      assert.equal((await cleanup(f.host, task)).phase, "cleaned");
+    });
+    for (const key of ["fdListingError", "fdReadlinkError"])
+      assert.equal(
+        await withFakeProcReads({ [key]: error }, () => worktreeHasActiveUsers(f.path)),
+        false,
+      );
+  }));
+test("readable proc cwd or fd inside the worktree still identifies an active user", () =>
+  fixture(async (f) => {
+    for (const reads of [{ cwd: f.path }, { fd: join(f.path, "tracked") }])
+      assert.equal(await withFakeProcReads(reads, () => worktreeHasActiveUsers(f.path)), true);
+  }));
+test("EACCES on an earlier proc process does not hide later active users", () =>
+  fixture(async (f) => {
+    const error = Object.assign(new Error("fixture access denied"), { code: "EACCES" });
+    for (const inaccessible of [
+      { cwdError: error },
+      { fdListingError: error },
+      { descriptors: [{ fd: "0", error }] },
+    ]) {
+      const processes = [
+        { pid: "9101", ...inaccessible },
+        { pid: "9102", cwd: f.path },
+      ];
+      assert.equal(
+        await withFakeProcReads({ processes }, () => worktreeHasActiveUsers(f.path)),
+        true,
+      );
+    }
+  }));
+test("EACCES on one fd does not hide another active fd from the same process", () =>
+  fixture(async (f) => {
+    const error = Object.assign(new Error("fixture access denied"), { code: "EACCES" });
+    const processes = [
+      {
+        pid: "9201",
+        descriptors: [
+          { fd: "0", error },
+          { fd: "1", target: join(f.path, "tracked") },
+        ],
+      },
+    ];
+    assert.equal(
+      await withFakeProcReads({ processes }, () => worktreeHasActiveUsers(f.path)),
+      true,
+    );
+  }));
+test("unexpected proc read errors still reject inspection", () =>
+  fixture(async (f) => {
+    for (const key of ["cwdError", "fdListingError", "fdReadlinkError"]) {
+      const error = Object.assign(new Error("fixture I/O failure"), { code: "EIO" });
+      await assert.rejects(
+        withFakeProcReads({ [key]: error }, () => worktreeHasActiveUsers(f.path)),
+        (result) => result instanceof Error,
+      );
     }
   }));
 test("empty untracked directory and late ignored artifact are protected", () =>
