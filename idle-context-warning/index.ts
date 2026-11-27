@@ -136,9 +136,18 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
     streamingBehavior?: "steer" | "followUp";
   };
   let submission: Submission | undefined;
-  const persistSubmission = (item: Submission, state: "pending" | "released" | "cancelled") => {
+  const persistSubmission = (
+    item: Submission,
+    state: "pending" | "released" | "cancelled" | "failed",
+    error?: string,
+  ) => {
     try {
-      pi.appendEntry("idle-context-submission", { version: 1, state, ...item });
+      pi.appendEntry("idle-context-submission", {
+        version: 1,
+        state,
+        ...item,
+        ...(error ? { error } : {}),
+      });
       return true;
     } catch {
       return false;
@@ -163,6 +172,48 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
       /* Optional observers cannot affect admission. */
     }
   });
+  const failureMessage = (error: unknown) =>
+    (error == null ? "" : error instanceof Error ? error.message : String(error))
+      .replace(/[\r\n]+/g, " ")
+      .slice(0, 500);
+  const restoreDraft = (ctx: ExtensionContext, item: Submission) => {
+    try {
+      if (
+        !ctx.hasUI ||
+        !item.text ||
+        typeof ctx.ui.getEditorText !== "function" ||
+        ctx.ui.getEditorText() !== ""
+      )
+        return;
+      ctx.ui.setEditorText(item.text);
+    } catch {
+      /* Durable failed records remain available through /idle-context recover. */
+    }
+  };
+  const reportSubmissionFailure = (ctx: ExtensionContext, item: Submission, error: unknown) => {
+    const message = failureMessage(error) || "Unknown submission failure";
+    const saved = persistSubmission(item, "failed", message);
+    restoreDraft(ctx, item);
+    const recovery = saved ? ` Recover with /idle-context recover ${item.id}.` : "";
+    try {
+      const notice = `Idle-approved message was not submitted: ${message}.${recovery}`;
+      if (ctx.hasUI) ctx.ui.notify(notice, "error");
+      else process.stderr.write(`[idle-context-warning] ${notice}\n`);
+    } catch {
+      /* The persisted record and editor draft provide recovery if notification fails. */
+    }
+  };
+  const reportStaleDispatchFailure = (sessionId: string, item: Submission, error: unknown) => {
+    try {
+      process.stderr.write(
+        `[idle-context-warning] Dispatch failed after context change: ${failureMessage(error)}. ` +
+          `Original session ${sessionId}, prompt ${item.id}; run /idle-context recover ${item.id} ` +
+          "there only after checking whether it was already delivered.\n",
+      );
+    } catch {
+      /* Never write into a stale session; stderr is best-effort diagnostics. */
+    }
+  };
   const invalidate = (preserveSubmission = false) => {
     if (submission && !preserveSubmission) persistSubmission(submission, "cancelled");
     submission = undefined;
@@ -190,27 +241,29 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
         ),
       )?.id;
   const SAFE_COMPACTION_INTERLEAVINGS = new Set(["custom_message", "usage", "session_info"]);
-  function hasSafeCompactionBranch(
-    branch: SessionEntry[],
-    capturedLeaf: string | null,
-    token: string,
-  ): boolean {
+  function hasSafeCompactionContext(branch: SessionEntry[], capturedLeaf: string | null): boolean {
     const leafIndex = branch.findIndex((entry) => entry.id === capturedLeaf);
-    const receiptIndexes = branch.flatMap((entry, index) =>
-      entry.type === "compaction" &&
-      (entry.details as Record<string, unknown> | undefined)?.idleContextExplicitAttempt === token
-        ? [index]
-        : [],
-    );
-    if (leafIndex < 0 || receiptIndexes.length !== 1) return false;
-    const compactionIndex = receiptIndexes[0];
-    if (compactionIndex <= leafIndex) return false;
-    // getBranch() is the active parent chain. Reject branch navigation and any
-    // context-changing entry on either side of the summary; allow only entries
-    // that do not replace prepared model history or invalidate the summary.
+    if (leafIndex < 0) return false;
+    // getBranch() is the active parent chain. Reject navigation and any
+    // context-changing entry; benign entries do not replace prepared history.
     for (let index = 1; index < branch.length; index += 1) {
       if (branch[index].parentId !== branch[index - 1].id) return false;
     }
+    for (let index = leafIndex + 1; index < branch.length; index += 1) {
+      const entry = branch[index];
+      if (entry.type !== "compaction" && !SAFE_COMPACTION_INTERLEAVINGS.has(entry.type))
+        return false;
+    }
+    return true;
+  }
+  function hasSafeCompactionBranch(branch: SessionEntry[], capturedLeaf: string | null): boolean {
+    if (!hasSafeCompactionContext(branch, capturedLeaf)) return false;
+    const leafIndex = branch.findIndex((entry) => entry.id === capturedLeaf);
+    const compactionIndexes = branch.flatMap((entry, index) =>
+      index > leafIndex && entry.type === "compaction" ? [index] : [],
+    );
+    if (compactionIndexes.length !== 1) return false;
+    const compactionIndex = compactionIndexes[0];
     const entry = branch[compactionIndex];
     if (entry.type !== "compaction" || entry.parentId !== branch[compactionIndex - 1]?.id)
       return false;
@@ -220,14 +273,17 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
       );
       if (firstKeptIndex < 0 || firstKeptIndex > leafIndex) return false;
     }
-    for (let index = leafIndex + 1; index < branch.length; index += 1) {
-      if (index === compactionIndex) continue;
-      if (!SAFE_COMPACTION_INTERLEAVINGS.has(branch[index].type)) return false;
-    }
     return true;
   }
-  const compactAndWait = async (ctx: ExtensionContext, signal: AbortSignal): Promise<boolean> => {
-    if (signal.aborted || !ctx.isIdle() || ctx.hasPendingMessages()) return false;
+  type CompactOutcome =
+    | { kind: "complete"; entryId: string }
+    | { kind: "cancel" }
+    | { kind: "error"; reason: string };
+  const compactAndWait = async (
+    ctx: ExtensionContext,
+    signal: AbortSignal,
+  ): Promise<CompactOutcome> => {
+    if (signal.aborted || !ctx.isIdle() || ctx.hasPendingMessages()) return { kind: "cancel" };
     const initial = identity(ctx),
       leaf = ctx.sessionManager.getLeafId(),
       sessionId = ctx.sessionManager.getSessionId(),
@@ -235,56 +291,92 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
     const forced = { sessionId, token };
     globals[FORCE_CHEAP_COMPACTION_KEY] = forced;
     try {
-      const completed = await new Promise<boolean>((resolve) => {
+      const outcome = await new Promise<CompactOutcome>((resolve) => {
         let finished = false;
-        const finish = (ok: boolean) => {
+        const finish = (result: CompactOutcome) => {
           if (finished) return;
           finished = true;
           clearTimeout(timer);
           signal.removeEventListener("abort", abort);
-          resolve(ok && !signal.aborted && identity(ctx) === initial);
+          resolve(signal.aborted || identity(ctx) !== initial ? { kind: "cancel" } : result);
         };
-        const abort = () => finish(false);
-        const timer = setTimeout(() => finish(false), 120_000);
+        const abort = () => finish({ kind: "cancel" });
+        const timer = setTimeout(
+          () => finish({ kind: "error", reason: "Compaction timed out" }),
+          120_000,
+        );
         signal.addEventListener("abort", abort, { once: true });
         try {
           ctx.compact({
-            onError: () => finish(false),
-            onComplete: () => {
-              const branch = ctx.sessionManager.getBranch();
-              const attempts = branch.filter(
-                (item) =>
-                  item.type === "compaction" &&
-                  (item.details as Record<string, unknown> | undefined)
-                    ?.idleContextExplicitAttempt === token,
-              );
-              const entry = attempts.length === 1 ? attempts[0] : undefined;
-              const data =
-                entry?.type === "compaction"
-                  ? (entry.details as Record<string, unknown> | undefined)
-                  : undefined;
-              const safeBranch = hasSafeCompactionBranch(branch, leaf, token);
+            onError: (error: unknown) => {
               finish(
-                entry?.type === "compaction" &&
-                  safeBranch &&
-                  entry.fromHook === true &&
-                  data?.idleContextNativeCompaction === 1 &&
-                  data?.idleContextExplicitAttempt === token,
+                signal.aborted
+                  ? { kind: "cancel" }
+                  : {
+                      kind: "error",
+                      reason: failureMessage(error) || "Pi reported a compaction failure",
+                    },
               );
             },
+            onComplete: (result: any) => {
+              const branch = ctx.sessionManager.getBranch();
+              const leafIndex = branch.findIndex((item) => item.id === leaf);
+              if (!hasSafeCompactionContext(branch, leaf)) {
+                finish({ kind: "cancel" });
+                return;
+              }
+              const entries = branch.filter(
+                (item, index) => index > leafIndex && item.type === "compaction",
+              );
+              if (entries.length !== 1) {
+                finish({
+                  kind: "error",
+                  reason: `Expected one new compaction entry, found ${entries.length}`,
+                });
+                return;
+              }
+              const entry = entries[0];
+              if (
+                entry.type !== "compaction" ||
+                entry.summary !== result?.summary ||
+                entry.firstKeptEntryId !== result?.firstKeptEntryId ||
+                entry.tokensBefore !== result?.tokensBefore
+              ) {
+                finish({
+                  kind: "error",
+                  reason: "Compaction callback does not match the new branch entry",
+                });
+                return;
+              }
+              if (!hasSafeCompactionBranch(branch, leaf)) {
+                finish({ kind: "error", reason: "Compaction entry failed boundary safety checks" });
+                return;
+              }
+              finish({ kind: "complete", entryId: entry.id });
+            },
           });
-        } catch {
-          finish(false);
+        } catch (error) {
+          finish(
+            signal.aborted
+              ? { kind: "cancel" }
+              : {
+                  kind: "error",
+                  reason: failureMessage(error) || "Pi rejected the compaction request",
+                },
+          );
         }
       });
       // Pi may append cache-usage or other entries before ctx.compact() fully
       // settles after onComplete. Recheck the active chain at the await boundary.
-      return (
-        completed &&
-        !signal.aborted &&
+      if (signal.aborted || identity(ctx) !== initial) return { kind: "cancel" };
+      if (outcome.kind !== "complete") return outcome;
+      const branch = ctx.sessionManager.getBranch();
+      return !signal.aborted &&
         identity(ctx) === initial &&
-        hasSafeCompactionBranch(ctx.sessionManager.getBranch(), leaf, token)
-      );
+        branch.some((entry) => entry.type === "compaction" && entry.id === outcome.entryId) &&
+        hasSafeCompactionBranch(branch, leaf)
+        ? outcome
+        : { kind: "cancel" };
     } finally {
       if (globals[FORCE_CHEAP_COMPACTION_KEY] === forced)
         delete globals[FORCE_CHEAP_COMPACTION_KEY];
@@ -306,31 +398,47 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
     try {
       info = details(ctx, settings(), origin);
     } catch (error) {
-      if (origin !== "submission")
-        throw new DOMException(
-          `Idle notification admission failed: ${String(error)}`,
-          "AbortError",
-        );
-      return "cancel";
+      if (origin === "submission")
+        throw new Error(`Idle prompt preflight failed: ${failureMessage(error)}`);
+      throw new DOMException(`Idle notification admission failed: ${String(error)}`, "AbortError");
     }
     if (!info) return "continue";
     const initial = identity(ctx);
     let revision = contextRevision(ctx),
-      compactFailed = false;
+      compactFailed = false,
+      compactCancelled = false,
+      compactFailure = "No matching safe compaction was produced";
     const result = await lane.run(
       info,
       origin === "autonomous" ? async (): Promise<Choice> => "compact" : decisionPort(ctx, info),
       currentSignal,
       async (compactSignal) => {
+        if (compactSignal.aborted) {
+          compactCancelled = true;
+          return false;
+        }
         if (identity(ctx) !== initial || contextRevision(ctx) !== revision) return false;
-        const compacted = await compactAndWait(ctx, compactSignal);
-        if (compacted) revision = contextRevision(ctx);
-        else compactFailed = true;
-        return compacted;
+        const outcome = await compactAndWait(ctx, compactSignal);
+        if (outcome.kind === "complete") revision = contextRevision(ctx);
+        else if (outcome.kind === "cancel") compactCancelled = true;
+        else {
+          compactFailed = true;
+          compactFailure = outcome.reason;
+        }
+        return outcome.kind === "complete";
       },
     );
-    if (compactFailed && origin !== "submission")
-      throw new DOMException("Idle notification compaction failed", "AbortError");
+    if (currentSignal.aborted && origin !== "submission" && !signal?.aborted)
+      throw new DOMException("Idle admission invalidated", "AbortError");
+    if (currentSignal.aborted || compactCancelled) return "cancel";
+    if (compactFailed) {
+      if (origin === "submission")
+        throw new Error(`Idle prompt compaction failed: ${compactFailure}`);
+      throw new DOMException(
+        `Idle notification compaction failed: ${compactFailure}`,
+        "AbortError",
+      );
+    }
     if (currentSignal.aborted || identity(ctx) !== initial || contextRevision(ctx) !== revision) {
       if (origin !== "submission" && !signal?.aborted)
         throw new DOMException("Idle admission invalidated", "AbortError");
@@ -346,6 +454,10 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
       return lane.pending;
     },
     decide: (id: string, choice: Choice) => lane.decide(id, choice),
+    retainPrompt: (payload: Omit<Submission, "id">, reason: string) => {
+      if (typeof payload?.text !== "string" || typeof reason !== "string") return false;
+      return persistSubmission({ id: randomUUID(), ...payload }, "failed", failureMessage(reason));
+    },
   };
   const retryDecisionChannel = async () => {
     const pending = lane.pending,
@@ -366,8 +478,44 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
   globals[REMOTE_PREFLIGHT_KEY] = capability;
   pi.registerCommand("idle-context", {
     description:
-      "Show or resolve pending root idle admission: [ignore|compact|cancel] [request-id]",
+      "Resolve idle admission or recover a failed prompt with /idle-context recover [id]",
     handler: async (args, ctx) => {
+      const [action, requestedId] = args.trim().split(/\s+/);
+      if (action === "recover") {
+        const failed = ctx.sessionManager
+          .getBranch()
+          .filter(
+            (entry) => entry.type === "custom" && entry.customType === "idle-context-submission",
+          )
+          .map((entry) => entry.data as Submission & { state?: string })
+          .findLast((item) =>
+            requestedId
+              ? item.id === requestedId && ["failed", "released"].includes(item.state ?? "")
+              : item.state === "failed",
+          );
+        if (!failed) {
+          if (ctx.hasUI) ctx.ui.notify("No matching failed idle prompt to recover.", "warning");
+          return;
+        }
+        if (!ctx.hasUI) throw new Error(`Failed prompt ${failed.id}: ${failed.text}`);
+        if (typeof ctx.ui.getEditorText !== "function" || ctx.ui.getEditorText() !== "") {
+          ctx.ui.notify("Clear the editor before recovering the saved prompt.", "warning");
+          return;
+        }
+        ctx.ui.setEditorText(failed.text);
+        const releasedWarning =
+          failed.state === "released"
+            ? " It was released for dispatch and may already have been delivered; verify before resending."
+            : "";
+        const attachmentNote = failed.images?.length
+          ? ` ${failed.images.length} image(s) and delivery settings remain saved, not restored.`
+          : "";
+        ctx.ui.notify(
+          `Saved text restored; review it${releasedWarning}${attachmentNote} Submit manually.`,
+          failed.state === "released" ? "warning" : "info",
+        );
+        return;
+      }
       const pending = lane.pending;
       if (!pending) {
         if (ctx.hasUI) ctx.ui.notify("No pending idle decision.", "info");
@@ -443,8 +591,17 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
   const scheduleSubmission = (ctx: ExtensionContext, item: Submission) => {
     submission = item;
     const initialEpoch = epoch,
+      initialSessionId = ctx.sessionManager.getSessionId(),
       initial = identity(ctx),
       signal = lifecycle.signal;
+    const isCurrent = () => {
+      if (signal.aborted || epoch !== initialEpoch) return false;
+      try {
+        return identity(ctx) === initial;
+      } catch {
+        return false;
+      }
+    };
     setTimeout(() => {
       if (initialEpoch !== epoch || signal.aborted || submission !== item) return;
       void check(ctx, signal)
@@ -453,11 +610,14 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
           submission = undefined;
           // Durable reservation before send prevents duplicate replay after a
           // process crash. A released-but-unsent request requires user resubmission.
-          if (
-            !persistSubmission(item, result === "continue" ? "released" : "cancelled") ||
-            result !== "continue"
-          )
+          if (result !== "continue") {
+            persistSubmission(item, "cancelled");
             return;
+          }
+          if (!persistSubmission(item, "released")) {
+            reportSubmissionFailure(ctx, item, new Error("Could not reserve the approved prompt"));
+            return;
+          }
           replay = { text: item.text, images: item.images, epoch };
           const content = item.images?.length
             ? [{ type: "text" as const, text: item.text }, ...item.images]
@@ -481,26 +641,17 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
               }
             } catch (error) {
               if (replay?.epoch === epoch && replay.text === item.text) replay = undefined;
-              // This is only emitted when dispatch is positively rejected. Do not
-              // retry automatically: an ambiguous accepted send could duplicate.
-              try {
-                if (ctx.hasUI)
-                  ctx.ui.notify(
-                    `Idle-approved message could not be submitted; resubmit it: ${String(error).slice(0, 300)}`,
-                    "error",
-                  );
-                else
-                  process.stderr.write(
-                    `[idle-context-warning] Approved message submission failed: ${String(error)}\n`,
-                  );
-              } catch {
-                /* Report failure without replaying an ambiguous send. */
-              }
+              // Dispatch rejection is definitive; retain the exact prompt without replaying it.
+              if (isCurrent()) reportSubmissionFailure(ctx, item, error);
+              else reportStaleDispatchFailure(initialSessionId, item, error);
             }
           })();
         })
-        .catch(() => {
-          /* Never replay on an unhandled failure. */
+        .catch((error) => {
+          if (!signal.aborted && identity(ctx) === initial && submission === item) {
+            submission = undefined;
+            reportSubmissionFailure(ctx, item, error);
+          }
         });
     }, 0);
   };
@@ -515,16 +666,29 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
     let info: AdmissionDetails | undefined;
     try {
       info = details(ctx, settings(), "submission");
-    } catch {
+    } catch (error) {
+      const item: Submission = {
+        id: randomUUID(),
+        text: event.text,
+        images: event.images,
+        streamingBehavior: event.streamingBehavior,
+      };
+      reportSubmissionFailure(
+        ctx,
+        item,
+        new Error(`Idle prompt preflight failed: ${failureMessage(error)}`),
+      );
       return { action: "handled" as const };
     }
     if (!info) return;
     if (lane.pending || submission) {
-      if (ctx.hasUI)
-        ctx.ui.notify(
-          "An idle decision is already pending; this submission was not accepted. Resolve it, then resubmit.",
-          "warning",
-        );
+      const item: Submission = {
+        id: randomUUID(),
+        text: event.text,
+        images: event.images,
+        streamingBehavior: event.streamingBehavior,
+      };
+      reportSubmissionFailure(ctx, item, new Error("An idle decision is already pending"));
       return { action: "handled" as const };
     }
     const item: Submission = {
@@ -536,6 +700,7 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
     // Consume first: no pending input operation is held across a missing channel
     // or Compact. Keep the payload durable for reload, but never restore approval.
     if (persistSubmission(item, "pending")) scheduleSubmission(ctx, item);
+    else reportSubmissionFailure(ctx, item, new Error("Could not save the intercepted prompt"));
     return { action: "handled" as const };
   });
 }

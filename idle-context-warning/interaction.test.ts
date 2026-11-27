@@ -18,17 +18,21 @@ function fixture(choice = "Ignore") {
     notices: any[] = [],
     dialogs: any[] = [];
   let sendFailure = false;
+  let persistFailure = false;
+  let editorText = "";
   const pi: any = {
     on: (name: string, fn: Function) => (handlers[name] ??= []).push(fn),
     registerCommand: (name: string, command: any) => (commands[name] = command),
-    appendEntry: (customType: string, data: any) =>
+    appendEntry: (customType: string, data: any) => {
+      if (persistFailure) throw new Error("entry persistence unavailable");
       branch.push({
         type: "custom",
         id: `custom-${branch.length}`,
         parentId: branch.at(-1)?.id,
         customType,
         data,
-      }),
+      });
+    },
     events: { on: () => () => {}, emit() {} },
     sendUserMessage: (...args: any[]) => {
       if (sendFailure) return Promise.reject(new Error("offline"));
@@ -71,6 +75,8 @@ function fixture(choice = "Ignore") {
       },
       setStatus() {},
       notify: (...args: any[]) => notices.push(args),
+      getEditorText: () => editorText,
+      setEditorText: (text: string) => (editorText = text),
     },
     compact: (options: any) =>
       compacts.push({
@@ -100,6 +106,10 @@ function fixture(choice = "Ignore") {
       afterSummary?: (entry: any) => void;
       afterCallback?: (entry: any) => void;
       duplicateReceipt?: boolean;
+      callbackSummary?: string;
+      summary?: string;
+      fromHook?: boolean;
+      omitEntry?: boolean;
     } = {},
   ) => {
     const receipt =
@@ -114,10 +124,12 @@ function fixture(choice = "Ignore") {
       id: `summary-${branch.length}`,
       parentId: branch.at(-1)?.id,
       firstKeptEntryId: "old",
-      fromHook: true,
+      summary: options.summary ?? (options.tag === false ? "Bridge-owned summary" : "Idle summary"),
+      tokensBefore: 100,
+      fromHook: options.fromHook ?? true,
       details: receipt,
     };
-    branch.push(entry);
+    if (!options.omitEntry) branch.push(entry);
     options.afterSummary?.(entry);
     if (options.duplicateReceipt)
       branch.push({
@@ -128,8 +140,12 @@ function fixture(choice = "Ignore") {
         fromHook: true,
         details: receipt,
       });
-    attempt.options.onComplete();
     options.afterCallback?.(entry);
+    attempt.options.onComplete({
+      summary: options.callbackSummary ?? entry.summary,
+      firstKeptEntryId: entry.firstKeptEntryId,
+      tokensBefore: entry.tokensBefore,
+    });
   };
   return {
     emit,
@@ -146,6 +162,15 @@ function fixture(choice = "Ignore") {
     replaceBranch: (next: any[]) => (branch = next),
     setSession: (next: string) => (sessionId = next),
     failSend: () => (sendFailure = true),
+    failPersistence: () => (persistFailure = true),
+    savedSubmissions: () =>
+      branch
+        .filter(
+          (entry) => entry.type === "custom" && entry.customType === "idle-context-submission",
+        )
+        .map((entry) => entry.data),
+    editorText: () => editorText,
+    setEditorText: (text: string) => (editorText = text),
   };
 }
 describe("provider-independent admission", () => {
@@ -171,7 +196,7 @@ describe("provider-independent admission", () => {
     await tick();
     expect(f.sent).toHaveLength(0);
   });
-  it("accepted compaction releases the intercepted message exactly once with images and delivery options", async () => {
+  it("accepted compaction replays images and delivery options exactly once", async () => {
     const f = fixture("Compact"),
       images = [{ type: "image", data: "attached", mimeType: "image/png" }];
     await f.emit("input", {
@@ -193,7 +218,7 @@ describe("provider-independent admission", () => {
       ],
     ]);
   });
-  it("accepts a valid compact summary across benign branch appends and preserves original payload/options once", async () => {
+  it("accepts safe compaction across benign appends with the original payload", async () => {
     const f = fixture("Compact"),
       images = [{ type: "image", data: "attached", mimeType: "image/png" }];
     await f.emit("input", {
@@ -284,23 +309,55 @@ describe("provider-independent admission", () => {
     expect(await check).toBe("cancel");
     expect(f.sent).toHaveLength(0);
   });
-  it("rejects a stale or forged summary attempt receipt", async () => {
+  it("accepts a single safe compaction returned by its request without the marker", async () => {
+    for (const bridgeRunsLast of [false, true]) {
+      const f = fixture("Compact");
+      const check = f.capability.check();
+      await tick();
+      // In either load order, the single returned compaction may carry the bridge summary.
+      f.complete(undefined, {
+        tag: !bridgeRunsLast,
+        token: "bridge-owned-summary",
+      });
+      expect(await check).toBe("continue");
+      expect(f.sent).toHaveLength(0);
+    }
+  });
+  it("accepts a matching native compaction entry without fromHook ownership", async () => {
     const f = fixture("Compact");
     const check = f.capability.check();
     await tick();
-    f.complete(undefined, { token: "not-the-current-attempt" });
-    expect(await check).toBe("cancel");
+    f.complete(undefined, {
+      tag: false,
+      summary: "Pi-owned native summary",
+      fromHook: false,
+    });
+    expect(await check).toBe("continue");
+  });
+  it("rejects a callback summary that does not match the appended compaction", async () => {
+    const f = fixture("Compact");
+    const check = f.capability.check();
+    await tick();
+    f.complete(undefined, { callbackSummary: "unrelated summary" });
+    await expect(check).rejects.toThrow("Compaction callback does not match the new branch entry");
     expect(f.sent).toHaveLength(0);
+  });
+  it("reports a missing callback compaction on an otherwise safe branch as an error", async () => {
+    const f = fixture("Compact");
+    const check = f.capability.check();
+    await tick();
+    f.complete(undefined, { omitEntry: true });
+    await expect(check).rejects.toThrow("Expected one new compaction entry, found 0");
   });
   it("rejects duplicate summaries bearing the same approval token", async () => {
     const f = fixture("Compact");
     const check = f.capability.check();
     await tick();
     f.complete(undefined, { duplicateReceipt: true });
-    expect(await check).toBe("cancel");
+    await expect(check).rejects.toThrow("Expected one new compaction entry, found 2");
     expect(f.sent).toHaveLength(0);
   });
-  it("session identity change during compaction still cancels delivery", async () => {
+  it("session identity change during compaction cancels delivery", async () => {
     const f = fixture("Compact");
     const check = f.capability.check();
     await tick();
@@ -327,16 +384,105 @@ describe("provider-independent admission", () => {
     expect(f.sent).toHaveLength(1);
     expect(fallbackCalls).toBe(0);
   });
-  it("failed explicit compaction never sends or silently releases the intercepted message", async () => {
+  it("terminal compaction failure reports an error and preserves the prompt", async () => {
     const f = fixture("Compact");
     await f.emit("input", { source: "interactive", text: "keep for retry" });
     await tick();
-    f.compacts[0].options.onError();
+    f.compacts[0].options.onError(new Error("provider offline"));
     await tick();
     expect(f.sent).toHaveLength(0);
-    expect(f.capability.pending).toBeUndefined();
+    expect(f.savedSubmissions().at(-1)).toMatchObject({ state: "failed", text: "keep for retry" });
+    expect(f.notices.some(([message]: any[]) => String(message).includes("provider offline"))).toBe(
+      true,
+    );
+    expect(f.editorText()).toBe("keep for retry");
+    const failed = f.savedSubmissions().at(-1);
+    f.setEditorText("");
+    await f.commands["idle-context"].handler(`recover ${failed.id}`, f.ctx);
+    expect(f.editorText()).toBe("keep for retry");
+    expect(f.sent).toHaveLength(0);
   });
-  it("missing root channel stays pending until explicit user control, never autoapproves", async () => {
+  it("intentional Cancel during Compact remains cancellation without failed recovery", async () => {
+    const f = fixture("Compact");
+    await f.emit("input", { source: "interactive", text: "discard by choice" });
+    await tick();
+    expect(f.compacts).toHaveLength(1);
+    expect(f.capability.decide(f.capability.pending.id, "cancel")).toBe(true);
+    await tick();
+    await tick();
+    expect(f.savedSubmissions().at(-1)).toMatchObject({
+      state: "cancelled",
+      text: "discard by choice",
+    });
+    expect(f.savedSubmissions().some((item: any) => item.state === "failed")).toBe(false);
+    expect(
+      f.notices.some(([message]: any[]) => String(message).includes("was not submitted")),
+    ).toBe(false);
+    expect(f.editorText()).toBe("");
+  });
+  it("external abort during Compact remains cancellation without an error", async () => {
+    const f = fixture("Compact"),
+      controller = new AbortController();
+    const check = f.capability.check(controller.signal);
+    await tick();
+    await tick();
+    expect(f.compacts).toHaveLength(1);
+    controller.abort();
+    expect(await check).toBe("cancel");
+    expect(f.savedSubmissions().some((item: any) => item.state === "failed")).toBe(false);
+    const failureNotice = f.notices.some(([message]: any[]) =>
+      String(message).includes("was not submitted"),
+    );
+    expect(failureNotice).toBe(false);
+  });
+  it("does not replace a draft when the editor value is unknown", async () => {
+    const f = fixture("Compact");
+    await f.emit("input", { source: "interactive", text: "preserve original" });
+    await tick();
+    f.setEditorText("newer draft");
+    f.ctx.ui.getEditorText = undefined;
+    f.compacts[0].options.onError();
+    await tick();
+    expect(f.editorText()).toBe("newer draft");
+    expect(f.savedSubmissions().at(-1)).toMatchObject({
+      state: "failed",
+      text: "preserve original",
+    });
+  });
+  it("reservation persistence failure reports and restores the prompt", async () => {
+    const f = fixture();
+    await f.emit("input", { source: "interactive", text: "persist this draft" });
+    f.failPersistence();
+    await tick();
+    await tick();
+    expect(f.sent).toHaveLength(0);
+    expect(f.editorText()).toBe("persist this draft");
+    expect(f.notices.some(([message]: any[]) => String(message).includes("reserve"))).toBe(true);
+  });
+  it("remote preflight errors are real and retained payloads never auto-replay", async () => {
+    const f = fixture("Compact");
+    f.failSend();
+    const payload = {
+      text: "remote draft",
+      images: [{ type: "image", data: "kept", mimeType: "image/png" }],
+      streamingBehavior: "followUp" as const,
+    };
+    const check = f.capability.check();
+    await tick();
+    f.compacts[0].options.onError(new Error("summary provider offline"));
+    await expect(check).rejects.toThrow("summary provider offline");
+    expect(f.capability.retainPrompt(payload, "remote preflight compaction failed")).toBe(true);
+    await tick();
+    expect(f.sent).toHaveLength(0);
+    expect(f.savedSubmissions().at(-1)).toMatchObject({
+      state: "failed",
+      text: payload.text,
+      images: payload.images,
+      streamingBehavior: "followUp",
+      error: "remote preflight compaction failed",
+    });
+  });
+  it("missing root channel stays pending until explicit user control", async () => {
     const f = fixture();
     f.ctx.hasUI = false;
     const check = f.capability.check();
@@ -383,7 +529,7 @@ describe("provider-independent admission", () => {
     await f.emit("session_shutdown");
     expect(await check).toBe("cancel");
   });
-  it("one lane never overwrites pending submission; late and mismatched choices cannot approve", async () => {
+  it("one lane rejects late and mismatched choices without overwriting pending input", async () => {
     const f = fixture();
     f.ctx.hasUI = false;
     const first = f.capability.check();
@@ -396,7 +542,7 @@ describe("provider-independent admission", () => {
     expect(await first).toBe("cancel");
     expect(f.capability.decide(id, "ignore")).toBe(false);
   });
-  it("ordinary notification admission uses the user choice lane without replaying a submission", async () => {
+  it("ordinary notification admission uses the choice lane without replay", async () => {
     const f = fixture();
     f.ctx.hasUI = false;
     const pending = admitHarnessWake(f.ctx, new AbortController().signal);
@@ -406,7 +552,7 @@ describe("provider-independent admission", () => {
     expect(await pending).toBe("continue");
     expect(f.sent).toHaveLength(0);
   });
-  it("trusted autonomous admission compacts by default without opening a user questionnaire", async () => {
+  it("trusted autonomous admission compacts by default without a questionnaire", async () => {
     const f = fixture();
     const pending = admitHarnessWake(f.ctx, new AbortController().signal, true);
     await tick();
@@ -417,7 +563,7 @@ describe("provider-independent admission", () => {
     expect(await pending).toBe("continue");
     expect(f.sent).toHaveLength(0);
   });
-  it("autonomous wake compaction failure rejects for durable retry instead of returning user-cancel", async () => {
+  it("autonomous compaction failure rejects for durable retry", async () => {
     const f = fixture(),
       pending = admitHarnessWake(f.ctx, new AbortController().signal, true);
     await tick();
@@ -454,8 +600,49 @@ describe("provider-independent admission", () => {
     await tick();
     expect(f.sent).toHaveLength(0);
     expect(
-      f.notices.some(([message]: any[]) => String(message).includes("could not be submitted")),
+      f.notices.some(([message]: any[]) => String(message).includes("was not submitted")),
     ).toBe(true);
+    expect(f.savedSubmissions().at(-1)).toMatchObject({ state: "failed", text: "send once" });
+  });
+  it("keeps a stale dispatch rejection recoverable without writing to the new context", async () => {
+    const f = fixture();
+    let rejectDispatch!: (error: Error) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => (markStarted = resolve));
+    f.pi.submitUserMessage = () =>
+      new Promise((_resolve: any, reject: (error: Error) => void) => {
+        rejectDispatch = reject;
+        markStarted();
+      });
+    const diagnostics: string[] = [];
+    const originalWrite = process.stderr.write;
+    (process.stderr as any).write = (chunk: unknown) => {
+      diagnostics.push(String(chunk));
+      return true;
+    };
+    try {
+      await f.emit("input", { source: "interactive", text: "recover after switch" });
+      await started;
+      const released = f.savedSubmissions().at(-1);
+      expect(released.state).toBe("released");
+      const savedCount = f.savedSubmissions().length;
+      f.setSession("replacement-session");
+      rejectDispatch(new Error("transport offline"));
+      await tick();
+      expect(f.savedSubmissions()).toHaveLength(savedCount);
+      expect(f.savedSubmissions().some((item: any) => item.state === "failed")).toBe(false);
+      expect(diagnostics.join("")).toContain("Original session test");
+      expect(diagnostics.join("")).toContain(released.id);
+      expect(diagnostics.join("")).toContain("transport offline");
+      await f.commands["idle-context"].handler("recover", f.ctx);
+      expect(f.editorText()).toBe("");
+      await f.commands["idle-context"].handler(`recover ${released.id}`, f.ctx);
+      expect(f.editorText()).toBe("recover after switch");
+      expect(f.notices.at(-1)[0]).toContain("may already have been delivered");
+      expect(f.sent).toHaveLength(0);
+    } finally {
+      (process.stderr as any).write = originalWrite;
+    }
   });
   it("explicit Compact waits for a matching persisted receipt, no selection change", async () => {
     const f = fixture("Compact");
@@ -468,7 +655,7 @@ describe("provider-independent admission", () => {
     expect(f.ctx.model).toBe(model);
     expect(f.ctx.thinkingLevel).toBe("low");
   });
-  it("Cancel during compaction revokes replay even if the native callback arrives late", async () => {
+  it("Cancel during compaction revokes replay after a late callback", async () => {
     const f = fixture("Compact");
     const check = f.capability.check();
     await tick();
@@ -479,12 +666,12 @@ describe("provider-independent admission", () => {
     expect(f.sent).toHaveLength(0);
     expect(f.capability.decide(id, "ignore")).toBe(false);
   });
-  it("callback alone or wrong receipt cannot release admission", async () => {
+  it("callback mismatch is a real failure, not a silent cancellation", async () => {
     const f = fixture("Compact");
     const check = f.capability.check();
     await tick();
-    f.complete(undefined, { tag: false });
-    expect(await check).toBe("cancel");
+    f.complete(undefined, { tag: false, callbackSummary: "wrong summary" });
+    await expect(check).rejects.toMatchObject({ name: "Error" });
   });
   for (const event of [
     "model_select",
