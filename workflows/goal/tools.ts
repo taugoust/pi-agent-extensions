@@ -59,7 +59,6 @@ interface GoalWaitDetails {
 
 const MAX_GOAL_TEXT_LENGTH = 4_000;
 const MAX_BLOCKER_REASON_LENGTH = 1_000;
-
 const MAX_BLOCKER_EVIDENCE_LENGTH = 4_000;
 
 export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {

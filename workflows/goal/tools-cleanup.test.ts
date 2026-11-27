@@ -72,8 +72,10 @@ test("standalone goals work without subagents but managed goals fail closed", as
 test("goal completion checks authenticated inventory without a subagent tool", async () => {
   const globals = globalThis as any;
   const previous = globals.__paeLocalSubagentControllerV1;
+  const oldManaged = process.env.PI_DEDICATED_GOAL_CHILD;
   const ctx = { sessionManager: { getSessionId: () => "coordinator" } };
   try {
+    process.env.PI_DEDICATED_GOAL_CHILD = "1";
     globals.__paeLocalSubagentControllerV1 = {
       protocol: 1,
       sessionId: "coordinator",
@@ -128,6 +130,41 @@ test("goal completion checks authenticated inventory without a subagent tool", a
     assert.equal(completions, 1);
     assert.equal(rejections, 1);
   } finally {
+    if (oldManaged === undefined) delete process.env.PI_DEDICATED_GOAL_CHILD;
+    else process.env.PI_DEDICATED_GOAL_CHILD = oldManaged;
+    if (previous === undefined) delete globals.__paeLocalSubagentControllerV1;
+    else globals.__paeLocalSubagentControllerV1 = previous;
+  }
+});
+
+test("goals outside delegated coordinators ignore unreaped workers", async () => {
+  const globals = globalThis as any;
+  const previous = globals.__paeLocalSubagentControllerV1;
+  const oldManaged = process.env.PI_DEDICATED_GOAL_CHILD;
+  const ctx = { sessionManager: { getSessionId: () => "main" } };
+  try {
+    delete process.env.PI_DEDICATED_GOAL_CHILD;
+    globals.__paeLocalSubagentControllerV1 = {
+      protocol: 1,
+      sessionId: "main",
+      async goalCompletionWorkers() {
+        return {
+          groups: [{ job_id: "main-job", children: [{ child_id: "busy" }] }],
+          descendants: [],
+          foregroundTasks: [],
+          background: [],
+        };
+      },
+    };
+    const result = await runGoalCompletionWorkerGate(
+      ctx,
+      () => "complete",
+      (message) => message,
+    );
+    assert.equal(result, "complete");
+  } finally {
+    if (oldManaged === undefined) delete process.env.PI_DEDICATED_GOAL_CHILD;
+    else process.env.PI_DEDICATED_GOAL_CHILD = oldManaged;
     if (previous === undefined) delete globals.__paeLocalSubagentControllerV1;
     else globals.__paeLocalSubagentControllerV1 = previous;
   }

@@ -699,9 +699,7 @@ export class TuiNativeManager {
       allowFinishedWaiters?: true;
     } = {},
   ): Promise<void> {
-    const finishedWaiter =
-      options.allowFinishedWaiters === true && c.state === "waiting" && this.finishedRun(c);
-    if (active(c) && !finishedWaiter)
+    if (active(c) && !this.idleFinishedWaiter(c, options.allowFinishedWaiters))
       throw new Error(`Active child blocks reap: ${g.id}/${c.childId}`);
     if (options.cleanupWorktree && !c.cleanupWorktreeRequested) {
       c.cleanupWorktreeRequested = true;
@@ -774,9 +772,7 @@ export class TuiNativeManager {
         ownedSessionIds: [...owners],
         context: {
           cwd: process.cwd(),
-          isIdle: () =>
-            !active(c) ||
-            (options.allowFinishedWaiters === true && c.state === "waiting" && this.finishedRun(c)),
+          isIdle: () => !active(c) || this.idleFinishedWaiter(c, options.allowFinishedWaiters),
           hasPendingMessages: () => false,
           managedWorktreeActivity: async (path) => {
             const justReaped = {
@@ -826,10 +822,7 @@ export class TuiNativeManager {
         nested = fresh;
         for (const c of nested.children) {
           await this.observe(nested, c, true);
-          if (
-            active(c) &&
-            !(options.allowFinishedWaiters && c.state === "waiting" && this.finishedRun(c))
-          )
+          if (active(c) && !this.idleFinishedWaiter(c, options.allowFinishedWaiters))
             throw new Error(`Active descendant blocks reap: ${nested.id}/${c.childId}`);
           if (c.report) this.retainedArtifact(c, c.report, "report");
           await this.reapChild(nested, c, options);
@@ -1663,6 +1656,10 @@ export class TuiNativeManager {
     } catch {
       return false;
     }
+  }
+  /** A waiting child whose last run finished, when cleanup of finished Goals allows it. */
+  private idleFinishedWaiter(c: Child, allowed?: boolean): boolean {
+    return allowed === true && c.state === "waiting" && this.finishedRun(c);
   }
   private async finishedGoalOwner(owner: string): Promise<boolean> {
     for (const group of this.groups.values())
@@ -2786,11 +2783,7 @@ export class TuiNativeManager {
         }
         const blockers = groups.flatMap((g) =>
           g.children
-            .filter(
-              (c) =>
-                active(c) &&
-                !(options.allowFinishedWaiters && c.state === "waiting" && this.finishedRun(c)),
-            )
+            .filter((c) => active(c) && !this.idleFinishedWaiter(c, options.allowFinishedWaiters))
             .map((c) => `${g.id}/${c.childId} ${c.state}`),
         );
         if (blockers.length)
@@ -3047,9 +3040,7 @@ export class TuiNativeManager {
           .flatMap((group) =>
             group.children
               .filter(
-                (child) =>
-                  active(child) &&
-                  !(allowFinishedWaiters && child.state === "waiting" && this.finishedRun(child)),
+                (child) => active(child) && !this.idleFinishedWaiter(child, allowFinishedWaiters),
               )
               .map((child) => `${group.id}/${child.childId} ${child.state}`),
           );

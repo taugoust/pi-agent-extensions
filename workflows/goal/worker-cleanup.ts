@@ -29,14 +29,12 @@ export async function runGoalCompletionWorkerGate<T>(
 }
 
 export async function goalCompletionWorkerRejection(ctx: any): Promise<string | undefined> {
+  // Only delegated Goal coordinators own their workers' cleanup.
+  if (process.env.PI_DEDICATED_GOAL_CHILD !== "1") return;
   const controller = (globalThis as any).__paeLocalSubagentControllerV1;
   const sessionId = ctx.sessionManager.getSessionId();
-  if (!controller) {
-    return process.env.PI_DEDICATED_GOAL_CHILD === "1"
-      ? "Goal completion rejected: delegated worker inventory is unavailable."
-      : undefined;
-  }
   if (
+    !controller ||
     controller.protocol !== 1 ||
     controller.sessionId !== sessionId ||
     typeof controller.goalCompletionWorkers !== "function"
