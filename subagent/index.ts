@@ -43,6 +43,7 @@ import {
 } from "../shared/session-routing.ts";
 import { applyAutomaticWorktreePolicy } from "../shared/worker-worktree-context.ts";
 import { ownedWorktrees } from "../shared/subagent-worktrees.ts";
+import { openRetainedSession } from "./retained-session.ts";
 
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -3244,11 +3245,13 @@ export default function (pi: ExtensionAPI) {
             const record = ordinary
               ? nativeTui(ctx)!.goalDetails(sessionId, entry.child, entry.id)
               : store.get(sessionId, entry.child.taskId);
-            const manager = SessionManager.open(
-              ordinary ? (record as any).sessionFile : store.sessionPath(entry.child.taskId),
+            const sessionFile = ordinary
+              ? (record as any).sessionFile
+              : store.sessionPath(entry.child.taskId);
+            const manager = await openRetainedSession(sessionFile, record.sessionId, (file) =>
+              SessionManager.open(file),
             );
-            if (manager.getSessionId() !== record.sessionId)
-              throw new Error("Retained child session identity changed");
+            if (!manager) return null;
             const branch = manager.getBranch() as any[];
             const binding = branch.findLast(
               (e) => e.type === "custom" && e.customType === "delegated-goal-child-binding-v1",

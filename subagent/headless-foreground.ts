@@ -2689,6 +2689,8 @@ export class HeadlessForegroundManager {
           child.activityCwd = activityCwd;
           inventory.persist(group);
         }
+        // Attribute by launch identity before touching a removed, unrelated checkout.
+        if (!pathWithin(targetPath, activityCwd)) continue;
         let physicalCwd: { path: string; exists: boolean };
         try {
           physicalCwd = physicalPath(activityCwd);
@@ -2701,7 +2703,6 @@ export class HeadlessForegroundManager {
           throw new Error(
             `Managed foreground physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`,
           );
-        if (!pathWithin(targetPath, activityCwd)) continue;
         await inventory.observe(group, child);
         if (
           child.error?.includes("unavailable") ||

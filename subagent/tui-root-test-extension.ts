@@ -1880,6 +1880,15 @@ export default function rootTest(pi: ExtensionAPI) {
       (entry) => entry.type === "custom_message" && entry.customType === "harness-state",
     );
     assert.ok(notifications.length > 0, "background completion must notify the parent");
+    const goalFile = `${process.env.PI_TUI_ROOT_RESULT!}.goal`;
+    const managedGoal = JSON.parse(await readFile(goalFile, "utf8"));
+    function isManagedGoalWait(update: any): boolean {
+      return (
+        update.kind === "notification" &&
+        update.requires_guidance === true &&
+        update.child_id === managedGoal.child.childId
+      );
+    }
     assert.ok(
       notifications.every(
         (entry) =>
@@ -1888,14 +1897,21 @@ export default function rootTest(pi: ExtensionAPI) {
           entry.details.updates.every(
             (update: any) =>
               (update.kind === "subagent" && update.completion === true) ||
+              isManagedGoalWait(update) ||
               (update.kind === "notification" &&
                 update.requires_guidance === true &&
                 update.child_id === saved.questionnaireChildId &&
                 update.message.startsWith("Structured human request ")),
           ),
       ),
-      `routine child updates must remain quiet; only the fixture's explicit human request may wake: ${JSON.stringify(notifications.map((entry) => entry.details?.updates))}`,
+      "Routine findings must stay quiet outside human requests and delegated goal waits",
     );
+    const managedWaits = notifications
+      .flatMap((entry) => entry.details.updates)
+      .filter(isManagedGoalWait);
+    assert.equal(managedWaits.length, 1, "Repeated goal wait reasons must notify only once");
+    assert.ok(managedWaits[0].message.includes("Await deterministic parent steering"));
+    assert.ok(managedWaits[0].message.includes("MANAGED_GOAL_WAIT_REPORT"));
     assert.ok(
       entries.some(
         (entry) => entry.type === "custom" && entry.customType === "harness-state-receipt",
