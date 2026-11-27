@@ -51,7 +51,7 @@ const text = (m) =>
         .map((p) => p.text)
         .join("\n");
 
-async function fixture(directory, script, manager) {
+async function fixture(directory, script, manager, options = {}) {
   initTheme("dark", false);
   const models = await ModelRuntime.create({
     authPath: join(directory, "auth.json"),
@@ -82,6 +82,7 @@ async function fixture(directory, script, manager) {
     };
     ({ runtime: engine } = goal(wrapped, {
       settingsPath: join(directory, "absent-settings.json"),
+      restorePaused: options.restorePaused === true,
     }));
     progress(pi, {
       loadSettings: async () => ({ kind: "loaded", settings: DEFAULT_PROGRESS_SETTINGS }),
@@ -343,6 +344,39 @@ test(
         assert.equal(f.engine.activeGoal.waiting, undefined);
         assert.equal(f.engine.activeGoal.lastWake.reason, "explicit_resume");
         assert.equal(f.engine.dispatchDueGoalWait(f.ctx), false);
+      } finally {
+        await f.dispose();
+      }
+    }),
+);
+
+test(
+  "same-process delegated reload preserves waits and continues active work once",
+  { timeout: 15000 },
+  () =>
+    isolated(async (directory) => {
+      const f = await fixture(directory, startScript, undefined, { restorePaused: true });
+      try {
+        await f.session.prompt("Create and wait.");
+        await f.session.waitForIdle();
+        const waiting = structuredClone(f.engine.activeGoal);
+        assert.ok(waiting.waiting);
+        const waitingCalls = f.calls;
+
+        await f.session.reload();
+        assert.equal(f.engine.activeGoal.status, "active");
+        assert.equal(f.engine.activeGoal.activationId, waiting.activationId);
+        assert.deepEqual(f.engine.activeGoal.waiting, waiting.waiting);
+        await delay(30);
+        assert.equal(f.calls, waitingCalls, "waiting reload must not call the model");
+
+        assert.equal(f.engine.clearGoalWait(f.ctx, waiting.id), true);
+        await f.session.reload();
+        await delay(30);
+        await f.session.waitForIdle();
+        assert.equal(f.calls, waitingCalls + 1);
+        assert.equal(f.engine.activeGoal.status, "active");
+        assert.ok(f.engine.activeGoal.waiting, "continued work returned to the fixture wait");
       } finally {
         await f.dispose();
       }

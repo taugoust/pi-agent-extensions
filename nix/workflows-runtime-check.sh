@@ -36,6 +36,7 @@ tests=(
   questionnaire/goal-attachments.test.mjs
   workflows/delegated-child.test.mjs
   workflows/goal-limits.test.mjs
+  workflows/delegated-restore.test.mjs
   subagent/goal-policy.test.ts
   subagent/coordinator-role.test.ts
   subagent/goal-executor.test.ts
