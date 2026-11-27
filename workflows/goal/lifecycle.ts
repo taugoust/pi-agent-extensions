@@ -54,7 +54,7 @@ export function registerGoalLifecycle(
   // starts true so handlers keep working on runners where session_start was
   // never emitted (for example late extension loading).
   let sessionActive = true;
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     sessionActive = true;
     runtime.bindWorkflowSession(ctx.sessionManager);
     runtime.replaceMenuSession();
@@ -92,7 +92,7 @@ export function registerGoalLifecycle(
       notifyTerminal(ctx.ui, REMOVED_QUEUE_SETTING_WARNING, "warning");
     }
 
-    if (options.restorePaused && loaded.goal) {
+    if (options.restorePaused && event.reason !== "reload" && loaded.goal) {
       // Dedicated child startup is metadata-only. In particular, never install
       // an active contract or wait timer before the authenticated parent Resume.
       runtime.cancelContinuationWork();
@@ -157,6 +157,10 @@ export function registerGoalLifecycle(
       }
       runtime.updateStatus(ctx, runtime.activeGoal);
       runtime.restoreGoalWaitTimer(ctx);
+      if (options.restorePaused && event.reason === "reload" && !runtime.activeGoal.waiting) {
+        runtime.requestContinuation(runtime.activeGoal);
+        runtime.scheduleContinuationDispatch(ctx, runtime.activeGoal.id);
+      }
       return;
     }
 
