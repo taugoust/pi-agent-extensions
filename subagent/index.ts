@@ -2846,10 +2846,17 @@ export default function (pi: ExtensionAPI) {
             readInheritedSessionRoutingProfile(ctx),
           ),
       );
-      tuiNative.activate(stableSessionId(ctx), (update) => {
-        if (lifecycleClosing) return false;
-        return quietState.enqueue(ctx, update);
-      });
+      tuiNative.activate(
+        stableSessionId(ctx),
+        (update) => {
+          if (lifecycleClosing) return false;
+          return quietState.enqueue(ctx, update);
+        },
+        (message) => {
+          if (ctx.hasUI) ctx.ui.notify(message, "error");
+          pi.appendEntry("subagent-notification-failure", { message });
+        },
+      );
     }
     return tuiNative;
   };

@@ -8,7 +8,16 @@ import { TuiWorkerStore, readPrivateJson } from "./tui-worker-store.ts";
 import { TuiWorkerServer } from "./tui-worker-server.ts";
 import { installQuietState } from "../shared/quiet-state.ts";
 
-for (const start of ["prompt", "human", "result", "result-storage-failure"] as const)
+const activityStarts = [
+  "prompt",
+  "human",
+  "result",
+  "result-storage-failure",
+  "delivered-then-prompt",
+  "delivered-then-length",
+] as const;
+
+for (const start of activityStarts)
   test(`pending completion is invalidated by ${start} activity across reload, later completion still wakes`, async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-generation-")),
       directory = join(root, "w");
@@ -57,7 +66,10 @@ for (const start of ["prompt", "human", "result", "result-storage-failure"] as c
       taskId: m.taskId,
       directory,
       state: "running",
-      spec: { task: "review" },
+      spec: {
+        task: "review",
+        ...(start.startsWith("delivered-then-") ? { verification: [{ command: "check" }] } : {}),
+      },
       started: true,
       notifiedSequence: 0,
     };
@@ -112,8 +124,23 @@ for (const start of ["prompt", "human", "result", "result-storage-failure"] as c
       await manager.refresh("parent");
       const oldSequence = worker.state.sequence;
       assert.ok(entries.some((e) => e.data.state === "queued"));
+      const deliveredFirst = start.startsWith("delivered-then-");
+      if (deliveredFirst) {
+        await emit("ui_prompt_end");
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        assert.equal(messages.length, 1);
+        const result = await manager.operation(
+          { operation: "result", child_id: child.childId },
+          "parent",
+        );
+        const terminalId = result.details.terminal_id;
+        assert.equal(
+          messages[0].details.updates[0].id,
+          `${group.id}:${child.childId}:terminal:${terminalId}`,
+        );
+      }
       rejectActivity = start === "result-storage-failure";
-      if (start === "prompt")
+      if (start === "prompt" || deliveredFirst)
         await manager.operation(
           { operation: "prompt", child_id: child.childId, message: "continue" },
           "parent",
@@ -140,11 +167,15 @@ for (const start of ["prompt", "human", "result", "result-storage-failure"] as c
         }
       }
       if (!start.startsWith("result")) assert.equal(child.state, "running");
-      // Acceptance/selected result alone must invalidate; do not refresh first.
-      await emit("session_shutdown", { reason: "reload" });
-      await emit("session_start");
+      // A delivered first run exercises an idle parent without a reload.
+      // Other cases also prove invalidation survives a quiet-state reload.
+      if (!deliveredFirst) {
+        await emit("session_shutdown", { reason: "reload" });
+        await emit("session_start");
+      }
       await new Promise((resolve) => setTimeout(resolve, 30));
-      assert.equal(messages.length, 0, `stale completion ${oldSequence} woke after newer activity`);
+      const priorMessages = deliveredFirst ? 1 : 0;
+      assert.equal(messages.length, priorMessages, "old completion woke after newer activity");
       if (rejectActivity) {
         rejectActivity = false;
         await new Promise((resolve) => setTimeout(resolve, 1100));
@@ -175,11 +206,23 @@ for (const start of ["prompt", "human", "result", "result-storage-failure"] as c
         through_sequence: oldSequence,
       });
       idle = true;
-      worker.settled({ assistant: { stopReason: "stop", content: [] } });
+      worker.settled({
+        assistant: {
+          stopReason: start === "delivered-then-length" ? "length" : "stop",
+          content: [],
+        },
+      });
       await manager.refresh("parent");
       await new Promise((resolve) => setTimeout(resolve, 30));
-      assert.equal(messages.length, 1);
-      assert.ok(messages[0].details.updates[0].through_sequence > oldSequence);
+      assert.equal(messages.length, priorMessages + 1);
+      assert.ok(messages.at(-1).details.updates[0].through_sequence > oldSequence);
+      if (deliveredFirst) {
+        assert.equal(child.state, "waiting");
+        assert.equal(child.acceptedDelivery, false);
+        await manager.refresh("parent");
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        assert.equal(messages.length, 2, "same run notified twice");
+      }
     } finally {
       await emit("session_shutdown", { reason: "exit" });
       await worker.close();
@@ -298,6 +341,9 @@ test("native terminal snapshots: foreground silence, background failures, retry,
       return true;
     };
     manager.notifyTerminal(group, lost);
+    assert.equal(updates.length, 1, "delivery retried before its backoff");
+    lost.terminalNotificationRetry.retryAt = 0;
+    manager.notifyTerminal(group, lost);
     manager.notifyTerminal(group, lost);
     assert.equal(updates.length, 2);
     assert.equal(updates[1].state, "lost");
@@ -313,3 +359,103 @@ test("native terminal snapshots: foreground silence, background failures, retry,
     await rm(root, { recursive: true, force: true });
   }
 });
+
+for (const failure of ["refused", "thrown"])
+  test(`terminal delivery ${failure} retries across reload then reports once`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "pi-terminal-retry-"));
+    let now = Date.now();
+    const startedAt = now;
+    t.mock.method(Date, "now", () => now);
+    const createManager = (): any =>
+      new TuiNativeManager(
+        root,
+        () => "native",
+        () => false,
+        16,
+      );
+    let manager = createManager();
+    const child: any = {
+      childId: `subagent-child-${"b".repeat(24)}`,
+      taskId: `subagent-task-${"c".repeat(24)}`,
+      directory: join(root, "workers", "d".repeat(24)),
+      operatorCapability: "e".repeat(64),
+      attempt: 1,
+      state: "completed",
+      started: true,
+      spec: { task: "review" },
+      notifiedSequence: 0,
+      terminalNotification: "",
+    };
+    const group: any = {
+      version: 1,
+      id: `subagent-job-${"a".repeat(24)}`,
+      owner: "retry-parent",
+      background: true,
+      children: [child],
+    };
+    let calls = 0;
+    const refuse = () => {
+      calls++;
+      if (failure === "thrown") throw new Error("injected delivery failure");
+      return false;
+    };
+    const reports: string[] = [];
+    manager.groups.set(group.id, group);
+    manager.notify = refuse;
+    try {
+      await manager.refresh(group.owner);
+      assert.equal(calls, 1);
+      await manager.refresh(group.owner);
+      assert.equal(calls, 1, "retry ignored backoff");
+      await manager.shutdown(false);
+      manager = createManager();
+      manager.notify = refuse;
+      manager.reportTerminalFailure = (message: string) => reports.push(message);
+      const restored = manager.groups.get(group.id);
+      const restoredChild = restored.children[0];
+      assert.equal(restoredChild.terminalNotificationRetry.attempts, 1);
+      for (let attempt = 2; attempt <= 5; attempt++) {
+        assert.ok(restoredChild.terminalNotificationRetry.retryAt > now);
+        now = restoredChild.terminalNotificationRetry.retryAt;
+        await manager.refresh(group.owner);
+        assert.equal(calls, attempt);
+      }
+      assert.equal(reports.length, 1);
+      assert.ok(now - startedAt <= 120000, "delivery attempts exceeded two minutes");
+      assert.equal(restoredChild.terminalNotification, "");
+      assert.equal(restoredChild.terminalNotificationFailure.attempts, 5);
+      const saved: any = readPrivateJson(join(root, "groups", `${group.id}.json`));
+      assert.equal(saved.children[0].terminalNotificationFailure.attempts, 5);
+      const status = await manager.operation(
+        { operation: "status", job_id: group.id },
+        group.owner,
+      );
+      assert.equal(status.details.group.children[0].terminal_notification_failure.attempts, 5);
+      const output = await manager.operation(
+        { operation: "output", job_id: group.id },
+        group.owner,
+      );
+      assert.ok(output.content[0].text.includes(restoredChild.terminalNotificationFailure.error));
+      await manager.shutdown(false);
+      manager = createManager();
+      manager.notify = refuse;
+      manager.reportTerminalFailure = (message: string) => reports.push(message);
+      await manager.refresh(group.owner);
+      assert.equal(calls, 5, "exhausted delivery retried after reload");
+      assert.equal(reports.length, 1);
+      const nextChild = manager.groups.get(group.id).children[0];
+      nextChild.runSequence = 20;
+      manager.notify = () => {
+        calls++;
+        return true;
+      };
+      await manager.refresh(group.owner);
+      await manager.refresh(group.owner);
+      assert.equal(calls, 6, "new run was suppressed or delivered twice");
+      assert.equal(nextChild.terminalNotificationFailure, undefined);
+      assert.equal(nextChild.terminalNotificationRetry, undefined);
+    } finally {
+      await manager.shutdown(false);
+      await rm(root, { recursive: true, force: true });
+    }
+  });

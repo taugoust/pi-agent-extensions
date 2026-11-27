@@ -105,6 +105,12 @@ type Spec = {
   worktree?: WorktreeOption;
   worktreeInfo?: WorktreeInfo;
 };
+type TerminalNotificationFailure = {
+  token: string;
+  attempts: number;
+  error: string;
+  retryAt?: number;
+};
 type Child = {
   childId: string;
   taskId: string;
@@ -148,6 +154,8 @@ type Child = {
   runSequence?: number;
   pendingActivitySequence?: number;
   terminalNotification?: string;
+  terminalNotificationRetry?: TerminalNotificationFailure;
+  terminalNotificationFailure?: TerminalNotificationFailure;
   lastOutcome?: unknown;
   requiresCompaction?: boolean;
 };
@@ -186,8 +194,16 @@ const verificationFailedForDelivery = (child: Child) =>
   !["passed", "checking"].includes((child.verification as any)?.status);
 const unfinishedAssignment = (child: Child) =>
   !!child.spec?.verification?.length && outcomeState(child) !== "delivered";
-const terminalToken = (child: Child) =>
-  `${child.report ?? `terminal:${child.attempt ?? 1}:${child.runSequence ?? 0}`}${child.spec?.verification?.length ? `:verification:${(child.verification as any)?.status ?? "unavailable"}` : ""}`;
+const terminalToken = (child: Child) => {
+  const run = child.report ?? `terminal:${child.attempt ?? 1}:${child.runSequence ?? 0}`;
+  if (!child.spec?.verification?.length) return run;
+  const verification = (child.verification as any)?.status ?? "unavailable";
+  return `${run}:verification:${verification}`;
+};
+/** Retry transient parent unavailability for a little over a minute. */
+function terminalRetryDelay(attempts: number): number | undefined {
+  return [1000, 5000, 15000, 60000][attempts - 1];
+}
 const taskOutcome = (value: unknown, criteria: string[]) => {
   try {
     return validateTaskOutcome(value, criteria);
@@ -258,6 +274,7 @@ export class TuiNativeManager {
   private reapReserved = false;
   private owner?: string;
   private notify?: (update: QuietUpdate) => boolean;
+  private reportTerminalFailure?: (message: string) => void;
   private foregroundWaits = new Set<string>();
   private generation = 0;
   private ownerLock?: string;
@@ -369,7 +386,12 @@ export class TuiNativeManager {
     this.queue = next;
     return next;
   }
-  activate(owner: string, notify?: (update: QuietUpdate) => boolean): void {
+  activate(
+    owner: string,
+    notify?: (update: QuietUpdate) => boolean,
+    reportTerminalFailure?: (message: string) => void,
+  ): void {
+    this.reportTerminalFailure = reportTerminalFailure;
     const lock = join(
       this.root,
       `owner-${createHash("sha256").update(owner).digest("hex").slice(0, 32)}.lock`,
@@ -1034,6 +1056,8 @@ export class TuiNativeManager {
           task: c.spec.task.slice(0, 500),
           error: c.error,
           observation_error: c.observationError,
+          terminal_notification_retry: c.terminalNotificationRetry,
+          terminal_notification_failure: c.terminalNotificationFailure,
           cwd: c.spec.cwd,
           ...(c.spec.worktreeInfo ? { worktree: c.spec.worktreeInfo } : {}),
           worktree_reap_policy: {
@@ -1072,6 +1096,10 @@ export class TuiNativeManager {
         : "";
       const state = `${c.state}${reaped} child_id=${c.childId}`;
       text += `\n${i + 1}. ${this.canonicalTitle(c)} ${state}${error}${observation}`;
+      if (c.terminalNotificationFailure) {
+        const failure = c.terminalNotificationFailure;
+        text += `\nParent notification failed after ${failure.attempts} attempts. ${failure.error}`;
+      }
       if (c.spec.verification?.length)
         text += ` checks=${(c.verification as any)?.status ?? "unavailable"} accepted_delivery=${c.acceptedDelivery === true}`;
       if (output && c.report) {
@@ -1599,8 +1627,41 @@ export class TuiNativeManager {
       if (this.refreshFlight === flight) this.refreshFlight = undefined;
     }
   }
+  /** Assignment waits retain reap safety, but final answers still finish a run. */
+  private finishedRun(c: Child): boolean {
+    if (!active(c)) return true;
+    if (c.state !== "waiting" || !c.report) return false;
+    if ((c.verification as any)?.status === "checking") return false;
+    try {
+      const report = this.retainedArtifact(c, c.report, "report");
+      const reason = report.assistant?.stopReason;
+      return (typeof reason === "string" && reason !== "toolUse") || c.lastOutcome !== undefined;
+    } catch {
+      return false;
+    }
+  }
+  private failedTerminalNotification(g: Group, c: Child, token: string, error: string): void {
+    const previous = c.terminalNotificationRetry;
+    const attempts = previous?.token === token ? previous.attempts + 1 : 1;
+    const delay = terminalRetryDelay(attempts);
+    const failure = { token, attempts, error };
+    if (delay !== undefined) {
+      c.terminalNotificationRetry = { ...failure, retryAt: Date.now() + delay };
+      return;
+    }
+    c.terminalNotificationRetry = undefined;
+    c.terminalNotificationFailure = failure;
+    this.save(g);
+    try {
+      this.reportTerminalFailure?.(
+        `Parent notification failed for ${g.id}/${c.childId} after ${attempts} attempts. ${error}`,
+      );
+    } catch {
+      // The retained failure remains visible through status and output.
+    }
+  }
   private notifyTerminal(g: Group, c: Child): void {
-    if (active(c) || c.reaped) return;
+    if (c.reaped || !this.finishedRun(c)) return;
     if (c.spec?.verification?.length) {
       let manifest: TuiWorkerManifest | undefined;
       try {
@@ -1616,7 +1677,11 @@ export class TuiNativeManager {
     }
     const notificationState = verificationFailedForDelivery(c) ? "failed" : c.state;
     const token = terminalToken(c);
-    if (c.terminalNotification === token) return;
+    if (c.terminalNotification === token || c.terminalNotificationFailure?.token === token) return;
+    const retry = c.terminalNotificationRetry;
+    if (retry?.token === token && retry.retryAt! > Date.now()) return;
+    if (retry?.token !== token) c.terminalNotificationRetry = undefined;
+    c.terminalNotificationFailure = undefined;
     // Foreground callers normally receive their result directly. A guidance
     // yield returned early, so notify completion without changing pane/lifetime
     // ownership or pretending this was an explicit background promotion.
@@ -1625,20 +1690,30 @@ export class TuiNativeManager {
       return;
     }
     const identity = createHash("sha256").update(token).digest("hex").slice(0, 24);
-    if (
-      this.notify?.({
-        kind: "subagent",
-        id: `${g.id}:${c.childId}:terminal:${identity}`,
-        job_id: g.id,
-        child_id: c.childId,
-        displayName: this.canonicalTitle(c),
-        state: notificationState,
-        completion: true,
-        through_sequence:
-          Number(c.report?.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || c.runSequence || 0,
-      })
-    )
+    let accepted = false;
+    let error = "Parent did not accept the notification";
+    try {
+      accepted =
+        this.notify?.({
+          kind: "subagent",
+          id: `${g.id}:${c.childId}:terminal:${identity}`,
+          job_id: g.id,
+          child_id: c.childId,
+          displayName: this.canonicalTitle(c),
+          state: notificationState,
+          completion: true,
+          through_sequence:
+            Number(c.report?.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || c.runSequence || 0,
+        }) === true;
+    } catch (cause) {
+      error = String(cause).slice(0, 300);
+    }
+    if (accepted) {
       c.terminalNotification = token;
+      c.terminalNotificationRetry = undefined;
+    } else {
+      this.failedTerminalNotification(g, c, token, error);
+    }
   }
   async launch(
     params: any,
