@@ -1741,49 +1741,42 @@ asking AgentSH to resolve it. A bridge disconnect or response failure denies the
 sessions without an attached bridge retain their normal terminal UI. In native Pi RPC mode,
 the extension uses Pi's standard selectable UI rather than the TUI-only custom overlay.
 
-**Automatic approvals**: before a prompt opens, Pi tries to answer the request
-itself. It only ever approves or hands the request to you; it never denies.
-The order is:
+Automatic approvals: before it shows an approval prompt, Pi tries to approve
+the request once by itself. If it can't, you get the prompt as before.
 
-1. **Never automatic** — always shown to you, no model call: `base-*` rules,
-   policy overlays, skill checks, package operations, credential/secret/SSH/
-   env-file/private rules, protected paths (`.git/hooks`, `.git/config`,
-   `.envrc`, `.env*`, `.netrc`, `.git-credentials`, `~/.ssh`, `~/.aws`,
-   `~/.config/gcloud`, `~/.kube`, `~/.gnupg`, shell profiles, fish config),
-   privilege commands (`sudo`, `su`, `doas`, `pkexec`, …) and cloud metadata
-   endpoints. The list lives in one place at the top of
-   [`sandbox/auto-approval.ts`](../sandbox/auto-approval.ts).
-2. **Rules** — outside-workspace file access inside a linked git worktree of
-   the session repository is approved once. A session whose workspace is itself a linked
-   worktree may also write git's shared data for commits: `objects/`, `refs/`,
-   `logs/`, `packed-refs`, `FETCH_HEAD`, `ORIG_HEAD` and its own
-   `worktrees/<name>/`. Worktrees are found by reading git's files, not by
-   running git.
-3. **Session cache** — a model "approve" for the same request (kind, rule,
-   target, operation, command, requester cwd) is reused; a model "ask" or your
-   denial sends that request straight to you. "Allow once" is not remembered.
-4. **Classifier** — one call to `classifierModel`, or the session model when
-   unset, with a forced `approval_decision` tool. It sees only the request, the
-   workspace, the requester (parent or subagent, with the subagent's cwd and
-   worktree) and your latest message, all marked untrusted.
-   `classifierFallbackModels` are tried in order only on request errors,
-   missing auth, unknown models or timeouts. Unsure, malformed or failed
-   answers go to you.
-5. **You** — the normal prompt. Headless Pi leaves the request pending.
+Requests from `base-*` rules, credential, SSH and env-file rules, policy
+overlays, skill checks and package operations come to you, as do protected
+paths such as `.git/hooks`, `.envrc` and shell profiles, `sudo`-like commands
+and cloud metadata addresses. The full list is at the top of
+[`sandbox/auto-approval.ts`](../sandbox/auto-approval.ts).
 
-Automatic answers are always "approve once"; Pi never grants a session scope,
-so every later request is checked again. Subagent requests are judged against
-the subagent's own cwd when the approval names the subagent; approvals from
-process execution and the file monitor don't yet (taugoust/agentsh#4), so the
-worktree rule matches on the path alone. Each automatic answer is shown as a notification, sent to AgentSH with the reason
-`auto-approved in Pi (<source>): <reason>`, and appended (with classifier "ask"
-results) to `<agentDir>/sandbox/auto-approvals.jsonl`.
+File access outside the workspace is approved when the path is in a git
+worktree of the session's repository. A session that runs in a worktree can
+also write commit data to the repository's shared `.git` directory, but not
+its hooks or config. A subagent's request is checked against the subagent's
+working directory when the approval says which subagent sent it. Most
+approvals don't say that yet (taugoust/agentsh#4), so worktree paths are
+matched by path.
+
+For anything else, Pi first reuses the model's earlier answer to the same
+request in this session, or asks you again if you denied it before. Otherwise
+a model decides whether to approve or ask you. It sees the request, the
+workspace, the requester's working directory and your last message.
+`classifierModel` picks the model and defaults to the session model.
+`classifierFallbackModels` are tried in order when a model can't be reached.
+Without a UI, requests that need you stay pending.
+
+Turn it off with `autoApprovals: false` in `sandbox.json`, with
+`PI_AGENTSH_AUTO_APPROVALS=0`, or for the session with `/agentsh-auto off`.
+Each automatic answer shows a notification, reaches AgentSH with the reason
+`auto-approved in Pi (<source>): <reason>`, and is added to
+`<agentDir>/sandbox/auto-approvals.jsonl`. `/agentsh-auto` lists recent ones.
 
 ```sh
 PI_AGENTSH_AUTO_APPROVALS=0                      # turn automatic approvals off (default: on)
 PI_AGENTSH_CLASSIFIER_MODEL=provider/model-id    # default: the session model
-PI_AGENTSH_CLASSIFIER_FALLBACK_MODELS=a/x,b/y    # tried only on infrastructure failures
-PI_AGENTSH_CLASSIFIER_TIMEOUT_MS=20000           # per model attempt, also bounded by expiry
+PI_AGENTSH_CLASSIFIER_FALLBACK_MODELS=a/x,b/y    # tried when a model can't be reached
+PI_AGENTSH_CLASSIFIER_TIMEOUT_MS=20000           # per model attempt
 ```
 
 When the supervisor reports `requested=strict`, the extension refuses all

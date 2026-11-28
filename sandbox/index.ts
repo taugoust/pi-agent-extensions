@@ -3299,8 +3299,8 @@ function recordAutoDecision(
 }
 
 /**
- * Ask the auto-approval layer first. It approves or hands over to the user;
- * it never denies. Headless processes keep unanswered approvals pending.
+ * Ask the auto-approval layer first. It approves once or hands the request
+ * to the user. Headless processes keep unanswered approvals pending.
  */
 async function autoApproveOrPrompt(state: SupervisorState, approval: ApprovalRequest) {
   const approver = state.autoApprover;

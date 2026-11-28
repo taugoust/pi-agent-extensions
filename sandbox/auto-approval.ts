@@ -1,11 +1,11 @@
-// Automatic answers for AgentSH approval requests, asked before the user is.
+// Automatic answers for AgentSH approval requests, tried before the user is asked.
 //
-// The layer only ever approves or hands the request to the user. It never
-// denies. Order: disabled -> never-auto -> deterministic rules -> session
-// cache -> classifier -> user. Any failure hands the request to the user.
-// Approvals are always scope "once"; the layer never grants a session scope.
-// The classifier design (forced decision tool, untrusted-data labelling, fail
-// closed) follows ideas from czottmann/pi-automode (MIT); no code is copied.
+// Order: off switch, requests that go to the user, deterministic rules,
+// session cache, classifier, user. Any failure hands the request to the user.
+// Automatic answers approve once and carry no session scope.
+// The classifier design (a forced decision tool, the request marked as
+// untrusted data, failures going to the user) follows ideas from
+// czottmann/pi-automode (MIT). No code is copied.
 import {
   closeSync,
   mkdirSync,
@@ -20,7 +20,7 @@ import { posix as posixPath } from "node:path";
 import { approvalActor, type ApprovalRequest, type ApprovalResolution } from "./approval-model.js";
 
 // ---------------------------------------------------------------------------
-// Never-auto: these always go to the user and never reach the classifier.
+// Requests that go to the user without a model call.
 // ---------------------------------------------------------------------------
 
 /** Approval kinds that change policy or trust, not single accesses. */
@@ -95,7 +95,7 @@ export function neverAutoReason(approval: ApprovalRequest): string | undefined {
   const kind = (approval.kind || "").trim().toLowerCase();
   const rule = (approval.rule || "").trim();
   if (rule.toLowerCase().startsWith("base-")) return `base policy rule ${rule}`;
-  if (NEVER_AUTO_KINDS.has(kind)) return `${kind} approvals are never automatic`;
+  if (NEVER_AUTO_KINDS.has(kind)) return `${kind} approvals go to the user`;
   if (!CLASSIFIABLE_KINDS.has(kind)) return `unsupported approval kind ${kind || "(none)"}`;
   if (SENSITIVE_RULE.test(rule)) return `sensitive rule ${rule}`;
 
@@ -138,7 +138,7 @@ export function neverAutoReason(approval: ApprovalRequest): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Git worktree discovery. Reads git's own files; never runs commands.
+// Git worktree discovery. Reads git's own files and runs no commands.
 // ---------------------------------------------------------------------------
 
 export type AutoApprovalFs = {
@@ -365,7 +365,7 @@ export type ClassifierVerdict = {
   decision: "approve" | "ask";
   reason: string;
   model?: string;
-  /** Set when no valid decision was produced. Failures are never cached. */
+  /** Set when no valid decision was produced. Failures are not cached. */
   failure?: "infrastructure" | "malformed";
 };
 
@@ -489,7 +489,7 @@ export class AutoApprover {
     this.#cache.clear();
   }
 
-  /** A user denial means "always ask" for this signature. Allow-once is not remembered. */
+  /** After a user denial Pi asks the user again for this signature. Allow-once is not remembered. */
   recordUserResolution(
     approval: ApprovalRequest,
     context: AutoApprovalContext,
@@ -608,9 +608,9 @@ function validVerdict(value: ClassifierVerdict): ClassifierVerdict {
   return value;
 }
 
-// Automatic answers are always "once" with no scope fields. A session scope
-// would let AgentSH allow later requests (protected paths included) without
-// asking, outliving the off switch and Pi restarts.
+// Automatic answers approve once with no scope fields. A session scope would
+// let AgentSH allow later requests, protected paths included, without asking,
+// and it would outlast the off switch and Pi restarts.
 function withReason<
   T extends { source: AutoSource; reason: string; resolution: ApprovalResolution },
 >(decision: T): T {
@@ -681,7 +681,7 @@ export function autoDecisionRecord(
   };
 }
 
-/** Append one JSON line. Audit failures never block an approval. */
+/** Append one JSON line. A failed write does not block the approval. */
 export function appendAutoDecisionLog(file: string, record: AutoDecisionRecord) {
   try {
     mkdirSync(posixPath.dirname(file), { recursive: true, mode: 0o700 });
