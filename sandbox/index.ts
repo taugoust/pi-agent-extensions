@@ -3347,13 +3347,6 @@ async function autoApproveOrPrompt(state: SupervisorState, approval: ApprovalReq
       "info",
     );
     removePending(state, approval.id);
-    if (decision.resolution.scope === "session") {
-      try {
-        syncPendingApprovals(state, await approvalClient.listApprovals());
-      } catch {
-        // The background watcher will retry polling.
-      }
-    }
   } catch (error) {
     notify(ctx, `AgentSH auto-approval failed: ${asError(error).message}`, "warning");
   } finally {

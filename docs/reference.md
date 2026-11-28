@@ -1754,8 +1754,7 @@ The order is:
    endpoints. The list lives in one place at the top of
    [`sandbox/auto-approval.ts`](../sandbox/auto-approval.ts).
 2. **Rules** — outside-workspace file access inside a linked git worktree of
-   the session repository is approved once (or for a file-tree scope that stays
-   inside that worktree). A session whose workspace is itself a linked
+   the session repository is approved once. A session whose workspace is itself a linked
    worktree may also write git's shared data for commits: `objects/`, `refs/`,
    `logs/`, `packed-refs`, `FETCH_HEAD`, `ORIG_HEAD` and its own
    `worktrees/<name>/`. Worktrees are found by reading git's files, not by
@@ -1772,8 +1771,9 @@ The order is:
    answers go to you.
 5. **You** — the normal prompt. Headless Pi leaves the request pending.
 
-Subagent requests are judged against the subagent's own cwd. Each automatic
-answer is shown as a notification, sent to AgentSH with the reason
+Automatic answers are always "approve once"; Pi never grants a session scope,
+so every later request is checked again. Subagent requests are judged against
+the subagent's own cwd. Each automatic answer is shown as a notification, sent to AgentSH with the reason
 `auto-approved in Pi (<source>): <reason>`, and appended (with classifier "ask"
 results) to `<agentDir>/sandbox/auto-approvals.jsonl`.
 

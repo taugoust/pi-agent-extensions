@@ -193,29 +193,25 @@ function approver(classify?: ClassifyFn, enabled = true, attemptTimeoutMs = 2000
     /^auto-approved in Pi \(rule\): path is inside linked worktree/,
   );
 
-  // A file-tree scope inside the worktree is preferred, cutting repeated approvals.
-  const scoped = await auto.decide(
-    file(join(wt, "src/a.ts"), "approve-outside-workspace-reads", {
-      scope_options: [
-        { scope_kind: "file", scope_key: "file:a", scope_path: join(wt, "src/a.ts") },
-        { scope_kind: "file-tree", scope_key: "tree:wt", scope_path: wt },
-      ],
-    }),
-    parentCtx(repo),
-  );
-  assert.ok(scoped.action === "approve");
-  assert.equal(scoped.resolution.scope, "session");
-  assert.equal(scoped.resolution.scope_key, "tree:wt");
-  assert.equal((scoped.resolution as any).label, undefined);
-
-  // A tree scope outside the worktree is not used.
-  const wide = await auto.decide(
-    file(join(wt, "src/a.ts"), "approve-outside-workspace-reads", {
-      scope_options: [{ scope_kind: "file-tree", scope_key: "tree:home", scope_path: temp }],
-    }),
-    parentCtx(repo),
-  );
-  assert.ok(wide.action === "approve" && wide.resolution.scope === "once");
+  // Offered session scopes are never used: a file-tree grant over the worktree
+  // would let AgentSH allow later writes (.envrc, the .git pointer) unasked.
+  for (const path of [join(wt, "src/a.ts"), join(wt, "README.md")]) {
+    const scoped = await auto.decide(
+      file(path, "approve-outside-workspace-writes", {
+        scope_options: [
+          { scope_kind: "file", scope_key: "file:a", scope_path: path },
+          { scope_kind: "file-tree", scope_key: "tree:wt", scope_path: wt },
+          { scope_kind: "file-dir", scope_key: "dir:wt", scope_path: wt },
+        ],
+      }),
+      parentCtx(repo),
+    );
+    assert.ok(scoped.action === "approve");
+    assert.deepEqual(Object.keys(scoped.resolution).sort(), ["decision", "reason", "scope"]);
+    assert.equal(scoped.resolution.scope, "once");
+    assert.equal(scoped.resolution.scope_kind, undefined);
+    assert.equal(scoped.resolution.scope_key, undefined);
+  }
 
   // The worktree's own .git pointer and unrelated paths are not rule-approved.
   assert.equal(ruleApproval(file(join(wt, ".git")), parentCtx(repo)), undefined);

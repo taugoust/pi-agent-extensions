@@ -3,6 +3,7 @@
 // The layer only ever approves or hands the request to the user. It never
 // denies. Order: disabled -> never-auto -> deterministic rules -> session
 // cache -> classifier -> user. Any failure hands the request to the user.
+// Approvals are always scope "once"; the layer never grants a session scope.
 // The classifier design (forced decision tool, untrusted-data labelling, fail
 // closed) follows ideas from czottmann/pi-automode (MIT); no code is copied.
 import {
@@ -16,12 +17,7 @@ import {
   writeSync,
 } from "node:fs";
 import { posix as posixPath } from "node:path";
-import {
-  approvalActor,
-  approvalChoices,
-  type ApprovalRequest,
-  type ApprovalResolution,
-} from "./approval-model.js";
+import { approvalActor, type ApprovalRequest, type ApprovalResolution } from "./approval-model.js";
 
 // ---------------------------------------------------------------------------
 // Never-auto: these always go to the user and never reach the classifier.
@@ -305,18 +301,6 @@ function hasGitSegment(path: string) {
   return path.split("/").includes(".git");
 }
 
-function treeScope(approval: ApprovalRequest, worktreeRoot: string) {
-  for (const choice of approvalChoices(approval)) {
-    if (choice.decision !== "approve" || choice.scope !== "session") continue;
-    if (choice.scope_kind !== "file-tree" || !choice.scope_path) continue;
-    const scopePath = posixPath.normalize(choice.scope_path);
-    if (!isUnder(scopePath, worktreeRoot) || hasGitSegment(scopePath)) continue;
-    const { label: _label, ...resolution } = choice;
-    return resolution;
-  }
-  return undefined;
-}
-
 /** Approve outside-workspace file access that stays inside the session's own git worktrees. */
 export function ruleApproval(
   approval: ApprovalRequest,
@@ -337,9 +321,7 @@ export function ruleApproval(
     for (const worktree of linkedWorktrees(fs, checkout.commonDir)) {
       if (!isUnder(path, worktree.root)) continue;
       if (hasGitSegment(path.slice(worktree.root.length))) continue;
-      const reason = `path is inside linked worktree ${worktree.root} of the session repository`;
-      const scope = treeScope(approval, worktree.root);
-      return scope ? { reason, resolution: { ...scope, reason } } : once(reason);
+      return once(`path is inside linked worktree ${worktree.root} of the session repository`);
     }
     if (checkout.linkedName && isUnder(path, checkout.commonDir)) {
       const names = new Set([checkout.linkedName]);
@@ -626,13 +608,17 @@ function validVerdict(value: ClassifierVerdict): ClassifierVerdict {
   return value;
 }
 
+// Automatic answers are always "once" with no scope fields. A session scope
+// would let AgentSH allow later requests (protected paths included) without
+// asking, outliving the off switch and Pi restarts.
 function withReason<
   T extends { source: AutoSource; reason: string; resolution: ApprovalResolution },
 >(decision: T): T {
   return {
     ...decision,
     resolution: {
-      ...decision.resolution,
+      decision: "approve",
+      scope: "once",
       reason: autoApprovalReason(decision.source, decision.reason),
     },
   };
