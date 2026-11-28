@@ -39,6 +39,7 @@ const {
   withRepositoryAllocations,
 } = await import("./subagent-worktrees.ts");
 const { reapOwnedWorktrees } = await import("./worktree-reap.ts");
+const { HeadlessForegroundManager } = await import("../subagent/headless-foreground.ts");
 const { applyAutomaticWorktreePolicy, installWorkerWorktreeContext, workerWorktreeContext } =
   await import("./worker-worktree-context.ts");
 const { discoverAgentProfiles, resolveAgentProfileLaunch } =
@@ -657,6 +658,75 @@ test("replacement and resumed borrowers preserve dirty work and legacy pi branch
       ),
       /replacement identity/,
     );
+  }));
+
+test("worktree reuse ignores stale unrelated foreground cwd but blocks missing in-target cwd", async () =>
+  fixture(async ({ repo, root }) => {
+    const creator = makeChild(20, repo);
+    await provision([creator]);
+    const worktree = creator.spec.worktreeInfo.path;
+    await releaseWorktree("owner", creator.taskId, creator.childId);
+
+    const foreground = new HeadlessForegroundManager(
+      join(root, "foreground"),
+      () => "native",
+      () => true,
+    );
+    const stale = {
+      taskId: id("subagent-task", 21),
+      childId: id("subagent-child", 21),
+      attempt: 1,
+      directory: join(foreground.root, "workers", "2".repeat(24)),
+      activityCwd: "/tmp/tier-test",
+      spec: { task: "stale worker", cwd: "/tmp/tier-test" },
+      status: "completed",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      started: true,
+      reaped: false,
+      ownerToken: "owner-token",
+      operatorCapability: "5".repeat(64),
+      workerAlive: true,
+    };
+    foreground.persist({
+      version: 1,
+      id: id("subagent-job", 21),
+      owner: "old-owner",
+      ownerToken: "owner-token",
+      createdAt: new Date().toISOString(),
+      mode: "single",
+      cancelled: false,
+      launchMode: "none",
+      launcher: "fixture",
+      children: [stale],
+    });
+    const inspect = (path, supervisors) => foreground.worktreeReuseActivity(path, supervisors);
+    try {
+      const borrower = makeChild(22, worktree);
+      await provision([borrower], "owner", false, undefined, undefined, inspect);
+      assert.equal(borrower.spec.worktreeInfo.borrowed, true);
+      await releaseWorktree("owner", borrower.taskId, borrower.childId);
+
+      stale.activityCwd = join(worktree, "removed-child-cwd");
+      foreground.persist({
+        version: 1,
+        id: id("subagent-job", 21),
+        owner: "old-owner",
+        ownerToken: "owner-token",
+        createdAt: new Date().toISOString(),
+        mode: "single",
+        cancelled: false,
+        launchMode: "none",
+        launcher: "fixture",
+        children: [stale],
+      });
+      await assert.rejects(
+        provision([makeChild(23, worktree)], "owner", false, undefined, undefined, inspect),
+        /physical checkout identity is unavailable/,
+      );
+    } finally {
+      await foreground.shutdown(false);
+    }
   }));
 
 test("nested authenticated supervisors lend their root exclusively without foreign takeover", async () =>
