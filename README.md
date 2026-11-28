@@ -62,7 +62,7 @@ Extensions are **opt-in**. [Build a selective bundle or install without Nix →]
 | [Stamp](OBSERVABILITY.md)                       | Record timestamps, response timing and usage metadata.                                                                          |
 | [Cache monitor](OBSERVABILITY.md)               | Inspect prompt-cache reuse.                                                                                                     |
 | [Idle context admission](idle-context-warning)  | User/parent-owned cold-context decisions, notification admission, and native cheap compaction; independent of provider routing. |
-| [Sandbox](sandbox)                              | Route tools through AgentSH supervision.                                                                                        |
+| [Sandbox](sandbox)                              | Route tools through AgentSH supervision; auto-approve safe requests before asking (`/agentsh-auto`).                            |
 | [Permission Gate](permission-gate)              | Require approvals for guarded operations.                                                                                       |
 | [Slow mode](slow-mode)                          | Review edits before applying them.                                                                                              |
 | [Fence](fence)                                  | Add lightweight path restrictions—not an OS sandbox.                                                                            |
