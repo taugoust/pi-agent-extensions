@@ -1714,7 +1714,7 @@ export class TuiNativeManager {
             operation: "observe",
           });
           if (
-            goal.entryId === child.spec.assignedGoal.entryId &&
+            goal.goalId === child.spec.assignedGoal.entryId &&
             goal.status === "complete" &&
             goal.executionStopped === true
           )
