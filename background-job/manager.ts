@@ -520,7 +520,22 @@ export class BackgroundJobManager {
     reconcile = true,
     authorize?: (metadata: JobMetadata) => void,
   ): Promise<JobRecord> {
-    const metadata = await this.store.readMetadata(id);
+    let metadata: JobMetadata;
+    try {
+      metadata = await this.store.readMetadata(id);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const intent = await this.store.readRemovalIntent(id);
+      if (!intent || this.store.isRemovalReceiptExpired(intent)) throw error;
+      if (!intent.result) throw error;
+      authorize?.(intent.metadata);
+      return {
+        metadata: intent.metadata,
+        ...(intent.launch ? { launch: intent.launch } : {}),
+        result: intent.result,
+        status: intent.result.status,
+      };
+    }
     authorize?.(metadata);
     const terminal = await this.store.readResult(id);
     const launch = await this.store.readLaunch(id);
@@ -745,51 +760,53 @@ export class BackgroundJobManager {
     stdout_truncated?: true;
     stderr_truncated?: true;
   }> {
-    const record = await this.get(id, false);
-    if (record.metadata.observed || record.metadata.pane || !record.launch)
-      return { available: false, stdout: "", stderr: "" };
-    const readStream = async (name: "stdout.log" | "stderr.log") => {
-      try {
-        const path = this.store.path(id, name);
-        const info = await lstat(path);
-        if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024)
-          return { available: false as const, text: "" };
-        const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    return await this.store.withReader(id, async () => {
+      const record = await this.get(id, false);
+      if (record.metadata.observed || record.metadata.pane || !record.launch)
+        return { available: false, stdout: "", stderr: "" };
+      const readStream = async (name: "stdout.log" | "stderr.log") => {
         try {
-          const current = await file.stat();
-          if (!current.isFile() || current.size > 1024 * 1024)
+          const path = this.store.path(id, name);
+          const info = await lstat(path);
+          if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024)
             return { available: false as const, text: "" };
-          const limit = 16 * 1024,
-            offset = Math.max(0, current.size - limit);
-          const buffer = Buffer.alloc(Math.min(current.size, limit));
-          const { bytesRead } = await file.read(buffer, 0, buffer.length, offset);
-          let start = 0;
-          if (offset > 0) while (start < bytesRead && (buffer[start]! & 0xc0) === 0x80) start++;
-          return {
-            available: true as const,
-            text: buffer.subarray(start, bytesRead).toString("utf8"),
-            truncated: offset > 0,
-          };
-        } finally {
-          await file.close();
+          const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+          try {
+            const current = await file.stat();
+            if (!current.isFile() || current.size > 1024 * 1024)
+              return { available: false as const, text: "" };
+            const limit = 16 * 1024,
+              offset = Math.max(0, current.size - limit);
+            const buffer = Buffer.alloc(Math.min(current.size, limit));
+            const { bytesRead } = await file.read(buffer, 0, buffer.length, offset);
+            let start = 0;
+            if (offset > 0) while (start < bytesRead && (buffer[start]! & 0xc0) === 0x80) start++;
+            return {
+              available: true as const,
+              text: buffer.subarray(start, bytesRead).toString("utf8"),
+              truncated: offset > 0,
+            };
+          } finally {
+            await file.close();
+          }
+        } catch {
+          return { available: false as const, text: "" };
         }
-      } catch {
-        return { available: false as const, text: "" };
-      }
-    };
-    const [stdout, stderr] = await Promise.all([
-      readStream("stdout.log"),
-      readStream("stderr.log"),
-    ]);
-    return stdout.available && stderr.available
-      ? {
-          available: true,
-          stdout: stdout.text,
-          stderr: stderr.text,
-          ...(stdout.truncated ? { stdout_truncated: true as const } : {}),
-          ...(stderr.truncated ? { stderr_truncated: true as const } : {}),
-        }
-      : { available: false, stdout: "", stderr: "" };
+      };
+      const [stdout, stderr] = await Promise.all([
+        readStream("stdout.log"),
+        readStream("stderr.log"),
+      ]);
+      return stdout.available && stderr.available
+        ? {
+            available: true,
+            stdout: stdout.text,
+            stderr: stderr.text,
+            ...(stdout.truncated ? { stdout_truncated: true as const } : {}),
+            ...(stderr.truncated ? { stderr_truncated: true as const } : {}),
+          }
+        : { available: false, stdout: "", stderr: "" };
+    });
   }
 
   async output(id: string): Promise<OutputSnapshot> {
@@ -801,8 +818,10 @@ export class BackgroundJobManager {
     id: string,
     authorize?: (metadata: JobMetadata) => void,
   ): Promise<OutputSnapshot> {
-    privateDirectory(this.store.jobDir(id));
-    return await this.readOutput(id, false, authorize);
+    return await this.store.withReader(id, async () => {
+      privateDirectory(this.store.jobDir(id));
+      return await this.readOutput(id, false, authorize);
+    });
   }
 
   private async readOutput(
@@ -1157,6 +1176,21 @@ export class BackgroundJobManager {
           : `Background job ${id} is still running; cancel it before reaping`,
       );
     }
+    const intent = await this.store.readRemovalIntent(id);
+    if (
+      intent?.reapVerified &&
+      !this.store.isRemovalReceiptExpired(intent) &&
+      JSON.stringify(intent.metadata) === JSON.stringify(record.metadata) &&
+      JSON.stringify(intent.launch) === JSON.stringify(record.launch) &&
+      JSON.stringify(intent.result) === JSON.stringify(record.result)
+    ) {
+      await this.store.remove(id, {
+        metadata: record.metadata,
+        launch: record.launch,
+        result: record.result,
+      });
+      return;
+    }
     if (await this.commandProcess(id))
       throw new Error(`Background job ${id} command is still running; cancel it first`);
     if (record.metadata.pane) await reapPane(await resolveExecutable("tmux"), record.metadata.pane);
@@ -1164,7 +1198,11 @@ export class BackgroundJobManager {
       if (!this.backend.reap) throw new Error("Backend does not support explicit pane reap");
       await this.backend.reap(id, record.launch);
     }
-    await this.store.remove(id);
+    await this.store.remove(id, {
+      metadata: record.metadata,
+      launch: record.launch,
+      result: record.result,
+    });
   }
 
   // Compatibility for explicit UI removal only; never called by read/ack.
