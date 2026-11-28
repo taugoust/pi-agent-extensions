@@ -32,6 +32,7 @@ const LOCK_WAIT_MS = 5_000;
 const REMOVE_RETRIES = 5;
 const REMOVE_RETRY_MS = 20;
 const REMOVAL_RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
+const TOMBSTONE = /^(job-[0-9a-f]{24})\.removing-[0-9]+(?:-[a-f0-9]{16})?$/;
 
 type ReaderGate = {
   count: number;
@@ -51,6 +52,11 @@ type RemovalVerification = {
   launch?: JobLaunch;
   result?: JobResult;
 };
+
+/** True for a `<id>.removing-<pid>[-<nonce>]` directory left by an interrupted removal. */
+function isTombstoneOf(id: string, name: string): boolean {
+  return TOMBSTONE.exec(name)?.[1] === id;
+}
 
 function matchesRemovalVerification(
   intent: RemovalVerification,
@@ -636,9 +642,7 @@ export class JobStore {
         const currentEntries = sourceExistsBeforeListing
           ? entriesAfterSourceCheck
           : await readdir(this.jobsRoot);
-        const leftovers = currentEntries.filter((entry) =>
-          new RegExp(`^${id}\\.removing-[0-9]+(?:-[a-f0-9]{16})?$`).test(entry),
-        );
+        const leftovers = currentEntries.filter((entry) => isTombstoneOf(id, entry));
         let complete = true;
         for (const leftover of leftovers) {
           try {
@@ -649,9 +653,7 @@ export class JobStore {
         }
         const sourceRemains = await this.exists(this.jobDir(id));
         const remainingEntries = sourceRemains ? [] : await readdir(this.jobsRoot);
-        const tombstoneRemains = remainingEntries.some((entry) =>
-          new RegExp(`^${id}\\.removing-[0-9]+(?:-[a-f0-9]{16})?$`).test(entry),
-        );
+        const tombstoneRemains = remainingEntries.some((entry) => isTombstoneOf(id, entry));
         if (complete && !sourceRemains && !tombstoneRemains) {
           const current = await this.readRemovalIntent(id);
           if (!current) continue;
@@ -676,7 +678,7 @@ export class JobStore {
   private async cleanupLegacyRemovals(): Promise<void> {
     const entries = await readdir(this.jobsRoot, { withFileTypes: true });
     for (const entry of entries) {
-      const match = /^(job-[0-9a-f]{24})\.removing-[0-9]+(?:-[a-f0-9]{16})?$/.exec(entry.name);
+      const match = TOMBSTONE.exec(entry.name);
       if (!match || !entry.isDirectory() || entry.isSymbolicLink()) continue;
       if (await this.exists(this.removalIntentPath(match[1]))) continue;
       try {
@@ -769,9 +771,7 @@ export class JobStore {
 
     const target = `${source}.removing-${process.pid}-${randomBytes(8).toString("hex")}`;
     if (await this.exists(source)) await rename(source, target);
-    const leftovers = (await readdir(this.jobsRoot)).filter((name) =>
-      new RegExp(`^${id}\\.removing-[0-9]+(?:-[a-f0-9]{16})?$`).test(name),
-    );
+    const leftovers = (await readdir(this.jobsRoot)).filter((name) => isTombstoneOf(id, name));
     for (const name of leftovers) {
       if (!(await this.removeTree(join(this.jobsRoot, name)))) return;
     }
