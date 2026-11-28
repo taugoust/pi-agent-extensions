@@ -796,6 +796,83 @@ async function main() {
     await server.close();
   }
 
+  // Pi answers safe approvals before prompting, also headless: a write into a
+  // linked worktree of the session repository is approved by rule and audited.
+  // `/agentsh-auto off` hands requests back to the user (pending when headless).
+  {
+    clearAgentSHEnv();
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agentsh-auto-")));
+    const repo = path.join(root, "repo");
+    const worktree = path.join(root, "worktrees", "repo", "feat");
+    const admin = path.join(repo, ".git", "worktrees", "feat");
+    fs.mkdirSync(admin, { recursive: true });
+    fs.mkdirSync(worktree, { recursive: true });
+    fs.writeFileSync(path.join(admin, "gitdir"), path.join(worktree, ".git") + "\n");
+    fs.writeFileSync(path.join(admin, "commondir"), "../..\n");
+    fs.writeFileSync(path.join(worktree, ".git"), "gitdir: " + admin + "\n");
+    const previousAgentDir = process.env.PI_TEST_AGENT_DIR;
+    const agentDir = path.join(root, "agent");
+    process.env.PI_TEST_AGENT_DIR = agentDir;
+    const approval = (id) => ({
+      id,
+      kind: "file",
+      rule: "approve-outside-workspace-writes",
+      target: path.join(worktree, "src", id + ".ts"),
+      fields: { path: path.join(worktree, "src", id + ".ts"), operation: "write" },
+    });
+    let approvals = [approval("appr-auto-1")];
+    const resolved = [];
+    const server = await withApprovalServer(async (request) => {
+      if (request.op === "list") return { ok: true, approvals };
+      if (request.op === "resolve") {
+        resolved.push(request);
+        approvals = approvals.filter((candidate) => candidate.id !== request.id);
+        return { ok: true };
+      }
+      return { ok: false, error: "unknown op" };
+    });
+    setAgentSHEnv(server.socketPath);
+    const pi = createPi();
+    sandbox(pi);
+    const ctx = createContext({ hasUI: false, cwd: repo });
+    try {
+      await startSession(pi, ctx);
+      await waitFor(() => resolved.length === 1, "worktree approval was not auto-approved");
+      assert(resolved[0].id === "appr-auto-1", "auto-approved the wrong approval");
+      assert(resolved[0].decision === "approve", "auto layer did not approve");
+      assert(resolved[0].scope === "once", "rule approval should default to once");
+      assert(
+        /^auto-approved in Pi \(rule\): /.test(resolved[0].reason),
+        "auto approval reason was not recorded for AgentSH: " + resolved[0].reason,
+      );
+      const audit = fs
+        .readFileSync(path.join(agentDir, "sandbox", "auto-approvals.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      assert(
+        audit.length === 1 &&
+          audit[0].approval_id === "appr-auto-1" &&
+          audit[0].source === "rule" &&
+          audit[0].decision === "approve",
+        "auto approval was not appended to the audit log: " + JSON.stringify(audit),
+      );
+
+      await pi.commands.get("agentsh-auto").handler("off", ctx);
+      approvals = [approval("appr-auto-2")];
+      const polls = () => server.requests.filter((request) => request.op === "list").length;
+      const seen = polls();
+      await waitFor(() => polls() >= seen + 3, "approval list was not polled after toggle");
+      assert(resolved.length === 1, "disabled auto-approvals still answered a request");
+    } finally {
+      await shutdownSession(pi);
+      await server.close();
+      if (previousAgentDir === undefined) delete process.env.PI_TEST_AGENT_DIR;
+      else process.env.PI_TEST_AGENT_DIR = previousAgentDir;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+
   // Paseo transports the choice only; the sandbox maps the selected
   // label back to the AgentSH-owned approval ID and exact scope.
   {

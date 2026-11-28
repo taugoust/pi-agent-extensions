@@ -28,7 +28,15 @@ const fields = {
   PI_AGENTSH_RECOVERY_TIMEOUT_MS: "recoveryTimeoutMs",
   PI_AGENTSH_APPROVAL_BELL: "approvalBell",
   PI_AGENTSH_DEBUG_REST_ERRORS: "debugRestErrors",
+  // Automatic approval answers (see auto-approval.ts).
+  PI_AGENTSH_AUTO_APPROVALS: "autoApprovals",
+  PI_AGENTSH_CLASSIFIER_MODEL: "classifierModel",
+  PI_AGENTSH_CLASSIFIER_FALLBACK_MODELS: "classifierFallbackModels",
+  PI_AGENTSH_CLASSIFIER_TIMEOUT_MS: "classifierTimeoutMs",
 } as const;
+
+const booleanFields = new Set(["approvalBell", "debugRestErrors", "autoApprovals"]);
+const modelSelector = (value: unknown) => typeof value === "string" && /^[^/\s]+\/\S+$/.test(value);
 
 let settings: Record<string, unknown> | undefined;
 function preferences(): Record<string, unknown> {
@@ -40,10 +48,13 @@ function preferences(): Record<string, unknown> {
   for (const field of Object.values(fields)) {
     const value = document[field];
     if (value === undefined) continue;
-    const valid =
-      field === "approvalBell" || field === "debugRestErrors"
-        ? typeof value === "boolean"
-        : typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+    const valid = booleanFields.has(field)
+      ? typeof value === "boolean"
+      : field === "classifierModel"
+        ? modelSelector(value)
+        : field === "classifierFallbackModels"
+          ? Array.isArray(value) && value.every(modelSelector)
+          : typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
     if (!valid) throw new Error(`Invalid sandbox ${field} preference`);
   }
   return (settings = document);
@@ -61,5 +72,7 @@ export function sandboxSetting(name: string): string | undefined {
       ? value
         ? "1"
         : "0"
-      : String(value);
+      : Array.isArray(value)
+        ? value.join(",")
+        : String(value);
 }

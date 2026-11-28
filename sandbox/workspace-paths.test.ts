@@ -9,6 +9,7 @@ import {
   restFileRequest,
   supervisorAbsolutePath,
   toSlashPath,
+  virtualToAbsolute,
   type WorkspacePathMetadata,
 } from "./workspace-paths.js";
 
@@ -20,6 +21,7 @@ assert.deepEqual(Object.keys(workspacePaths).sort(), [
   "restFileRequest",
   "supervisorAbsolutePath",
   "toSlashPath",
+  "virtualToAbsolute",
 ]);
 
 assert.equal(toSlashPath("repo\\src\\index.ts"), "repo/src/index.ts");
@@ -124,5 +126,24 @@ assert.equal(
   absoluteToVirtual(singleFlatRootMetadata, "/real/project-other/src/index.ts"),
   undefined,
 );
+
+assert.equal(
+  virtualToAbsolute(singleFlatRootMetadata, "/workspace/src/index.ts"),
+  "/real/project/src/index.ts",
+);
+assert.equal(virtualToAbsolute(singleFlatRootMetadata, "/workspace"), "/real/project");
+assert.equal(
+  virtualToAbsolute(multiRootMetadata, "/workspace/frontend/src/app.ts"),
+  "/real/frontend/src/app.ts",
+);
+assert.equal(
+  virtualToAbsolute(multiRootMetadata, "/workspace/other/file"),
+  "/real/session/other/file",
+);
+assert.equal(
+  virtualToAbsolute(multiRootMetadata, "/home/user/.worktrees/repo/branch"),
+  "/home/user/.worktrees/repo/branch",
+);
+assert.equal(virtualToAbsolute(multiRootMetadata, "relative/path"), undefined);
 
 console.log("sandbox workspace path checks passed");

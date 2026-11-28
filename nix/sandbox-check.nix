@@ -5,6 +5,8 @@ pkgs.runCommand "sandbox-check"
     fixtures = ./sandbox-check;
     nativeBuildInputs = [
       pkgs.bun
+      # Real `git worktree add` fixture for auto-approval worktree detection.
+      pkgs.git
       pkgs.nodejs
       pkgs.typescript
     ];

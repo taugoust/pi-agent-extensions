@@ -107,6 +107,32 @@ export function absoluteToVirtual(metadata: WorkspacePathMetadata | undefined, p
   return undefined;
 }
 
+/** Map a supervisor virtual path back to the real host path. Non-virtual paths pass through. */
+export function virtualToAbsolute(metadata: WorkspacePathMetadata | undefined, path: string) {
+  if (!path.startsWith("/")) return undefined;
+  const abs = cleanPosix(path);
+  const vroot = metadataVirtualRoot(metadata);
+  if (!isUnderPath(abs, vroot)) return abs;
+  const rel = relativeToRoot(abs, vroot);
+  const join = (root: string, rest: string) => cleanPosix(rest ? `${root}/${rest}` : root);
+  const roots = metadata?.workspace_roots || [];
+  const singleFlatRoot =
+    roots.length === 1 &&
+    roots[0].work &&
+    metadata?.worktree &&
+    cleanPosix(roots[0].work) === cleanPosix(metadata.worktree);
+  if (singleFlatRoot) {
+    const real = roots[0].real || metadata?.real_workspace;
+    return real ? join(real, rel) : undefined;
+  }
+  const first = firstPathComponent(rel);
+  for (const root of roots) {
+    if (root.name && root.real && root.name === first)
+      return join(root.real, rel.slice(first.length + 1));
+  }
+  return metadata?.real_workspace ? join(metadata.real_workspace, rel) : undefined;
+}
+
 function firstPathComponent(path: string) {
   return cleanPosix(path).split("/").find(Boolean) || "";
 }

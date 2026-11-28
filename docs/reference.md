@@ -1519,7 +1519,9 @@ bound to one target.
 - **License**: MIT
 - **Type**: AgentSH supervisor client (mock NDJSON test protocol and real Stage 1 REST)
 - **Commands**: `/sandbox` for status/debug;
-  `/sandbox-allow <target>` for retry guidance
+  `/sandbox-allow <target>` for retry guidance;
+  `/agentsh-auto [on|off]` to show or toggle automatic approvals for this
+  session and list recent automatic decisions
 - **Tool overrides**: registered whenever the canonical startup classification
   selects full AgentSH, including trusted wrapper signals without a usable
   transport; the latter remain unavailable and fail closed. Mock NDJSON can
@@ -1738,6 +1740,45 @@ response wins and dismisses the other presentation. Paseo transports only the se
 asking AgentSH to resolve it. A bridge disconnect or response failure denies the request, while
 sessions without an attached bridge retain their normal terminal UI. In native Pi RPC mode,
 the extension uses Pi's standard selectable UI rather than the TUI-only custom overlay.
+
+Automatic approvals: before it shows an approval prompt, Pi tries to approve
+the request once by itself. If it can't, you get the prompt as before.
+
+Requests from `base-*` rules, credential, SSH and env-file rules, policy
+overlays, skill checks and package operations come to you, as do protected
+paths such as `.git/hooks`, `.envrc` and shell profiles, `sudo`-like commands
+and cloud metadata addresses. The full list is at the top of
+[`sandbox/auto-approval.ts`](../sandbox/auto-approval.ts).
+
+File access outside the workspace is approved when the path is in a git
+worktree of the session's repository. A session that runs in a worktree can
+also write commit data to the repository's shared `.git` directory, but not
+its hooks or config. A subagent's request is checked against the subagent's
+working directory when the approval says which subagent sent it. Most
+approvals don't say that yet (taugoust/agentsh#4), so worktree paths are
+matched by path.
+
+For anything else, Pi first reuses the model's earlier answer to the same
+request in this session, or asks you again if you denied it before. Otherwise
+a model decides whether to approve or ask you. It sees the request, the
+workspace, the requester's working directory and your last message.
+`classifierModel` picks the model and defaults to the session model.
+`classifierFallbackModels` are tried in order when a model can't be reached.
+Without a UI, requests that need you stay pending.
+
+Turn it off with `autoApprovals: false` in `sandbox.json`, with
+`PI_AGENTSH_AUTO_APPROVALS=0`, or for the session with `/agentsh-auto off`.
+Each automatic answer shows a notification, reaches AgentSH with the reason
+`auto-approved in Pi (<source>): <reason>`, and is added to
+`<agentDir>/sandbox/auto-approvals.jsonl`. `/agentsh-auto` lists recent ones.
+
+```sh
+PI_AGENTSH_AUTO_APPROVALS=0                      # turn automatic approvals off (default: on)
+PI_AGENTSH_CLASSIFIER_MODEL=provider/model-id    # default: the session model
+PI_AGENTSH_CLASSIFIER_FALLBACK_MODELS=a/x,b/y    # tried when a model can't be reached
+PI_AGENTSH_CLASSIFIER_TIMEOUT_MS=20000           # per model attempt
+```
+
 When the supervisor reports `requested=strict`, the extension refuses all
 AgentSH-backed tools unless the live report proves the
 `helper-ebpf-proxy-required` tier is ready and `network_policy_enforced=true`.

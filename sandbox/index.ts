@@ -9,9 +9,20 @@
 
 import { sandboxSetting } from "./settings.js";
 import {
+  bindSessionModelRequest,
+  prepareSessionRoutingRequest,
   publishAgentSHRoutingBinding,
   releaseAgentSHRoutingBinding,
 } from "../shared/session-routing.ts";
+import {
+  appendAutoDecisionLog,
+  approvalRequester,
+  autoDecisionRecord,
+  AutoApprover,
+  type AutoApprovalContext,
+  type AutoDecisionRecord,
+} from "./auto-approval.js";
+import { createModelClassifier, type ClassifierModel } from "./auto-approval-classifier.js";
 import { subagentRequestRoutingEnvironment } from "../shared/subagent-routing.ts";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -81,6 +92,7 @@ import {
   restFileRequest as buildRestFileRequest,
   supervisorAbsolutePath as resolveSupervisorAbsolutePath,
   toSlashPath,
+  virtualToAbsolute,
   type WorkspaceRoot,
 } from "./workspace-paths.js";
 import { normalizeSupervisorSubagentCwds } from "./subagent-cwd.js";
@@ -333,6 +345,12 @@ type SupervisorState = {
   shuttingDown: boolean;
   terminalError: boolean;
   executionTarget?: AgentSHExecutionTarget;
+  autoApprover?: AutoApprover;
+  /** Session-only /agentsh-auto override of the autoApprovals setting. */
+  autoOverride?: boolean;
+  /** Real cwd of AgentSH subagents by subagent_id, from subagent_child_start. */
+  subagentCwds: Map<string, string>;
+  autoRecent: AutoDecisionRecord[];
 };
 
 const PROTOCOL_VERSION = 1;
@@ -3168,6 +3186,11 @@ async function promptApproval(state: SupervisorState, approval: ApprovalRequest)
     const resolution = resolveChoice(choices, choice);
     const approvalClient = requireApprovalClient(state);
     await approvalClient.resolveApproval(approval.id, resolution);
+    state.autoApprover?.recordUserResolution(
+      approval,
+      autoApprovalContext(state, approval),
+      resolution,
+    );
     if (controller.signal.aborted || state.shuttingDown) return;
     if (resolution.scope === "session") {
       removePending(state, approval.id);
@@ -3214,10 +3237,133 @@ function enqueueApproval(state: SupervisorState, approval: ApprovalRequest) {
   state.seenApprovals.add(approval.id);
   state.pendingIds.add(approval.id);
   updatePending(state, 1);
-  if (!state.ctx?.hasUI) return;
+  void autoApproveOrPrompt(state, approval);
+}
+
+function queuePrompt(state: SupervisorState, approval: ApprovalRequest) {
+  if (!state.ctx?.hasUI || !state.pendingIds.has(approval.id)) return;
   state.promptChain = state.promptChain
     .catch(() => undefined)
     .then(() => promptApproval(state, approval));
+}
+
+const AUTO_RECENT_LIMIT = 20;
+
+function autoApprovalsEnabled(state: SupervisorState) {
+  if (state.autoOverride !== undefined) return state.autoOverride;
+  return !/^(0|false|no|off)$/i.test(env("PI_AGENTSH_AUTO_APPROVALS"));
+}
+
+function latestUserMessage(ctx: ExtensionContext | undefined) {
+  try {
+    const branch = ctx?.sessionManager?.getBranch?.() || [];
+    for (let index = branch.length - 1; index >= 0; index--) {
+      const message = (branch[index] as any)?.message;
+      if ((branch[index] as any)?.type !== "message" || message?.role !== "user") continue;
+      if (typeof message.content === "string") return message.content;
+      if (Array.isArray(message.content))
+        return message.content
+          .filter((block: any) => block?.type === "text" && typeof block.text === "string")
+          .map((block: any) => block.text)
+          .join("\n");
+    }
+  } catch {
+    // Context is optional for the classifier.
+  }
+  return undefined;
+}
+
+function autoApprovalContext(state: SupervisorState, approval: ApprovalRequest) {
+  const metadata = state.metadata;
+  const roots = [
+    metadata?.real_workspace,
+    ...(metadata?.workspace_roots || []).map((root) => root.real),
+    state.ctx?.cwd,
+  ].filter((root): root is string => typeof root === "string" && root.startsWith("/"));
+  return {
+    workspaceRoots: Array.from(new Set(roots)),
+    requester: approvalRequester(approval, state.subagentCwds, state.ctx?.cwd),
+    latestUserMessage: latestUserMessage(state.ctx),
+  } satisfies AutoApprovalContext;
+}
+
+function recordAutoDecision(
+  state: SupervisorState,
+  approval: ApprovalRequest,
+  record: AutoDecisionRecord,
+) {
+  state.autoRecent.push(record);
+  if (state.autoRecent.length > AUTO_RECENT_LIMIT)
+    state.autoRecent.splice(0, state.autoRecent.length - AUTO_RECENT_LIMIT);
+  appendAutoDecisionLog(posixPath.join(getAgentDir(), "sandbox", "auto-approvals.jsonl"), record);
+}
+
+/**
+ * Ask the auto-approval layer first. It approves once or hands the request
+ * to the user. Headless processes keep unanswered approvals pending.
+ */
+async function autoApproveOrPrompt(state: SupervisorState, approval: ApprovalRequest) {
+  const approver = state.autoApprover;
+  if (!approver || state.resolving.has(approval.id)) return queuePrompt(state, approval);
+  const controller = new AbortController();
+  state.resolving.add(approval.id);
+  state.promptAbortControllers.set(approval.id, controller);
+  const release = () => {
+    if (state.promptAbortControllers.get(approval.id) !== controller) return false;
+    state.promptAbortControllers.delete(approval.id);
+    state.resolving.delete(approval.id);
+    return true;
+  };
+  const ctx = state.ctx;
+  let handled = false;
+  try {
+    const context = autoApprovalContext(state, approval);
+    const decision = await approver.decide(approval, context, controller.signal);
+    if (controller.signal.aborted || state.shuttingDown || !state.pendingIds.has(approval.id))
+      return;
+    const logged = decision.source !== "disabled" && decision.source !== "never-auto";
+    const record = autoDecisionRecord(approval, decision, context.requester);
+    if (decision.action !== "approve") {
+      if (logged) recordAutoDecision(state, approval, record);
+      return;
+    }
+    const approvalClient = requireApprovalClient(state);
+    try {
+      await approvalClient.resolveApproval(approval.id, decision.resolution);
+    } catch (error) {
+      if (/approval not found|HTTP 404/i.test(asError(error).message)) {
+        handled = true;
+        removePending(state, approval.id);
+        return;
+      }
+      throw error;
+    }
+    handled = true;
+    recordAutoDecision(state, approval, record);
+    if (controller.signal.aborted || state.shuttingDown) return;
+    notify(
+      ctx,
+      `Auto-approved: ${approvalTitle(approval)} (${decision.source}: ${decision.reason})`,
+      "info",
+    );
+    removePending(state, approval.id);
+  } catch (error) {
+    notify(ctx, `AgentSH auto-approval failed: ${asError(error).message}`, "warning");
+  } finally {
+    if (release() && !handled) queuePrompt(state, approval);
+  }
+}
+
+function formatAutoStatus(state: SupervisorState) {
+  const lines = [`AgentSH auto-approvals: ${autoApprovalsEnabled(state) ? "on" : "off"}`];
+  if (state.autoOverride !== undefined) lines[0] += " (this session)";
+  if (state.autoRecent.length === 0) lines.push("No automatic decisions yet.");
+  for (const record of state.autoRecent.slice().reverse()) {
+    lines.push(
+      `${record.timestamp} ${record.decision === "approve" ? "approved" : "asked user"} ${record.kind || "approval"}: ${record.target || record.approval_id} (${record.source}${record.model ? ` ${record.model}` : ""}: ${record.reason})`,
+    );
+  }
+  return lines.join("\n");
 }
 
 function resetConnection(state: SupervisorState) {
@@ -4060,12 +4206,46 @@ export default function sandbox(pi: ExtensionAPI) {
     lifecycleBusy: false,
     shuttingDown: false,
     terminalError: false,
+    subagentCwds: new Map(),
+    autoRecent: [],
+  };
+  const classifierTimeoutMs = Number(env("PI_AGENTSH_CLASSIFIER_TIMEOUT_MS") || "20000");
+  const classifierFallbacks = env("PI_AGENTSH_CLASSIFIER_FALLBACK_MODELS")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  state.autoApprover = new AutoApprover({
+    enabled: () => autoApprovalsEnabled(state),
+    attemptTimeoutMs: Number.isFinite(classifierTimeoutMs) ? classifierTimeoutMs : 20000,
+    attempts: () => 1 + classifierFallbacks.length,
+    classify: createModelClassifier({
+      registry: () => state.ctx?.modelRegistry as any,
+      sessionModel: () => state.ctx?.model as ClassifierModel | undefined,
+      primary: env("PI_AGENTSH_CLASSIFIER_MODEL") || undefined,
+      fallbacks: classifierFallbacks,
+      attemptTimeoutMs: Number.isFinite(classifierTimeoutMs) ? classifierTimeoutMs : 20000,
+      async prepareModel(model) {
+        if (!state.ctx) return model;
+        // The account profile only applies to requests on the provider it routes.
+        const profile = await prepareSessionRoutingRequest(state.ctx);
+        return profile && profile.providerId === model.provider
+          ? bindSessionModelRequest(model, profile)
+          : model;
+      },
+    }),
+  });
+  const resetAutoApprovals = () => {
+    state.autoApprover?.clear();
+    state.autoOverride = undefined;
+    state.subagentCwds.clear();
+    state.autoRecent = [];
   };
 
   globalThis.__AGENTSH_PI__ = createGlobalAPI(state);
 
   pi.on("session_start", async (_event, ctx) => {
     state.shuttingDown = false;
+    resetAutoApprovals();
     try {
       await attachOrStart(state, ctx, { notifyOnSuccess: false });
     } catch {
@@ -4100,6 +4280,16 @@ export default function sandbox(pi: ExtensionAPI) {
     description: "Show AgentSH supervisor-client status",
     handler: async (_args, ctx) =>
       notify(ctx, helpText(state), state.status === "error" ? "error" : "info"),
+  });
+
+  pi.registerCommand("agentsh-auto", {
+    description: "Show or toggle automatic AgentSH approvals: /agentsh-auto [on|off]",
+    handler: async (args, ctx) => {
+      const arg = (args?.trim?.() || "").toLowerCase();
+      if (arg === "on" || arg === "off") state.autoOverride = arg === "on";
+      else if (arg) return notify(ctx, "Usage: /agentsh-auto [on|off]", "warning");
+      notify(ctx, formatAutoStatus(state), "info");
+    },
   });
 
   pi.registerCommand("sandbox-allow", {
@@ -4481,6 +4671,13 @@ export default function sandbox(pi: ExtensionAPI) {
                 if (typeof (message as any).task === "string")
                   childState.task = (message as any).task;
                 if (typeof (message as any).cwd === "string") childState.cwd = (message as any).cwd;
+                // Auto-approvals judge a subagent's requests against its own cwd/worktree.
+                const subagentId = stringifyData((message as any).subagent_id || "").trim();
+                const realCwd =
+                  typeof (message as any).cwd === "string"
+                    ? virtualToAbsolute(state.metadata, (message as any).cwd)
+                    : undefined;
+                if (subagentId && realCwd) state.subagentCwds.set(subagentId, realCwd);
                 if (Array.isArray((message as any).tools))
                   childState.tools = (message as any).tools;
                 const model =
