@@ -62,6 +62,46 @@ async function readMachineId(): Promise<string> {
   return "";
 }
 
+const REMOVE_RETRIES = 5;
+const REMOVE_RETRY_MS = 20;
+const REMOVAL_RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
+const TOMBSTONE = /^(job-[0-9a-f]{24})\.removing-[0-9]+(?:-[a-f0-9]{16})?$/;
+
+type ReaderGate = {
+  count: number;
+  waiting: number;
+  removals: number;
+  closing: boolean;
+  idle?: () => void;
+  waitingIdle?: () => void;
+  open: (() => void)[];
+  removeTail: Promise<void>;
+};
+
+const activeReaders = new Map<string, ReaderGate>();
+
+type RemovalVerification = {
+  metadata: JobMetadata;
+  launch?: JobLaunch;
+  result?: JobResult;
+};
+
+/** True for a `<id>.removing-<pid>[-<nonce>]` directory left by an interrupted removal. */
+function isTombstoneOf(id: string, name: string): boolean {
+  return TOMBSTONE.exec(name)?.[1] === id;
+}
+
+function matchesRemovalVerification(
+  intent: RemovalVerification,
+  verification: RemovalVerification,
+): boolean {
+  return (
+    JSON.stringify(intent.metadata) === JSON.stringify(verification.metadata) &&
+    JSON.stringify(intent.launch) === JSON.stringify(verification.launch) &&
+    JSON.stringify(intent.result) === JSON.stringify(verification.result)
+  );
+}
+
 function object(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
@@ -334,6 +374,8 @@ export class JobStore {
       this.assertPrivateDirectory(this.jobsRoot),
       this.assertPrivateDirectory(this.runtimeRoot),
     ]);
+    await this.cleanupPendingRemovals();
+    await this.cleanupLegacyRemovals();
   }
 
   private async assertPrivateDirectory(path: string): Promise<void> {
@@ -529,11 +571,263 @@ export class JobStore {
       .map((entry) => entry.name);
   }
 
-  async remove(id: string): Promise<void> {
+  private readerGate(id: string): ReaderGate {
+    const key = this.path(id, "metadata.json");
+    let gate = activeReaders.get(key);
+    if (!gate) {
+      gate = {
+        count: 0,
+        waiting: 0,
+        removals: 0,
+        closing: false,
+        open: [],
+        removeTail: Promise.resolve(),
+      };
+      activeReaders.set(key, gate);
+    }
+    return gate;
+  }
+
+  async withReader<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    const gate = this.readerGate(id);
+    while (gate.closing) {
+      gate.waiting++;
+      try {
+        await new Promise<void>((resolve) => gate.open.push(resolve));
+      } finally {
+        gate.waiting--;
+        if (gate.waiting === 0) gate.waitingIdle?.();
+      }
+    }
+    gate.count++;
+    try {
+      return await operation();
+    } finally {
+      gate.count--;
+      if (gate.count === 0) {
+        gate.idle?.();
+        if (!gate.closing && gate.waiting === 0 && gate.removals === 0)
+          activeReaders.delete(this.path(id, "metadata.json"));
+      }
+    }
+  }
+
+  private async withRemovalGate<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    const gate = this.readerGate(id);
+    let release!: () => void;
+    const previous = gate.removeTail;
+    gate.removals++;
+    gate.removeTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    gate.closing = true;
+    try {
+      if (gate.count > 0) {
+        await new Promise<void>((resolve) => {
+          gate.idle = resolve;
+        });
+      }
+      return await operation();
+    } finally {
+      gate.closing = false;
+      gate.removals--;
+      const hadWaitingReaders = gate.waiting > 0;
+      for (const open of gate.open.splice(0)) open();
+      if (hadWaitingReaders) {
+        await new Promise<void>((resolve) => {
+          gate.waitingIdle = resolve;
+        });
+        if (gate.count > 0) {
+          await new Promise<void>((resolve) => {
+            gate.idle = resolve;
+          });
+        }
+      }
+      release();
+      if (gate.count === 0 && gate.waiting === 0 && gate.removals === 0)
+        activeReaders.delete(this.path(id, "metadata.json"));
+    }
+  }
+
+  private removalIntentPath(id: string): string {
+    this.jobDir(id);
+    return join(this.jobsRoot, `.${id}.removal.json`);
+  }
+
+  private async cleanupPendingRemovals(): Promise<void> {
+    const entries = await readdir(this.jobsRoot);
+    for (const name of entries) {
+      const match = /^\.(job-[0-9a-f]{24})\.removal\.json$/.exec(name);
+      if (!match) continue;
+      const id = match[1];
+      let intent: Awaited<ReturnType<JobStore["readRemovalIntent"]>>;
+      try {
+        intent = await this.readRemovalIntent(id);
+      } catch {
+        continue;
+      }
+      if (!intent) continue;
+      try {
+        // If the source vanished, its rename has completed; list tombstones afterward.
+        const sourceExistsBeforeListing = await this.exists(this.jobDir(id));
+        const entriesAfterSourceCheck = await readdir(this.jobsRoot);
+        const currentEntries = sourceExistsBeforeListing
+          ? entriesAfterSourceCheck
+          : await readdir(this.jobsRoot);
+        const leftovers = currentEntries.filter((entry) => isTombstoneOf(id, entry));
+        let complete = true;
+        for (const leftover of leftovers) {
+          try {
+            complete = (await this.removeTree(join(this.jobsRoot, leftover))) && complete;
+          } catch {
+            complete = false;
+          }
+        }
+        const sourceRemains = await this.exists(this.jobDir(id));
+        const remainingEntries = sourceRemains ? [] : await readdir(this.jobsRoot);
+        const tombstoneRemains = remainingEntries.some((entry) => isTombstoneOf(id, entry));
+        if (complete && !sourceRemains && !tombstoneRemains) {
+          const current = await this.readRemovalIntent(id);
+          if (!current) continue;
+          if (current.cleanedAt !== undefined) {
+            if (Date.now() - current.cleanedAt >= REMOVAL_RECEIPT_TTL_MS)
+              await rm(this.removalIntentPath(id), { force: true });
+          } else if (current.reapVerified) {
+            await writeAtomic(this.removalIntentPath(id), {
+              ...current,
+              cleanedAt: Date.now(),
+            });
+          } else {
+            await rm(this.removalIntentPath(id), { force: true });
+          }
+        }
+      } catch {
+        /* Keep this intent and tombstone for a later cleanup attempt. */
+      }
+    }
+  }
+
+  private async cleanupLegacyRemovals(): Promise<void> {
+    const entries = await readdir(this.jobsRoot, { withFileTypes: true });
+    for (const entry of entries) {
+      const match = TOMBSTONE.exec(entry.name);
+      if (!match || !entry.isDirectory() || entry.isSymbolicLink()) continue;
+      if (await this.exists(this.removalIntentPath(match[1]))) continue;
+      try {
+        await this.removeTree(join(this.jobsRoot, entry.name));
+      } catch {
+        /* An inaccessible legacy tombstone must not block unrelated jobs. */
+      }
+    }
+  }
+
+  isRemovalReceiptExpired(intent: { cleanedAt?: number }): boolean {
+    return (
+      intent.cleanedAt !== undefined && Date.now() - intent.cleanedAt >= REMOVAL_RECEIPT_TTL_MS
+    );
+  }
+
+  async readRemovalIntent(id: string): Promise<
+    | {
+        metadata: JobMetadata;
+        launch?: JobLaunch;
+        result?: JobResult;
+        reapVerified?: true;
+        cleanedAt?: number;
+      }
+    | undefined
+  > {
+    try {
+      const raw = object(await readJson(this.removalIntentPath(id)), "job removal intent");
+      exactKeys(raw, ["metadata"], ["launch", "result", "reapVerified", "cleanedAt"]);
+      const metadata = parseMetadata(raw.metadata);
+      const result = raw.result === undefined ? undefined : parseResult(raw.result);
+      const launch = raw.launch === undefined ? undefined : parseLaunch(raw.launch);
+      if (raw.reapVerified !== undefined && raw.reapVerified !== true)
+        throw new Error("Invalid reap authorization in removal intent");
+      const cleanedAt =
+        raw.cleanedAt === undefined ? undefined : integer(raw.cleanedAt, "cleanup time", 1);
+      if (metadata.id !== id) throw new Error("job removal intent ID mismatch");
+      return {
+        metadata,
+        ...(launch ? { launch } : {}),
+        ...(result ? { result } : {}),
+        ...(raw.reapVerified === true ? { reapVerified: true as const } : {}),
+        ...(cleanedAt === undefined ? {} : { cleanedAt }),
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+  }
+
+  async remove(id: string, verification?: RemovalVerification): Promise<void> {
+    await this.withRemovalGate(id, () => this.removeLocked(id, verification));
+  }
+
+  private async removeLocked(id: string, verification?: RemovalVerification): Promise<void> {
     const source = this.jobDir(id);
-    const target = `${source}.removing-${process.pid}`;
-    await rename(source, target);
-    await rm(target, { recursive: true, force: true });
+    const intentPath = this.removalIntentPath(id);
+    let intent = await this.readRemovalIntent(id);
+    if (intent?.cleanedAt !== undefined && !(await this.exists(source))) {
+      await rm(intentPath, { force: true });
+      return;
+    }
+    if (intent?.cleanedAt !== undefined) {
+      await rm(intentPath, { force: true });
+      intent = undefined;
+    }
+    if (intent && verification) {
+      if (!matchesRemovalVerification(intent, verification)) {
+        await rm(intentPath, { force: true });
+        intent = undefined;
+      } else if (!intent.reapVerified) {
+        intent = { ...intent, reapVerified: true };
+        await writeAtomic(intentPath, intent);
+      }
+    }
+    if (!intent) {
+      const metadata = await this.readMetadata(id);
+      const result = await this.readResult(id);
+      const launch = await this.readLaunch(id);
+      if (verification && !matchesRemovalVerification({ metadata, launch, result }, verification))
+        throw new Error(`Background job ${id} changed during cleanup`);
+      intent = {
+        metadata,
+        ...(launch ? { launch } : {}),
+        ...(result ? { result } : {}),
+        ...(verification ? { reapVerified: true as const } : {}),
+      };
+      await writeAtomic(intentPath, intent);
+    }
+
+    const target = `${source}.removing-${process.pid}-${randomBytes(8).toString("hex")}`;
+    if (await this.exists(source)) await rename(source, target);
+    const leftovers = (await readdir(this.jobsRoot)).filter((name) => isTombstoneOf(id, name));
+    for (const name of leftovers) {
+      if (!(await this.removeTree(join(this.jobsRoot, name)))) return;
+    }
+    await rm(intentPath, { force: true });
+  }
+
+  protected async removeOnce(path: string): Promise<void> {
+    await rm(path, { recursive: true, force: true });
+  }
+
+  protected async removeTree(path: string): Promise<boolean> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.removeOnce(path);
+        return true;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return true;
+        if (!["ENOTEMPTY", "EBUSY"].includes(code ?? "")) throw error;
+        if (attempt >= REMOVE_RETRIES) return false;
+        await new Promise((resolve) => setTimeout(resolve, REMOVE_RETRY_MS * (attempt + 1)));
+      }
+    }
   }
 
   async replaceMetadata(metadata: JobMetadata): Promise<void> {
