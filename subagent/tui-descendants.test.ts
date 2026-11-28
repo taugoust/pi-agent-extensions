@@ -133,6 +133,25 @@ async function fixture() {
   };
 }
 
+test("intermediate reap names its idle waiting descendant without cancelling it", async () => {
+  const f = await fixture();
+  try {
+    f.server.settled({ assistant: { stopReason: "stop", content: "idle final answer" } });
+    f.groups[2].children[0].spec.verification = [{ command: "true" }];
+    atomicPrivateJson(join(f.root, "groups", `${f.groups[2].id}.json`), f.groups[2]);
+    await assert.rejects(
+      f.manager.operation({ operation: "reap", job_id: f.groups[1].id }, "session-0"),
+      new RegExp(`${f.groups[2].id}/${f.manifests[2].childId} waiting`),
+    );
+    assert.deepEqual(f.reaped, []);
+    assert.equal(f.server.state.active, false);
+    assert.equal(f.server.state.sealed, false);
+    assert.equal(f.server.state.parentCancelledIdle, undefined);
+  } finally {
+    await f.close();
+  }
+});
+
 test("ancestry observation waits for a published startup header; strict cleanup and malformed/oversized headers fail closed", async () => {
   const f = await fixture();
   try {
@@ -291,6 +310,7 @@ test(
         workerEpoch: coordinator.workerEpoch,
       };
       let goalStatus = "active";
+      let observedGoalId = assignment.entryId;
       goalServer = await serveGoalWorker({
         path: join(f.root, "workers", "1".repeat(24), "goal.sock"),
         token: coordinator.controlToken,
@@ -298,8 +318,7 @@ test(
         isCurrent: () => true,
         async handle() {
           return {
-            entryId: assignment.entryId,
-            goalId: "goal-id",
+            goalId: observedGoalId,
             status: goalStatus,
             executionStopped: true,
           };
@@ -363,6 +382,14 @@ test(
       assert.equal(childAborts, 0);
       assert.equal(coordinatorAborts, 0);
       childServer.settled({ assistant: { stopReason: "stop", content: "idle" } });
+      observedGoalId = "other-goal";
+      await assert.rejects(
+        f.manager.operation({ operation: "cancel", child_id: f.manifests[1].childId }, "session-0"),
+        /requires its finished Goal coordinator/,
+      );
+      assert.equal(childServer.state.parentCancelledIdle, undefined);
+      assert.equal(coordinatorServer.state.sealed, false);
+      observedGoalId = assignment.entryId;
       const cancelled = await f.manager.operation(
         { operation: "cancel", child_id: f.manifests[1].childId },
         "session-0",
