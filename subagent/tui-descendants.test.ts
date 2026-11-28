@@ -12,6 +12,9 @@ import { serveGoalWorker } from "./goal-rpc.ts";
 import { HeadlessForegroundManager } from "./headless-foreground.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 import { taskListText } from "../shared/task-presentation.ts";
+import { createDelegatedGoalExecutor } from "./goal-executor.ts";
+import { DelegatedGoalRegistry } from "../workflows/delegated-goals.ts";
+import { openRetainedSession } from "./retained-session.ts";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "pi-tree-"));
@@ -133,6 +136,25 @@ async function fixture() {
   };
 }
 
+test("intermediate reap names its idle waiting descendant without cancelling it", async () => {
+  const f = await fixture();
+  try {
+    f.server.settled({ assistant: { stopReason: "stop", content: "idle final answer" } });
+    f.groups[2].children[0].spec.verification = [{ command: "true" }];
+    atomicPrivateJson(join(f.root, "groups", `${f.groups[2].id}.json`), f.groups[2]);
+    await assert.rejects(
+      f.manager.operation({ operation: "reap", job_id: f.groups[1].id }, "session-0"),
+      new RegExp(`${f.groups[2].id}/${f.manifests[2].childId} waiting`),
+    );
+    assert.deepEqual(f.reaped, []);
+    assert.equal(f.server.state.active, false);
+    assert.equal(f.server.state.sealed, false);
+    assert.equal(f.server.state.parentCancelledIdle, undefined);
+  } finally {
+    await f.close();
+  }
+});
+
 test("ancestry observation waits for a published startup header; strict cleanup and malformed/oversized headers fail closed", async () => {
   const f = await fixture();
   try {
@@ -173,6 +195,173 @@ test("ancestry observation waits for a published startup header; strict cleanup 
         () => f.manager.descendantGroups("session-0", undefined, undefined, strict),
         /header exceeds safe read limit/,
       );
+  } finally {
+    await f.close();
+  }
+});
+
+test("reaped native Goal pauses and completes with retained worker identity", async () => {
+  const f = await fixture();
+  try {
+    const group = f.groups[0];
+    const child = group.children[0];
+    const assignment = {
+      entryId: "pending",
+      goalTools: ["goal_manage", "goal_complete", "goal_blocked", "goal_wait", "update_progress"],
+      policy: { continuationLimits: { automaticTurns: null, noProgressTurns: null } },
+    };
+    f.manager.groups.set(group.id, group);
+    const childIdentity = {
+      sessionId: group.owner,
+      runtimeId: "runtime-0",
+      taskId: child.taskId,
+      childId: child.childId,
+      jobId: group.id,
+      attempt: child.attempt,
+      workerEpoch: f.manifests[0].workerEpoch,
+    };
+    const running = createDelegatedGoalExecutor({
+      sessionId: group.owner,
+      runtimeId: "runtime-0",
+      async launch() {
+        return {
+          identity: childIdentity,
+          model: "fixture",
+          async start() {
+            return {
+              goalId: "native-goal",
+              status: "active",
+              executionStopped: false,
+              waiting: null,
+            };
+          },
+          async resume() {
+            throw new Error("unexpected resume");
+          },
+          async pause() {
+            throw new Error("unexpected pause");
+          },
+          async observe() {
+            throw new Error("unexpected observation");
+          },
+          async stop() {},
+        };
+      },
+    });
+    const registry = new DelegatedGoalRegistry(group.owner, running, () => {});
+    let state = await registry.mutate(group.owner, {
+      action: "goals.create",
+      requestId: "create-native",
+      expectedGoalId: null,
+      objective: "Verify native retained completion",
+    });
+    let entry = state.entries[0];
+    assignment.entryId = entry.id;
+    state = await registry.mutate(group.owner, {
+      action: "goals.add_task",
+      requestId: "task-native",
+      expectedGoalId: entry.id,
+      expectedEntryRevision: entry.revision,
+      text: "Review the native result",
+    });
+    entry = state.entries[0];
+    state = await registry.mutate(group.owner, {
+      action: "goals.start",
+      requestId: "start-native",
+      expectedGoalId: entry.id,
+      expectedEntryRevision: entry.revision,
+    });
+    child.spec.assignedGoal = assignment;
+    f.manifests[0].tools = assignment.goalTools;
+    f.manifests[0].assignedGoal = assignment;
+    f.stores[0].writeManifest(f.manifests[0]);
+    child.reaped = false;
+    await (f.manager as any).reapChild(group, child);
+    assert.equal(child.workerSessionId, "session-1");
+
+    const details = f.manager.goalDetails(group.owner, state.entries[0].child!, entry.id);
+    let retainedOpens = 0;
+    const restored = createDelegatedGoalExecutor({
+      sessionId: group.owner,
+      runtimeId: "restored",
+      async verifyStopped() {},
+      async retainedCompletion() {
+        const manager = await openRetainedSession(details.sessionFile, details.sessionId, () => {
+          retainedOpens++;
+          return { getSessionId: () => "session-1" };
+        });
+        assert.ok(manager);
+        return null; // The retained session has no child completion marker.
+      },
+      async launch() {
+        throw new Error("must not relaunch");
+      },
+    });
+    const restoredRegistry = new DelegatedGoalRegistry(group.owner, restored, () => {}, state);
+    state = await restoredRegistry.mutate(group.owner, {
+      action: "goals.pause",
+      requestId: "pause-native",
+      expectedGoalId: state.entries[0].id,
+      expectedEntryRevision: state.entries[0].revision,
+    });
+    assert.equal(state.entries[0].status, "paused");
+    assert.equal(details.sessionId, "session-1");
+    assert.ok(retainedOpens > 0, "Pause must read the native retained session");
+    state = await restoredRegistry.mutate(group.owner, {
+      action: "goals.complete",
+      requestId: "complete-native",
+      expectedGoalId: state.entries[0].id,
+      expectedEntryRevision: state.entries[0].revision,
+      user_authorized: true,
+      summary: "Reviewed the native child output.",
+      taskEvidence: [{ taskId: state.entries[0].tasks[0].id, evidence: "Reviewed the output." }],
+    });
+    assert.equal(state.entries[0].status, "complete");
+    assert.equal(state.entries[0].tasks[0].status, "completed");
+    assert.equal(state.entries[0].summary, "Reviewed the native child output.");
+  } finally {
+    await f.close();
+  }
+});
+
+test("reaped native Goal rejects a retained session with a different pinned identity", async () => {
+  const f = await fixture();
+  try {
+    const group = f.groups[0];
+    const child = group.children[0];
+    const entryId = "11111111-1111-4111-8111-111111111111";
+    child.spec.assignedGoal = {
+      entryId,
+      goalTools: ["goal_manage", "goal_complete", "goal_blocked", "goal_wait", "update_progress"],
+      policy: { continuationLimits: { automaticTurns: null, noProgressTurns: null } },
+    };
+    f.manifests[0].tools = child.spec.assignedGoal.goalTools;
+    f.manifests[0].assignedGoal = child.spec.assignedGoal;
+    f.stores[0].writeManifest(f.manifests[0]);
+    child.workerSessionId = "session-1";
+    f.manager.groups.set(group.id, group);
+    const details = f.manager.goalDetails(
+      group.owner,
+      {
+        taskId: child.taskId,
+        childId: child.childId,
+        jobId: group.id,
+        attempt: child.attempt,
+      },
+      entryId,
+    );
+    assert.equal(details.sessionId, "session-1");
+    await writeFile(
+      details.sessionFile,
+      JSON.stringify({ type: "session", id: "foreign-session" }) + "\n",
+      { mode: 0o600 },
+    );
+    await assert.rejects(
+      openRetainedSession(details.sessionFile, details.sessionId, () => ({
+        getSessionId: () => "foreign-session",
+      })),
+      /Retained child session identity changed/,
+    );
   } finally {
     await f.close();
   }
@@ -291,6 +480,7 @@ test(
         workerEpoch: coordinator.workerEpoch,
       };
       let goalStatus = "active";
+      let observedGoalId = assignment.entryId;
       goalServer = await serveGoalWorker({
         path: join(f.root, "workers", "1".repeat(24), "goal.sock"),
         token: coordinator.controlToken,
@@ -298,8 +488,7 @@ test(
         isCurrent: () => true,
         async handle() {
           return {
-            entryId: assignment.entryId,
-            goalId: "goal-id",
+            goalId: observedGoalId,
             status: goalStatus,
             executionStopped: true,
           };
@@ -363,6 +552,14 @@ test(
       assert.equal(childAborts, 0);
       assert.equal(coordinatorAborts, 0);
       childServer.settled({ assistant: { stopReason: "stop", content: "idle" } });
+      observedGoalId = "other-goal";
+      await assert.rejects(
+        f.manager.operation({ operation: "cancel", child_id: f.manifests[1].childId }, "session-0"),
+        /requires its finished Goal coordinator/,
+      );
+      assert.equal(childServer.state.parentCancelledIdle, undefined);
+      assert.equal(coordinatorServer.state.sealed, false);
+      observedGoalId = assignment.entryId;
       const cancelled = await f.manager.operation(
         { operation: "cancel", child_id: f.manifests[1].childId },
         "session-0",
