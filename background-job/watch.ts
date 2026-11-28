@@ -119,7 +119,7 @@ export class WatchManager {
     }
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     const lock = new JobStore(join(this.root, "lock-state"));
-    return await lock.withLock(async () => {
+    return await lock.withLock(async (assertOwned) => {
       const all = await this.list();
       if (all.length >= 256)
         throw new Error(
@@ -150,10 +150,13 @@ export class WatchManager {
         droppedThrough: 0,
         events: [],
       };
+      await assertOwned();
       saveWatch(this.file(id), w);
       try {
-        await this.ensureRunner();
+        await assertOwned();
+        await this.ensureRunner(assertOwned);
       } catch (error) {
+        await assertOwned();
         w.status = "failed";
         saveWatch(this.file(id), w);
         throw error;
@@ -174,7 +177,7 @@ export class WatchManager {
       child_id: w.childId,
     };
   }
-  private async ensureRunner() {
+  private async ensureRunner(assertOwned?: () => Promise<void>) {
     let previous;
     try {
       const id = (await readFile(join(this.root, "service"), "utf8")).trim();
@@ -193,6 +196,7 @@ export class WatchManager {
     }
     const node = await resolveExecutable("node");
     const runner = runnerPath();
+    await assertOwned?.();
     const job = await this.jobs.start({
       command: `${quote(node)} ${quote(runner)} ${quote(this.root)}`,
       cwd: this.root,
@@ -200,6 +204,7 @@ export class WatchManager {
       name: "Persistent log watch service",
       infrastructure: true,
     });
+    await assertOwned?.();
     await writeFile(join(this.root, "service"), job.metadata.id, { mode: 0o600 });
   }
   async list(childId?: string, strict = false): Promise<any[]> {
@@ -244,11 +249,12 @@ export class WatchManager {
     if (!Number.isSafeInteger(through) || through < 0 || through > w.sequence)
       throw new Error("Invalid acknowledgement cursor");
     const lock = new JobStore(join(this.root, "ack-lock"));
-    await lock.withLock(async () => {
+    await lock.withLock(async (assertOwned) => {
       let previous = 0;
       try {
         previous = Number(await readFile(this.file(id) + ".ack", "utf8"));
       } catch {}
+      await assertOwned();
       await writeFile(this.file(id) + ".ack", String(Math.max(previous, through)), { mode: 0o600 });
     });
     return { watch_id: id, acknowledged_through: through };
@@ -261,7 +267,10 @@ export class WatchManager {
   async recover() {
     if ((await this.list()).some((w) => w.status === "running")) {
       const lock = new JobStore(join(this.root, "lock-state"));
-      await lock.withLock(() => this.ensureRunner());
+      await lock.withLock(async (assertOwned) => {
+        await assertOwned();
+        await this.ensureRunner(assertOwned);
+      });
     }
   }
 }

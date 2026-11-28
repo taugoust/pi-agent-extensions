@@ -32,7 +32,7 @@ background_sources=(
   test.mjs streams.test.mjs runner.mjs watch.ts watch-runner.mjs watch.test.mjs watch-job.test.mjs
   external-pane.ts pane.test.mjs runtime-path.ts startup.test.mjs completion.test.mjs
   readonly-descendants.test.mjs yield.test.mjs identity-race.test.mjs output-hints.ts
-  output-hints.test.mjs
+  output-hints.test.mjs lock-races.test.mjs
 )
 copy_sources subagent "${subagent_sources[@]}"
 copy_sources shared "${shared_sources[@]}"
@@ -63,11 +63,12 @@ node --test "$outdir/shared/verification-worker.test.js"
 background_tests=(
   test.mjs streams.test.mjs retention.test.mjs retention-races.test.mjs runner.mjs watch-runner.mjs
   watch.test.mjs watch-job.test.mjs pane.test.mjs startup.test.mjs completion.test.mjs
-  readonly-descendants.test.mjs yield.test.mjs
+  readonly-descendants.test.mjs yield.test.mjs lock-races.test.mjs
 )
 for file in "${background_tests[@]}"; do
   cp "$srcdir/background-job/$file" "$outdir/background-job/"
 done
+node "$outdir/background-job/lock-races.test.mjs"
 cp "$srcdir/background-job/identity-race.test.mjs" "$outdir/background-job/"
 node "$outdir/background-job/identity-race.test.mjs"
 cp "$srcdir/background-job/output-hints.test.mjs" "$outdir/background-job/"
