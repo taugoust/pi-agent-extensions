@@ -10,13 +10,14 @@ import {
   open,
   readFile,
   readdir,
+  readlink,
   rename,
   rm,
   rmdir,
-  stat,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { constants as osConstants, hostname } from "node:os";
 import {
   JOB_ID_PATTERN,
   JOB_SCHEMA_VERSION,
@@ -27,8 +28,40 @@ import {
 } from "./types.ts";
 
 const MAX_JSON_BYTES = 128 * 1024;
-const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 5_000;
+const LOCK_EMPTY_STALE_MS = 30_000;
+const LOCK_OWNER_PATTERN = /^owner-[a-f0-9]{32}$/;
+const LOCK_RETIRED_PATTERN = /^\.lock-retired-[a-f0-9]{32}$/;
+
+function isLockContention(error: unknown): boolean {
+  const failure = error as NodeJS.ErrnoException;
+  const staleErrno = osConstants.errno.ESTALE;
+  return (
+    ["EEXIST", "ENOTEMPTY", "ENOENT", "ESTALE"].includes(failure.code ?? "") ||
+    (typeof staleErrno === "number" &&
+      (failure.errno === -staleErrno || failure.errno === staleErrno))
+  );
+}
+
+type LockOwner = {
+  hostname: string;
+  machineId: string;
+  bootId: string;
+  pidNamespace: string;
+  pid: number;
+  startToken: string;
+  token: string;
+  createdAt: number;
+};
+
+async function readMachineId(): Promise<string> {
+  for (const path of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
+    const value = await readFile(path, "utf8").catch(() => "");
+    if (value.trim()) return value.trim();
+  }
+  return "";
+}
+
 const REMOVE_RETRIES = 5;
 const REMOVE_RETRY_MS = 20;
 const REMOVAL_RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -802,51 +835,294 @@ export class JobStore {
     await writeAtomic(this.path(valid.id, "metadata.json"), valid);
   }
 
-  async withLock<T>(operation: () => Promise<T>): Promise<T> {
+  async withLock<T>(operation: (assertOwned: () => Promise<void>) => Promise<T>): Promise<T> {
     await this.initialize();
+    await this.sweepRetiredLockOwners();
     const lock = join(this.root, ".lock");
-    const token = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const owner = await this.createLockOwner();
+    const ownerName = `owner-${owner.token}`;
+    const ownerPath = join(lock, ownerName);
+    const candidate = join(this.root, `.lock-candidate-${owner.token}`);
     const deadline = Date.now() + LOCK_WAIT_MS;
+    let acquired = false;
+    try {
+      await mkdir(candidate, { mode: 0o700 });
+      await writeFile(join(candidate, ownerName), `${JSON.stringify(owner)}\n`, {
+        mode: 0o600,
+        flag: "wx",
+      });
+      while (!acquired) {
+        try {
+          acquired = await this.publishLockCandidate(lock, candidate);
+          if (!acquired && (await this.hasLockOwner(ownerPath, owner))) acquired = true;
+        } catch (error) {
+          if (!isLockContention(error)) throw error;
+        }
+        if (acquired) continue;
+        await this.releaseDeadLockOwner(lock);
+        if (Date.now() >= deadline) throw await this.lockTimeoutError(lock);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const assertOwned = async () => {
+        if (!(await this.hasLockOwner(ownerPath, owner))) {
+          throw new Error("Background-job state lock ownership lost");
+        }
+      };
+      await assertOwned();
+      try {
+        const result = await operation(assertOwned);
+        await assertOwned();
+        return result;
+      } catch (error) {
+        await assertOwned();
+        throw error;
+      }
+    } finally {
+      try {
+        if (acquired) {
+          if (!(await this.hasLockOwner(ownerPath, owner))) {
+            throw new Error("Background-job state lock ownership lost");
+          }
+          if (!(await this.retireLockOwner(lock, ownerName))) {
+            throw new Error("Background-job state lock ownership lost");
+          }
+        }
+      } finally {
+        await rm(candidate, { recursive: true, force: true });
+      }
+    }
+  }
+
+  private async createLockOwner(): Promise<LockOwner> {
+    const token = randomBytes(16).toString("hex");
+    const [machineId, bootId, pidNamespace, startToken] = await Promise.all([
+      readMachineId(),
+      readFile("/proc/sys/kernel/random/boot_id", "utf8").catch(() => ""),
+      readlink("/proc/self/ns/pid").catch(() => ""),
+      processStartToken(process.pid),
+    ]);
+    return {
+      hostname: hostname(),
+      machineId,
+      bootId: bootId.trim(),
+      pidNamespace,
+      pid: process.pid,
+      startToken,
+      token,
+      createdAt: Date.now(),
+    };
+  }
+
+  private async lockTimeoutError(lock: string): Promise<Error> {
+    let host = "unknown";
+    let pid = "unknown";
+    let age = "unknown";
+    let legacyToken: string | undefined;
+    try {
+      const names = await readdir(lock);
+      if (names.length === 1 && names[0] === "owner") {
+        const value = await readFile(join(lock, "owner"), "utf8");
+        legacyToken = value.trim().slice(0, 256);
+        const match = /^([0-9]+)-([0-9]+)-/.exec(value);
+        if (match) {
+          pid = match[1];
+          age = `${Math.max(0, Date.now() - Number(match[2]))}ms`;
+        }
+      } else if (names.length === 1 && LOCK_OWNER_PATTERN.test(names[0])) {
+        const owner = JSON.parse(await readFile(join(lock, names[0]), "utf8")) as LockOwner;
+        host = typeof owner.hostname === "string" ? owner.hostname : host;
+        pid = Number.isSafeInteger(owner.pid) ? String(owner.pid) : pid;
+        age = Number.isSafeInteger(owner.createdAt)
+          ? `${Math.max(0, Date.now() - owner.createdAt)}ms`
+          : age;
+      }
+    } catch {}
+    const action = legacyToken
+      ? `; legacy token=${JSON.stringify(legacyToken)} host=unknown; ` +
+        "verify the old owner is not running before manually clearing this lock"
+      : "";
+    return new Error(
+      `Timed out acquiring the background-job state lock at ${lock}; ` +
+        `blocking owner host=${host} pid=${pid} age=${age}${action}`,
+    );
+  }
+
+  private async publishLockCandidate(lock: string, candidate: string): Promise<boolean> {
+    let before;
+    try {
+      before = await lstat(lock);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        if (isLockContention(error)) return false;
+        throw error;
+      }
+      try {
+        await rename(candidate, lock);
+        return true;
+      } catch (publishError) {
+        if (["EEXIST", "ENOTEMPTY"].includes((publishError as NodeJS.ErrnoException).code ?? ""))
+          return false;
+        throw publishError;
+      }
+    }
+    if (!before.isDirectory() || (await readdir(lock)).length !== 0) return false;
+    if (Date.now() - before.mtimeMs < LOCK_EMPTY_STALE_MS) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    let after;
+    try {
+      after = await lstat(lock);
+    } catch {
+      return false;
+    }
+    if (
+      !after.isDirectory() ||
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.mtimeMs !== after.mtimeMs ||
+      Date.now() - after.mtimeMs < LOCK_EMPTY_STALE_MS ||
+      (await readdir(lock)).length !== 0
+    )
+      return false;
+    try {
+      await rename(candidate, lock);
+      return true;
+    } catch (error) {
+      if (["EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? ""))
+        return false;
+      throw error;
+    }
+  }
+
+  private async retireLockOwner(lock: string, ownerName: string): Promise<boolean> {
+    const retired = join(this.root, `.lock-retired-${ownerName.slice("owner-".length)}`);
+    try {
+      // Move open readers out of .lock before NFS can leave a .nfs entry there.
+      // Only this generation's unique filename moves, never a successor's directory.
+      await rename(join(lock, ownerName), retired);
+    } catch (error) {
+      if (isLockContention(error)) return false;
+      throw error;
+    }
+    await this.removeLockDirectory(lock);
+    await this.removeRetiredLockOwner(retired, Date.now() + 1_000);
+    return true;
+  }
+
+  private async removeRetiredLockOwner(path: string, deadline: number): Promise<void> {
     for (;;) {
       try {
-        await mkdir(lock, { mode: 0o700 });
-        await writeFile(join(lock, "owner"), token, { mode: 0o600, flag: "wx" });
-        break;
+        await rm(path, { force: true });
+        return;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        try {
-          const info = await stat(lock);
-          if (Date.now() - info.mtimeMs > LOCK_STALE_MS) {
-            const stale = `${lock}.stale-${token}`;
-            await rename(lock, stale);
-            await rm(stale, { recursive: true, force: true });
-            continue;
-          }
-        } catch {}
-        if (Date.now() >= deadline)
-          throw new Error("Timed out acquiring the background-job state lock");
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EBUSY" && !isLockContention(error)) return;
+        if (Date.now() >= deadline) return;
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
     }
-    const heartbeat = setInterval(() => {
-      const now = new Date();
-      void import("node:fs/promises")
-        .then(({ utimes }) => utimes(lock, now, now))
-        .catch(() => undefined);
-    }, 5000);
-    heartbeat.unref();
-    try {
-      return await operation();
-    } finally {
-      clearInterval(heartbeat);
-      try {
-        if ((await readFile(join(lock, "owner"), "utf8")) === token) {
-          const released = `${lock}.released-${token}`;
-          await rename(lock, released);
-          await rm(released, { recursive: true, force: true });
-        }
-      } catch {}
+  }
+
+  private async sweepRetiredLockOwners(): Promise<void> {
+    const deadline = Date.now() + 1_000;
+    const names = await readdir(this.root).catch(() => []);
+    const retired = names.filter((name) => LOCK_RETIRED_PATTERN.test(name)).slice(0, 32);
+    for (const name of retired) {
+      if (Date.now() >= deadline) return;
+      await this.removeRetiredLockOwner(join(this.root, name), deadline);
     }
+  }
+
+  private async removeLockDirectory(lock: string): Promise<void> {
+    const deadline = Date.now() + 1_000;
+    for (;;) {
+      try {
+        await rmdir(lock);
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return;
+        if (code !== "ENOTEMPTY" && code !== "EEXIST" && code !== "EBUSY") return;
+        if (Date.now() >= deadline) return;
+        let entries: string[];
+        try {
+          entries = await readdir(lock);
+        } catch {
+          return;
+        }
+        if (entries.some((name) => !/^\.nfs[0-9a-f]+$/i.test(name))) return;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+  }
+
+  private async hasLockOwner(path: string, owner: LockOwner): Promise<boolean> {
+    try {
+      return (await readFile(path, "utf8")) === `${JSON.stringify(owner)}\n`;
+    } catch {
+      return false;
+    }
+  }
+
+  private async releaseDeadLockOwner(lock: string): Promise<void> {
+    let names: string[];
+    try {
+      names = await readdir(lock);
+    } catch {
+      return;
+    }
+    if (names.length !== 1 || !LOCK_OWNER_PATTERN.test(names[0])) return;
+    const ownerPath = join(lock, names[0]);
+    let owner: LockOwner;
+    let contents: string;
+    try {
+      contents = await readFile(ownerPath, "utf8");
+      owner = JSON.parse(contents) as LockOwner;
+    } catch {
+      return;
+    }
+    if (
+      !owner ||
+      typeof owner.hostname !== "string" ||
+      !owner.hostname.trim() ||
+      typeof owner.machineId !== "string" ||
+      !owner.machineId.trim() ||
+      !Number.isSafeInteger(owner.pid) ||
+      owner.pid < 1 ||
+      typeof owner.token !== "string" ||
+      owner.token !== names[0].slice("owner-".length) ||
+      typeof owner.startToken !== "string" ||
+      !owner.startToken ||
+      typeof owner.bootId !== "string" ||
+      !owner.bootId.trim() ||
+      typeof owner.pidNamespace !== "string" ||
+      !owner.pidNamespace.trim() ||
+      !Number.isSafeInteger(owner.createdAt)
+    )
+      return;
+    const machineId = await readMachineId();
+    if (!machineId || owner.machineId !== machineId) return;
+    const bootId = await readFile("/proc/sys/kernel/random/boot_id", "utf8").catch(() => "");
+    if (!bootId.trim()) return;
+    let dead = owner.bootId !== bootId.trim();
+    if (!dead) {
+      if (owner.hostname !== hostname()) return;
+      const pidNamespace = await readlink("/proc/self/ns/pid").catch(() => "");
+      if (!pidNamespace || owner.pidNamespace !== pidNamespace) return;
+      try {
+        dead = (await processStartToken(owner.pid)) !== owner.startToken;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "ESRCH") {
+          try {
+            process.kill(owner.pid, 0);
+          } catch (probeError) {
+            dead = (probeError as NodeJS.ErrnoException).code === "ESRCH";
+          }
+        }
+      }
+    }
+    if (!dead || (await readFile(ownerPath, "utf8").catch(() => "")) !== contents) return;
+    await this.retireLockOwner(lock, names[0]);
   }
 
   async exists(path: string): Promise<boolean> {
