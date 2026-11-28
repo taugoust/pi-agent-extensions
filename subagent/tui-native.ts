@@ -88,6 +88,38 @@ import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker
 
 const id = (prefix: string) => `${prefix}-${randomBytes(12).toString("hex")}`;
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+function workerSessionId(sessionFile: string): string | undefined {
+  let fd: number;
+  try {
+    fd = openSync(sessionFile, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  try {
+    const bytes = Buffer.alloc(8192);
+    const n = readSync(fd, bytes, 0, bytes.length, 0);
+    const end = bytes.subarray(0, n).indexOf(10);
+    if (end < 0) return undefined;
+    let header: any;
+    try {
+      header = JSON.parse(bytes.subarray(0, end).toString("utf8"));
+    } catch {
+      throw new Error("Invalid native worker session header");
+    }
+    if (
+      !header ||
+      header.type !== "session" ||
+      typeof header.id !== "string" ||
+      !header.id ||
+      header.id.length > 512
+    )
+      throw new Error("Invalid native worker session header");
+    return header.id;
+  } finally {
+    closeSync(fd);
+  }
+}
 type Spec = {
   assignedGoal?: ManagedGoalAssignment;
   name?: string;
@@ -708,6 +740,10 @@ export class TuiNativeManager {
     const cleanup = c.spec.cleanupWorktreesOnReap === true || c.cleanupWorktreeRequested === true;
     if (!c.reaped) {
       const manifest = this.manifest(c);
+      if (manifest?.assignedGoal && !c.workerSessionId) {
+        c.workerSessionId = workerSessionId(manifest.sessionFile);
+        if (c.workerSessionId) this.save(g);
+      }
       if (manifest)
         await this.tmux.reap(manifest, undefined, {
           ...options,
@@ -2004,6 +2040,7 @@ export class TuiNativeManager {
     return {
       spec: structuredClone(c.spec),
       sessionFile: m.sessionFile,
+      sessionId: c.workerSessionId ?? workerSessionId(m.sessionFile) ?? "",
       ownerSessionId: owner,
       taskId: c.taskId,
       childId: c.childId,
