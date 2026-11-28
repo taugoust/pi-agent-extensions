@@ -11,7 +11,10 @@ Workers have two ways to ask a question:
   A model can never answer in the human's place.
 
 `notify_parent` and `subagent operation=prompt` never answer a waiting request.
-Guidance never grants permissions. Permissions keep their own channel.
+Coordinator progress notices wake the parent without creating pending guidance; explicit
+`notify_parent` calls with `requires_guidance=true` and `request_guidance` remain separate.
+Wait reasons are not interpreted as requests. Guidance never grants permissions. Permissions
+keep their own channel.
 
 ## Files
 

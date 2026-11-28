@@ -140,6 +140,54 @@ assert.equal(
   "delivered",
 );
 
+// Progress notices wake idly without entering the guidance queue or header.
+entries = [];
+sessionName = `quiet-progress-${process.pid}`;
+const progressFixture = fixture();
+const quietProgress = installQuietState(progressFixture.pi, 5);
+await progressFixture.emit("session_start");
+quietProgress.enqueue(ctx, {
+  kind: "notification",
+  id: "goal-progress",
+  child_id: "subagent-child-" + "e".repeat(24),
+  message: "Checklist changed",
+  wake_parent: true,
+});
+await pause(80);
+assert.equal(progressFixture.messages.length, 1);
+assert.equal(progressFixture.messages[0].options.triggerTurn, true);
+assert.match(progressFixture.messages[0].message.content, /Coordinator progress changed/);
+assert.doesNotMatch(progressFixture.messages[0].message.content, /Worker guidance is pending/);
+await progressFixture.emit("session_shutdown", { reason: "reload" });
+
+// Progress receipts restore after reload and wait for an active parent to become idle.
+entries = [];
+sessionName = `quiet-progress-reload-${process.pid}`;
+idle = false;
+const busyProgressFixture = fixture();
+const quietBusyProgress = installQuietState(busyProgressFixture.pi, 5);
+await busyProgressFixture.emit("session_start");
+quietBusyProgress.enqueue(ctx, {
+  kind: "notification",
+  id: "goal-progress-reload",
+  child_id: "subagent-child-" + "f".repeat(24),
+  message: "Task status changed",
+  wake_parent: true,
+});
+await pause(40);
+assert.equal(busyProgressFixture.messages.length, 0);
+await busyProgressFixture.emit("session_shutdown", { reason: "reload" });
+const restoredProgressFixture = fixture();
+installQuietState(restoredProgressFixture.pi, 5);
+await restoredProgressFixture.emit("session_start", { reason: "reload" });
+await pause(40);
+assert.equal(restoredProgressFixture.messages.length, 0);
+idle = true;
+await pause(1050);
+assert.equal(restoredProgressFixture.messages.length, 1);
+assert.match(restoredProgressFixture.messages[0].message.content, /Coordinator progress changed/);
+await restoredProgressFixture.emit("session_shutdown", { reason: "reload" });
+
 // Explicit guidance retains separate time-based pacing and is coalesced.
 entries = [];
 sessionName = `quiet-guidance-${process.pid}`;
@@ -158,10 +206,18 @@ quietGuidance.enqueue(ctx, {
   state: "partial",
   requires_guidance: true,
 });
+quietGuidance.enqueue(ctx, {
+  kind: "notification",
+  id: "dual-guidance",
+  child_id: "subagent-child-" + "9".repeat(24),
+  requires_guidance: true,
+  wake_parent: true,
+  message: "Explicit guidance stays on its own lane",
+});
 await pause(80);
 assert.equal(guidance.messages.length, 1, "guidance did not wake the model");
 assert.equal(guidance.messages[0].options.triggerTurn, true);
-assert.equal(guidance.messages[0].message.details.updates.length, 2);
+assert.equal(guidance.messages[0].message.details.updates.length, 3);
 assert.equal(
   guidance.messages[0].message.details.updates.every((u: any) => u.requires_guidance),
   true,

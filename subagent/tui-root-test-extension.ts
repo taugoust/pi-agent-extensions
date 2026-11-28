@@ -1882,11 +1882,19 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.ok(notifications.length > 0, "background completion must notify the parent");
     const goalFile = `${process.env.PI_TUI_ROOT_RESULT!}.goal`;
     const managedGoal = JSON.parse(await readFile(goalFile, "utf8"));
-    function isManagedGoalWait(update: any): boolean {
+    function isManagedGoalProgress(update: any): boolean {
       return (
         update.kind === "notification" &&
-        update.requires_guidance === true &&
+        update.wake_parent === true &&
+        update.requires_guidance !== true &&
         update.child_id === managedGoal.child.childId
+      );
+    }
+    function isManagedGoalWait(update: any): boolean {
+      return (
+        isManagedGoalProgress(update) &&
+        update.message.startsWith("Coordinator report changed.") &&
+        update.message.includes("MANAGED_GOAL_WAIT_REPORT")
       );
     }
     assert.ok(
@@ -1897,21 +1905,23 @@ export default function rootTest(pi: ExtensionAPI) {
           entry.details.updates.every(
             (update: any) =>
               (update.kind === "subagent" && update.completion === true) ||
-              isManagedGoalWait(update) ||
+              isManagedGoalProgress(update) ||
               (update.kind === "notification" &&
                 update.requires_guidance === true &&
                 update.child_id === saved.questionnaireChildId &&
                 update.message.startsWith("Structured human request ")),
           ),
       ),
-      "Routine findings must stay quiet outside human requests and delegated goal waits",
+      "Routine findings must stay quiet outside human requests and coordinator progress wakes",
     );
     const managedWaits = notifications
       .flatMap((entry) => entry.details.updates)
       .filter(isManagedGoalWait);
-    assert.equal(managedWaits.length, 1, "Repeated goal wait reasons must notify only once");
-    assert.ok(managedWaits[0].message.includes("Await deterministic parent steering"));
-    assert.ok(managedWaits[0].message.includes("MANAGED_GOAL_WAIT_REPORT"));
+    assert.equal(
+      managedWaits.length,
+      2,
+      "The initial report and its return after a different report must each wake once",
+    );
     assert.ok(
       entries.some(
         (entry) => entry.type === "custom" && entry.customType === "harness-state-receipt",
