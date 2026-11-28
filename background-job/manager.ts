@@ -175,9 +175,10 @@ export class BackgroundJobManager {
     const shell = await resolveExecutable("bash");
     const environment = snapshotEnvironment();
 
-    return await this.store.withLock(async () => {
+    return await this.store.withLock(async (assertOwned) => {
       const records = await this.list(1000, false);
-      await this.prune(records);
+      await assertOwned();
+      await this.prune(records, assertOwned);
       const active = records.filter(
         (record) =>
           !record.metadata.observed &&
@@ -210,6 +211,7 @@ export class BackgroundJobManager {
         ...(request.infrastructure ? { infrastructure: true } : {}),
         ...(request.verification ? { verification: true as const } : {}),
       };
+      await assertOwned();
       await this.store.create(metadata, request.command, environment);
       const cancelPath = join(this.store.jobDir(id), "cancel-requested");
       let acceptingAbort = true;
@@ -224,14 +226,17 @@ export class BackgroundJobManager {
         if (signal?.aborted) {
           onAbort();
           const cancelled = result("cancelled", null, "start was aborted before launch", "SIGTERM");
+          await assertOwned();
           await this.store.publishResult(id, cancelled);
           throw abortError();
         }
+        await assertOwned();
         const launch = await this.backend.launch(id, cwd, this.store.jobDir(id), shell, {
           placement: request.placement,
           infrastructure: request.infrastructure,
           name: metadata.name,
         });
+        await assertOwned();
         await this.store.writeLaunch(id, launch);
         const cancelled = await this.store.readResult(id);
         if (
@@ -240,6 +245,7 @@ export class BackgroundJobManager {
           (await this.store.exists(join(this.store.jobDir(id), "cancel-requested")))
         ) {
           await this.backend.kill(id, launch).catch(() => undefined);
+          await assertOwned();
           await Promise.all([
             import("node:fs/promises")
               .then(({ rm }) => rm(this.store.path(id, "environment"), { force: true }))
@@ -248,14 +254,17 @@ export class BackgroundJobManager {
               .then(({ rm }) => rm(this.store.path(id, "command"), { force: true }))
               .catch(() => undefined),
           ]);
-          if (!cancelled)
+          if (!cancelled) {
+            await assertOwned();
             await this.store.publishResult(
               id,
               result("cancelled", null, "start was cancelled during launch", "SIGTERM"),
             );
+          }
           if (signal?.aborted) throw abortError();
           return await this.get(id);
         }
+        await assertOwned();
         await writeFile(join(this.store.jobDir(id), "launch-ready"), "ready\n", {
           mode: 0o600,
           flag: "wx",
@@ -265,6 +274,7 @@ export class BackgroundJobManager {
           (await this.store.exists(join(this.store.jobDir(id), "cancel-requested")))
         ) {
           await this.backend.kill(id, launch).catch(() => undefined);
+          await assertOwned();
           await this.store.publishResult(
             id,
             result("cancelled", null, "start was cancelled as its launch gate opened", "SIGTERM"),
@@ -274,6 +284,7 @@ export class BackgroundJobManager {
         }
         return { metadata, launch, status: "running" };
       } catch (error) {
+        await assertOwned();
         await Promise.all([
           import("node:fs/promises")
             .then(({ rm }) => rm(this.store.path(id, "environment"), { force: true }))
@@ -357,7 +368,7 @@ export class BackgroundJobManager {
     };
     // Keep ownership transfer from racing global expiry of a native pane that
     // already has a retained record. Lock order matches start/prune.
-    return await this.store.withLock(() =>
+    return await this.store.withLock((assertOwned) =>
       this.store.withRetentionLock(async () => {
         const records = await this.list(1000);
         const existing =
@@ -409,8 +420,11 @@ export class BackgroundJobManager {
             ownerPid: process.pid,
             ownerToken: await processStartToken(process.pid),
           };
-          if (metadata.pane)
+          if (metadata.pane) {
+            await assertOwned();
             metadata.pane = await claimPane(tmux, pane, randomBytes(16).toString("hex"));
+          }
+          await assertOwned();
           await this.store.replaceMetadata(metadata);
           return await this.get(metadata.id);
         }
@@ -430,6 +444,7 @@ export class BackgroundJobManager {
           };
         }
         const id = `job-${randomBytes(12).toString("hex")}`;
+        await assertOwned();
         const identity = await claimPane(tmux, pane, randomBytes(16).toString("hex"));
         const metadata: JobMetadata = {
           schemaVersion: 1,
@@ -446,6 +461,7 @@ export class BackgroundJobManager {
           pane: identity,
           observed,
         };
+        await assertOwned();
         await this.store.create(metadata, "", Buffer.alloc(0));
         return await this.get(id);
       }),
@@ -482,7 +498,7 @@ export class BackgroundJobManager {
     if (owner.uid !== process.getuid?.() || log.uid !== process.getuid?.() || !log.isFile())
       throw new Error("Adoption requires same-user process and regular log");
     const startToken = await processStartToken(request.pid);
-    return await this.store.withLock(async () => {
+    return await this.store.withLock(async (assertOwned) => {
       const records = await this.list(1000);
       const existing = records.find(
         (r) =>
@@ -510,6 +526,7 @@ export class BackgroundJobManager {
       metadata.shell = "(external)";
       if ((await processStartToken(request.pid)) !== startToken)
         throw new Error("Process identity changed during adoption");
+      await assertOwned();
       await this.store.create(metadata, "", Buffer.alloc(0));
       return { metadata, status: "running" };
     });
@@ -989,7 +1006,7 @@ export class BackgroundJobManager {
     return await this.get(id);
   }
 
-  private async prune(records: JobRecord[]): Promise<void> {
+  private async prune(records: JobRecord[], assertOwned: () => Promise<void>): Promise<void> {
     const terminal = records
       .filter((record) => record.result)
       .sort((a, b) => b.result!.finishedAt.localeCompare(a.result!.finishedAt));
@@ -1003,6 +1020,7 @@ export class BackgroundJobManager {
     // User jobs are handled only by retrieval-based expiry, never quota/age pruning.
     for (const record of expired) {
       try {
+        await assertOwned();
         await this.reap(record.metadata.id);
       } catch {
         /* retain on uncertain identity */
