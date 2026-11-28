@@ -55,7 +55,7 @@ export function approvalTitle(a: ApprovalRequest) {
   return `${kind}: ${target}`;
 }
 
-function approvalActor(a: ApprovalRequest): ApprovalRequest["actor"] {
+export function approvalActor(a: ApprovalRequest): ApprovalRequest["actor"] {
   if (a.actor && typeof a.actor === "object") return a.actor;
   const nested = a.fields?.actor;
   return nested && typeof nested === "object" ? (nested as JsonObject) : undefined;

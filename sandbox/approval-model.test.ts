@@ -12,6 +12,7 @@ import {
 } from "./approval-model.js";
 
 assert.deepEqual(Object.keys(approvalModel).sort(), [
+  "approvalActor",
   "approvalChoices",
   "approvalPresentation",
   "approvalResolutionBody",
