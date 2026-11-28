@@ -1444,6 +1444,7 @@ export class TuiNativeManager {
                       displayName: this.canonicalTitle(c),
                       message: String(data.message ?? "").slice(0, 1000),
                       requires_guidance: data.requires_guidance === true,
+                      ...(data.wake_parent === true ? { wake_parent: true } : {}),
                       through_sequence: event.sequence,
                     };
               if (this.notify && !this.notify(update)) break;

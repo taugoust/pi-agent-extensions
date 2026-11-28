@@ -35,6 +35,7 @@ export type WorkerState = {
   phase: "ready" | "running" | "settled" | "closing";
   receipts: Record<string, WorkerReceipt>;
   events: TuiWorkerEvent[];
+  notificationStates?: Record<string, string>;
   lastReport?: string;
   lastOutcome?: string;
   parentCancelledIdle?: true;
@@ -324,6 +325,11 @@ export class TuiWorkerStore {
       typeof s.sealed !== "boolean" ||
       !Array.isArray(s.events) ||
       s.events.length > 256 ||
+      (s.notificationStates !== undefined &&
+        (!s.notificationStates ||
+          typeof s.notificationStates !== "object" ||
+          Array.isArray(s.notificationStates) ||
+          Object.values(s.notificationStates).some((value) => typeof value !== "string"))) ||
       !s.receipts ||
       typeof s.receipts !== "object" ||
       Array.isArray(s.receipts) ||

@@ -651,9 +651,12 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
       });
       await worker.start();
       if (launchManifest?.assignedGoal) {
-        (globalThis as any).__paeGoalParentNotifyV1 = (message: string) => {
+        (globalThis as any).__paeGoalParentNotifyV1 = (
+          message: string,
+          states: { key: string; revision: string }[],
+        ) => {
           if (!worker || worker.sealed || !allowed()) return false;
-          worker.notification({ message, requires_guidance: true });
+          worker.notification({ message, requires_guidance: false, wake_parent: true }, states);
           return true;
         };
       }

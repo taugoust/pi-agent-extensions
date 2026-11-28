@@ -394,12 +394,43 @@ export class TuiWorkerServer {
     while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
     this.currentLiveText = bytes.subarray(0, end).toString("utf8");
   }
-  /** Records a notification for the parent and returns the ID the parent will retain it under. */
-  notification(data: unknown): string {
+  /** Records a notification, optionally deduplicated by its latest meaningful state. */
+  notification(data: unknown, dedupe?: { key: string; revision: string }[]): string {
+    if (dedupe?.length && dedupe.every((state) => this.hasNotification(state))) return "";
+    if (dedupe && !this.validNotificationStates(dedupe))
+      throw new Error("Invalid notification state identity");
     if ((data as any)?.requires_guidance === true) this.inhibitAutoContinuation();
-    const artifact = this.store.artifact("notification", this.state.sequence + 1, data);
+    const artifact = this.store.artifact(
+      "notification",
+      this.state.sequence + 1,
+      dedupe ? { ...(data as object), dedupe_state: dedupe } : data,
+    );
+    if (dedupe?.length) {
+      this.state.notificationStates ??= {};
+      for (const state of dedupe) this.state.notificationStates[state.key] = state.revision;
+    }
     this.event("notification", { artifact });
     return `${this.manifest.groupId}:${this.manifest.childId}:${this.state.sequence}`;
+  }
+  private hasNotification(state: { key: string; revision: string }): boolean {
+    return this.state.notificationStates?.[state.key] === state.revision;
+  }
+  private validNotificationStates(states: { key: string; revision: string }[]): boolean {
+    if (!states.length || states.length > 16) return false;
+    const keys = new Set<string>();
+    for (const state of states) {
+      if (
+        !state ||
+        typeof state.key !== "string" ||
+        !state.key.length ||
+        state.key.length > 256 ||
+        keys.has(state.key) ||
+        !/^[a-f0-9]{64}$/.test(state.revision)
+      )
+        return false;
+      keys.add(state.key);
+    }
+    return true;
   }
   async outcome(data: unknown, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted)

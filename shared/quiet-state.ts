@@ -6,9 +6,10 @@ import { admitHarnessWake } from "./idle-admission.js";
 // Quiet harness state.
 //
 // Background jobs, subagents and watches report updates here. Routine updates are only
-// recorded as receipts in the session log. Three kinds of update may wake the model:
+// recorded as receipts in the session log. Four kinds of update may wake the model:
 // - completions: a background job or subagent finished (sent only when idle),
 // - watch alerts: a watch has new events (sent only when idle),
+// - progress: coordinator state changed (sent only when idle),
 // - guidance: a worker asks the parent for an answer (paced, may steer).
 // Idle-decision controls are a special kind of guidance that bypasses most gates.
 //
@@ -28,6 +29,8 @@ export type QuietUpdate = {
   displayName?: string;
   message?: string;
   requires_guidance?: boolean;
+  /** Producer-authored meaningful progress notice; wakes without entering guidance. */
+  wake_parent?: boolean;
   /** Authenticated broker identity; supplied only by the owning launch adapter. */
   guidance?: {
     ownerSessionId: string;
@@ -182,6 +185,7 @@ const JOB_COMPLETION_PREFIX =
   "Background job finished. Inspect its output, then reap it when no longer needed.\n";
 const MIXED_COMPLETION_PREFIX =
   "Background work finished. Read each job’s output or subagent’s result, then reap it when no longer needed.\n";
+const PROGRESS_PREFIX = "Coordinator progress changed. Review the retained update.\n";
 /** Opening line of every wake message that contains watch alerts. */
 export const WATCH_ALERT_PREFIX =
   "Watch alert. Read the new events with background_job events, then ack them.\n";
@@ -295,9 +299,15 @@ function hasSequence(data: QuietUpdate): boolean {
 function isWatchAlert(data: QuietUpdate): boolean {
   return data.kind === "watch" && data.requires_guidance !== true && hasSequence(data);
 }
-/** Completions and watch alerts wake the model, but only when it is idle. */
+/** Coordinator progress wakes the model without asking it for guidance. */
+function isProgressNotice(data: QuietUpdate): boolean {
+  return (
+    data.kind === "notification" && data.wake_parent === true && data.requires_guidance !== true
+  );
+}
+/** Completions, watch alerts and progress wait until the parent is idle. */
 function isIdleWake(data: QuietUpdate): boolean {
-  return isCompletion(data) || isWatchAlert(data);
+  return isCompletion(data) || isWatchAlert(data) || isProgressNotice(data);
 }
 /** A worker request that waits for a parent answer. */
 function needsGuidance(data: QuietUpdate): boolean {
@@ -342,10 +352,11 @@ function resolvesControl(request: QuietUpdate, resolution: QuietUpdate): boolean
   );
 }
 /** Gate the existing durable notification queue, not a duplicate wake message.
- * Only batches made entirely of producer-confirmed terminal completions or
- * identity-bound idle-decision controls use automatic compaction admission. */
+ * Producer-confirmed completions, progress and watch alerts, plus authenticated
+ * guidance and idle-decision controls, may use automatic compaction admission. */
 function trustedAutonomousUpdate(data: QuietUpdate): boolean {
   if (isCompletion(data) || isControlRequest(data)) return true;
+  if (isProgressNotice(data)) return !!data.child_id && CHILD_ID_PATTERN.test(data.child_id);
   if (isWatchAlert(data)) return WATCH_ID_PATTERN.test(data.id);
   if (data.requires_guidance !== true) return false;
   const validChild = typeof data.child_id === "string" && CHILD_ID_PATTERN.test(data.child_id);
@@ -363,9 +374,11 @@ function trustedAutonomousUpdate(data: QuietUpdate): boolean {
 
 function completionPrefix(updates: QuietUpdate[]): string {
   const watches = updates.some(isWatchAlert);
-  const finished = updates.filter((u) => !isWatchAlert(u));
-  if (!finished.length) return WATCH_ALERT_PREFIX;
-  return (watches ? WATCH_ALERT_PREFIX : "") + finishedPrefix(finished);
+  const progress = updates.some(isProgressNotice);
+  const finished = updates.filter((u) => !isWatchAlert(u) && !isProgressNotice(u));
+  const prefix = watches ? WATCH_ALERT_PREFIX : "";
+  if (!finished.length) return prefix + (progress ? PROGRESS_PREFIX : "");
+  return prefix + (progress ? PROGRESS_PREFIX : "") + finishedPrefix(finished);
 }
 function finishedPrefix(updates: QuietUpdate[]): string {
   const children = updates.some((u) => u.kind === "subagent"),
@@ -720,7 +733,7 @@ function requeueOpenReceipt(hub: Hub, receipt: QuietStateReceipt): void {
   if (open && wakesModel) hub.pending.set(receipt.key, toItem(receipt.update, receipt.at));
 }
 /** Retained child notifications are operator-visible records. Routine notifications stay
- * retained only; explicit guidance is re-queued until delivered/consumed. */
+ * retained only; guidance and progress wakes are re-queued until delivered/consumed. */
 function requeueRetainedGuidance(hub: Hub, entries: any[]): void {
   for (const entry of entries) {
     const data = isCustomEntry(entry, NOTIFICATION_CUSTOM) ? entry.data?.update : undefined;
@@ -732,7 +745,7 @@ function requeueRetainedGuidance(hub: Hub, entries: any[]): void {
       hub.pending.size >= MAX_PENDING
     )
       continue;
-    if (data.requires_guidance === true) hub.pending.set(item.key, item);
+    if (data.requires_guidance === true || isIdleWake(data)) hub.pending.set(item.key, item);
   }
 }
 
@@ -1687,7 +1700,7 @@ function enqueueUpdate(hub: Hub, data: QuietUpdate, delayMs: number): boolean {
 // Public API
 // ---------------------------------------------------------------------------
 
-/** Routine updates are receipts only; explicit guidance, background terminal completion and new watch events may wake the model. */
+/** Routine updates are receipts only; guidance, completion, watch alerts and progress may wake. */
 export function installQuietState(pi: ExtensionAPI, delayMs = 1000) {
   const writer = Symbol("quiet-harness-writer");
   let source: Hub["guidanceSource"];

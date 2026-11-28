@@ -455,6 +455,11 @@ test("native idle request notifies parent, appears in status, and resolves only 
     const names = new TaskNameStore(directory, manifest);
     await names.claim("Original Review");
     await names.rename("Renamed Review", 1, "pi");
+    worker.notification({
+      message: "Coordinator checklist changed.",
+      requires_guidance: false,
+      wake_parent: true,
+    });
     const pending = worker.requestIdleDecision({
       model: "provider/model",
       idleMinutes: 31,
@@ -471,6 +476,12 @@ test("native idle request notifies parent, appears in status, and resolves only 
     await manager.observe(group, child);
     const guidance = notifications.filter((item) => item.requires_guidance === true);
     assert.equal(guidance.length, 1);
+    const progress = notifications.filter((item) => item.wake_parent === true);
+    assert.equal(progress.length, 1);
+    assert.equal(progress[0].requires_guidance, false);
+    assert.equal(progress[0].message, "Coordinator checklist changed.");
+    assert.equal(progress[0].displayName, "Renamed Review");
+    assert.equal(guidance[0].wake_parent, undefined);
     assert.equal(guidance[0].displayName, "Renamed Review");
     assert.equal(manager.publicGroup(group).children[0].displayName, "Renamed Review");
     assert.match(guidance[0].message, /provider\/model.*31m.*86%/);

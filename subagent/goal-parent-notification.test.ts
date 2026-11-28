@@ -55,8 +55,8 @@ function notifyThroughToolResult(
     },
     () =>
       enabled
-        ? (message) => {
-            server.notification({ message, requires_guidance: true });
+        ? (message, states) => {
+            server.notification({ message, requires_guidance: false, wake_parent: true }, states);
             return true;
           }
         : undefined,
@@ -123,7 +123,7 @@ function parentDelivery(t: any, sessionId: string) {
   return { quiet, ctx, entries, messages, emit };
 }
 
-for (const toolName of ["goal_pr", "goal_wait"]) {
+for (const toolName of ["goal_pr", "goal_wait", "notify_parent"]) {
   test(`${toolName} notification is delivered to the parent and starts a turn`, async (t) => {
     const parent = parentDelivery(t, `goal-notification-${toolName}`);
     const directory = await mkdtemp(join(tmpdir(), "goal-parent-delivery-"));
@@ -140,8 +140,16 @@ for (const toolName of ["goal_pr", "goal_wait"]) {
       const onToolResult = notifyThroughToolResult(server, [
         textMessage("assistant", "Ready for the parent's review"),
       ]);
-      const input = { pr: "github.com/org/repo#7", reason: "Waiting for parent review" };
-      const details = toolName === "goal_pr" ? { prs: [] } : { status: "waiting" };
+      const input: Record<string, any> =
+        toolName === "notify_parent"
+          ? { message: "Explicit coordinator report", requires_guidance: false }
+          : { pr: "github.com/org/repo#7", reason: "Waiting for parent review" };
+      const details =
+        toolName === "goal_pr"
+          ? { prs: [{ ref: input.pr }] }
+          : toolName === "goal_wait"
+            ? { status: "waiting" }
+            : {};
       onToolResult(toolResult(toolName, input, details));
       for (const [index, notification] of notifications(server).entries()) {
         parent.quiet.enqueue(parent.ctx, {
@@ -156,8 +164,11 @@ for (const toolName of ["goal_pr", "goal_wait"]) {
       assert.equal(parent.messages.length, 1);
       assert.equal(parent.messages[0].options.triggerTurn, true);
       const [update] = parent.messages[0].message.details.updates;
-      assert.ok(update.message.includes("Ready for the parent's review"));
-      assert.ok(update.message.includes(toolName === "goal_pr" ? input.pr : input.reason));
+      const expectedReport =
+        toolName === "notify_parent" ? input.message : "Ready for the parent's review";
+      assert.ok(update.message.includes(expectedReport));
+      if (toolName === "goal_pr") assert.ok(update.message.includes(input.pr));
+      if (toolName === "notify_parent") assert.ok(update.message.includes(input.message));
       assert.ok(
         parent.entries.some(
           (entry) =>
@@ -189,10 +200,17 @@ test("tool-result hook stores waking PR notifications", async () => {
     ];
     const onToolResult = notifyThroughToolResult(server, branch);
     onToolResult(
-      toolResult("goal_pr", { pr: "github.com/org/repo#7" }, { prs: [{ ref: "repo#7" }] }),
+      toolResult(
+        "goal_pr",
+        { pr: "https://github.com/org/repo/pull/7" },
+        {
+          prs: [{ ref: "github.com/org/repo#7" }],
+        },
+      ),
     );
     const [notification] = notifications(server);
-    assert.equal(notification.requires_guidance, true);
+    assert.equal(notification.requires_guidance, false);
+    assert.equal(notification.wake_parent, true);
     assert.match(notification.message, /github\.com\/org\/repo#7/);
     assert.match(notification.message, /The PR is ready\./);
   } finally {
@@ -200,7 +218,37 @@ test("tool-result hook stores waking PR notifications", async () => {
   }
 });
 
-test("accepted CI waits wake the parent once and carry reason and latest report", async () => {
+test("automatic progress deduplication survives a worker-server reload", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "goal-parent-reload-"));
+  try {
+    const store = new TuiWorkerStore(directory);
+    store.writeManifest(manifestAt(directory));
+    const adapter = {
+      isIdle: () => true,
+      send() {},
+      abort() {},
+      shutdown() {},
+    };
+    const first = new TuiWorkerServer(store, adapter);
+    const branch = [textMessage("assistant", "PR is ready.")];
+    const pr = toolResult(
+      "goal_pr",
+      { pr: "github.com/org/repo#7" },
+      {
+        prs: [{ ref: "github.com/org/repo#7" }],
+      },
+    );
+    notifyThroughToolResult(first, branch)(pr);
+    const restarted = new TuiWorkerServer(new TuiWorkerStore(directory), adapter);
+    notifyThroughToolResult(restarted, branch)(pr);
+    assert.equal(notifications(restarted).length, 1);
+    assert.equal(Object.keys(restarted.state.notificationStates ?? {}).length, 2);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("accepted waits wake once for a changed report, not a reworded reason", async () => {
   const directory = await mkdtemp(join(tmpdir(), "goal-parent-wait-"));
   try {
     const store = new TuiWorkerStore(directory);
@@ -216,18 +264,111 @@ test("accepted CI waits wake the parent once and carry reason and latest report"
       textMessage("assistant", [{ type: "toolCall", text: "" }]),
     ];
     const onToolResult = notifyThroughToolResult(server, branch);
-    const wait = toolResult(
-      "goal_wait",
-      { reason: "Waiting for CI checks" },
-      { status: "waiting" },
-    );
-    onToolResult(wait);
-    onToolResult(wait);
-    const [notification] = notifications(server);
-    assert.equal(notification.requires_guidance, true);
-    assert.match(notification.message, /Waiting for CI checks/);
-    assert.match(notification.message, /CI is pending/);
+    const wait = (reason: string) => toolResult("goal_wait", { reason }, { status: "waiting" });
+    onToolResult(wait("Waiting for CI checks"));
+    onToolResult(wait("Still waiting on CI"));
     assert.equal(notifications(server).length, 1);
+    assert.equal(notifications(server)[0].requires_guidance, false);
+    assert.equal(notifications(server)[0].wake_parent, true);
+    assert.match(notifications(server)[0].message, /CI is pending/);
+    branch[0] = textMessage("assistant", "CI passed; moving to review.");
+    onToolResult(wait("Waiting for review"));
+    assert.equal(notifications(server).length, 2);
+    branch[0] = textMessage("assistant", "The implementation is complete; CI is pending.");
+    onToolResult(wait("Waiting for review again"));
+    assert.equal(notifications(server).length, 3);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("task text and status changes create distinct automatic progress notices", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "goal-parent-tasks-"));
+  try {
+    const store = new TuiWorkerStore(directory);
+    store.writeManifest(manifestAt(directory));
+    const server = new TuiWorkerServer(store, {
+      isIdle: () => true,
+      send() {},
+      abort() {},
+      shutdown() {},
+    });
+    const branch: unknown[] = [];
+    const onToolResult = notifyThroughToolResult(server, branch);
+    const update = (text: string, status: string) =>
+      toolResult("update_progress", {}, { steps: [{ id: "task-1", text, status }] });
+    onToolResult(update("Implement routing", "in_progress"));
+    assert.match(notifications(server)[0].message, /Implement routing \(in_progress\)/);
+    onToolResult(update("Implement routing", "in_progress"));
+    onToolResult(
+      toolResult(
+        "goal_manage",
+        { action: "update" },
+        {
+          goal: { tasks: [{ id: "task-1", text: "Implement routing", status: "in_progress" }] },
+        },
+      ),
+    );
+    onToolResult(
+      toolResult(
+        "goal_manage",
+        { action: "status" },
+        {
+          goal: { tasks: [{ id: "task-1", text: "Changed by inspection", status: "completed" }] },
+        },
+      ),
+    );
+    onToolResult(update("Implement the routing chain", "in_progress"));
+    onToolResult(update("Implement the routing chain", "completed"));
+    assert.equal(notifications(server).length, 3);
+    assert.ok(notifications(server).every((item) => item.wake_parent));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("routine explicit reports wake once, while real guidance stays separate", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "goal-parent-explicit-report-"));
+  try {
+    const store = new TuiWorkerStore(directory);
+    store.writeManifest(manifestAt(directory));
+    const server = new TuiWorkerServer(store, {
+      isIdle: () => true,
+      send() {},
+      abort() {},
+      shutdown() {},
+    });
+    const branch = [textMessage("assistant", "Older assistant summary.")];
+    const onToolResult = notifyThroughToolResult(server, branch);
+    const report = (message: string, requires_guidance = false) =>
+      toolResult("notify_parent", { message, requires_guidance }, {});
+    onToolResult(report("Checklist is now verified."));
+    branch.push(
+      textMessage("assistant", [
+        {
+          type: "toolCall",
+          id: "report-call",
+          name: "notify_parent",
+          arguments: { message: "Checklist is now verified.", requires_guidance: false },
+        },
+      ]),
+    );
+    branch.push({
+      type: "message",
+      message: {
+        role: "toolResult",
+        toolName: "notify_parent",
+        toolCallId: "report-call",
+        isError: false,
+      },
+    });
+    onToolResult(report("Checklist is now verified."));
+    onToolResult(report("Checklist is now verified.", true));
+    onToolResult(toolResult("goal_wait", { reason: "Waiting for review" }, { status: "waiting" }));
+    assert.equal(notifications(server).length, 1);
+    assert.equal(notifications(server)[0].wake_parent, true);
+    assert.equal(notifications(server)[0].requires_guidance, false);
+    assert.match(notifications(server)[0].message, /Checklist is now verified/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -244,7 +385,8 @@ test("rejected waits, PR removal, and tool errors do not notify", async () => {
       abort() {},
       shutdown() {},
     });
-    const onToolResult = notifyThroughToolResult(server, []);
+    const branch = [textMessage("assistant", "This rejected wait must stay quiet.")];
+    const onToolResult = notifyThroughToolResult(server, branch);
     onToolResult(toolResult("goal_wait", { reason: "Waiting for CI" }, { status: "active" }));
     onToolResult(toolResult("goal_wait", { reason: "Waiting for CI" }, {}, true));
     onToolResult(toolResult("goal_pr", { pr: "org/repo#7", remove: true }, { prs: [] }));
@@ -324,7 +466,8 @@ test("reports skip empty assistant turns and fit byte limits with Unicode heads"
     assert.ok(Buffer.byteLength(notification.message) <= 1000);
     assert.match(notification.message, /Useful opening 🧪/);
     assert.match(notification.message, /truncated/);
-    assert.equal(notification.requires_guidance, true);
+    assert.equal(notification.requires_guidance, false);
+    assert.equal(notification.wake_parent, true);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
