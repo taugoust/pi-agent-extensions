@@ -1773,7 +1773,9 @@ The order is:
 
 Automatic answers are always "approve once"; Pi never grants a session scope,
 so every later request is checked again. Subagent requests are judged against
-the subagent's own cwd. Each automatic answer is shown as a notification, sent to AgentSH with the reason
+the subagent's own cwd when the approval names the subagent; approvals from
+process execution and the file monitor don't yet (taugoust/agentsh#4), so the
+worktree rule matches on the path alone. Each automatic answer is shown as a notification, sent to AgentSH with the reason
 `auto-approved in Pi (<source>): <reason>`, and appended (with classifier "ask"
 results) to `<agentDir>/sandbox/auto-approvals.jsonl`.
 
